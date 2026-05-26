@@ -10,7 +10,8 @@ import (
 
 	_ "embed"
 
-	_ "modernc.org/sqlite"
+	// Import the SQLite driver.
+	_ "github.com/mattn/go-sqlite3"
 
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/audit"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/command"
@@ -59,7 +60,7 @@ func Open(ctx context.Context, path string) (*Repository, error) {
 	if path == "" {
 		return nil, errors.New("database path must not be empty")
 	}
-	db, err := sql.Open("sqlite", path)
+	db, err := sql.Open("sqlite3", path)
 	if err != nil {
 		return nil, fmt.Errorf("open SQLite database: %w", err)
 	}

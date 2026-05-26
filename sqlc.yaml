@@ -9,3 +9,13 @@ sql:
         out: "internal/zulipbot/storage/db"
         emit_json_tags: false
         emit_empty_slices: true
+  - engine: "sqlite"
+    schema: "internal/channelgroup/db/schema.sql"
+    queries: "internal/channelgroup/db/query.sql"
+    gen:
+      go:
+        package: "db"
+        out: "internal/channelgroup/db"
+        sql_package: "database/sql"
+        emit_interface: true
+        emit_json_tags: true
