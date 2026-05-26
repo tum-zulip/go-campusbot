@@ -143,7 +143,6 @@ func TestZulipSourceRegisterToleratesUnknownResponseFields(t *testing.T) {
 			wantLastEventID: 43,
 		},
 	} {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 

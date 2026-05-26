@@ -1,4 +1,4 @@
-package command
+package command_test
 
 import (
 	"context"
@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"github.com/tum-zulip/go-zulip/zulip"
+
+	"github.com/tum-zulip/go-campusbot/internal/zulipbot/command"
 )
 
 // staticRoleProvider implements RoleProvider with a fixed role (or error).
@@ -15,22 +17,22 @@ type staticRoleProvider struct {
 	err  error
 }
 
-func (p staticRoleProvider) RoleFor(_ context.Context, _ Actor) (zulip.Role, error) {
+func (p staticRoleProvider) RoleFor(_ context.Context, _ command.Actor) (zulip.Role, error) {
 	return p.role, p.err
 }
 
 // buildHelpTestRegistry builds a registry with one command per permission level
 // plus a "role" command that has OwnerUsage set (to mirror real bot behaviour).
-func buildHelpTestRegistry(t *testing.T) *Registry {
+func buildHelpTestRegistry(t *testing.T) *command.Registry {
 	t.Helper()
-	registry := NewRegistry()
+	registry := command.NewRegistry()
 
-	mustRegister := func(meta Metadata) {
+	mustRegister := func(meta command.Metadata) {
 		t.Helper()
-		if err := registry.Register(HandlerFunc{
+		if err := registry.Register(command.HandlerFunc{
 			Meta: meta,
-			Fn: func(ctx context.Context, req Request) (Result, error) {
-				return Result{Content: "ok"}, nil
+			Fn: func(_ context.Context, _ command.Request) (command.Result, error) {
+				return command.Result{Content: "ok"}, nil
 			},
 		}); err != nil {
 			t.Fatalf("Register(%q) failed: %v", meta.Name, err)
@@ -38,46 +40,46 @@ func buildHelpTestRegistry(t *testing.T) *Registry {
 	}
 
 	// Public — everyone.
-	mustRegister(Metadata{
+	mustRegister(command.Metadata{
 		Name:       "status",
 		Summary:    "Show bot status.",
 		Usage:      "status",
-		Permission: PermOpen,
+		Permission: command.PermOpen,
 	})
 
 	// Admin — admin or owner.
-	mustRegister(Metadata{
+	mustRegister(command.Metadata{
 		Name:       "config",
 		Summary:    "Read or update bot configuration.",
 		Usage:      "config <list|get|set>",
-		Permission: PermAdmin,
+		Permission: command.PermAdmin,
 	})
 
 	// Admin with owner-only subcommand.
-	mustRegister(Metadata{
+	mustRegister(command.Metadata{
 		Name:       "role",
 		Summary:    "Manage user roles.",
 		Usage:      "role <list|get <user-id>>",
 		OwnerUsage: "role <list|get <user-id>|set <user-id> <role>>",
-		Permission: PermAdmin,
+		Permission: command.PermAdmin,
 	})
 
 	// Owner only.
-	mustRegister(Metadata{
+	mustRegister(command.Metadata{
 		Name:       "restart",
 		Summary:    "Gracefully restart the bot process.",
 		Usage:      "restart",
-		Permission: PermOwner,
+		Permission: command.PermOwner,
 	})
 
 	return registry
 }
 
 // runHelp calls HelpHandler.Handle with the given actor and optional args.
-func runHelp(t *testing.T, h *HelpHandler, actor Actor, args ...string) (string, error) {
+func runHelp(t *testing.T, h *command.HelpHandler, actor command.Actor, args ...string) (string, error) {
 	t.Helper()
-	result, err := h.Handle(context.Background(), Request{
-		Invocation: Invocation{Name: "help", Args: args},
+	result, err := h.Handle(context.Background(), command.Request{
+		Invocation: command.Invocation{Name: "help", Args: args},
 		Actor:      actor,
 	})
 	return result.Content, err
@@ -89,9 +91,9 @@ func TestHelpNoneUserSeesOnlyPublicCommands(t *testing.T) {
 	t.Parallel()
 
 	registry := buildHelpTestRegistry(t)
-	h := NewHelpHandler(registry, staticRoleProvider{role: zulip.RoleMember})
+	h := command.NewHelpHandler(registry, staticRoleProvider{role: zulip.RoleMember})
 
-	out, err := runHelp(t, h, Actor{UserID: 1})
+	out, err := runHelp(t, h, command.Actor{UserID: 1})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -114,9 +116,9 @@ func TestHelpAdminSeesAdminCommandsNotOwnerOnly(t *testing.T) {
 	t.Parallel()
 
 	registry := buildHelpTestRegistry(t)
-	h := NewHelpHandler(registry, staticRoleProvider{role: zulip.RoleAdmin})
+	h := command.NewHelpHandler(registry, staticRoleProvider{role: zulip.RoleAdmin})
 
-	out, err := runHelp(t, h, Actor{UserID: 2})
+	out, err := runHelp(t, h, command.Actor{UserID: 2})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -144,9 +146,9 @@ func TestHelpOwnerSeesAllCommandsAndOwnerUsage(t *testing.T) {
 	t.Parallel()
 
 	registry := buildHelpTestRegistry(t)
-	h := NewHelpHandler(registry, staticRoleProvider{role: zulip.RoleOwner})
+	h := command.NewHelpHandler(registry, staticRoleProvider{role: zulip.RoleOwner})
 
-	out, err := runHelp(t, h, Actor{UserID: 3})
+	out, err := runHelp(t, h, command.Actor{UserID: 3})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -175,9 +177,9 @@ func TestHelpPermissionLookupFailureShowsOnlyPublicCommands(t *testing.T) {
 	t.Parallel()
 
 	registry := buildHelpTestRegistry(t)
-	h := NewHelpHandler(registry, staticRoleProvider{err: errors.New("db connection lost")})
+	h := command.NewHelpHandler(registry, staticRoleProvider{err: errors.New("db connection lost")})
 
-	out, err := runHelp(t, h, Actor{UserID: 99})
+	out, err := runHelp(t, h, command.Actor{UserID: 99})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -200,9 +202,9 @@ func TestHelpNilRoleProviderShowsOnlyPublicCommands(t *testing.T) {
 	t.Parallel()
 
 	registry := buildHelpTestRegistry(t)
-	h := NewHelpHandler(registry, nil)
+	h := command.NewHelpHandler(registry, nil)
 
-	out, err := runHelp(t, h, Actor{UserID: 1})
+	out, err := runHelp(t, h, command.Actor{UserID: 1})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -221,14 +223,14 @@ func TestHelpNoneUserUnknownCommandDoesNotLeakRestrictedName(t *testing.T) {
 	t.Parallel()
 
 	registry := buildHelpTestRegistry(t)
-	h := NewHelpHandler(registry, staticRoleProvider{role: zulip.RoleMember})
+	h := command.NewHelpHandler(registry, staticRoleProvider{role: zulip.RoleMember})
 
 	// "restart" exists but member user cannot see it — must get "Unknown command".
-	_, err := runHelp(t, h, Actor{UserID: 1}, "restart")
+	_, err := runHelp(t, h, command.Actor{UserID: 1}, "restart")
 	if err == nil {
 		t.Fatal("expected error for restricted command lookup by member user")
 	}
-	var userErr UserError
+	var userErr command.UserError
 	if !errors.As(err, &userErr) {
 		t.Fatalf("expected UserError, got %T: %v", err, err)
 	}
@@ -245,14 +247,14 @@ func TestHelpAdminUnknownCommandDoesNotLeakOwnerOnly(t *testing.T) {
 	t.Parallel()
 
 	registry := buildHelpTestRegistry(t)
-	h := NewHelpHandler(registry, staticRoleProvider{role: zulip.RoleAdmin})
+	h := command.NewHelpHandler(registry, staticRoleProvider{role: zulip.RoleAdmin})
 
 	// "restart" is owner-only — admin must get "Unknown command", not its details.
-	_, err := runHelp(t, h, Actor{UserID: 2}, "restart")
+	_, err := runHelp(t, h, command.Actor{UserID: 2}, "restart")
 	if err == nil {
 		t.Fatal("expected error for owner-only command lookup by admin")
 	}
-	var userErr UserError
+	var userErr command.UserError
 	if !errors.As(err, &userErr) {
 		t.Fatalf("expected UserError, got %T: %v", err, err)
 	}
@@ -265,9 +267,9 @@ func TestHelpOwnerCanLookUpRestartDetails(t *testing.T) {
 	t.Parallel()
 
 	registry := buildHelpTestRegistry(t)
-	h := NewHelpHandler(registry, staticRoleProvider{role: zulip.RoleOwner})
+	h := command.NewHelpHandler(registry, staticRoleProvider{role: zulip.RoleOwner})
 
-	out, err := runHelp(t, h, Actor{UserID: 3}, "restart")
+	out, err := runHelp(t, h, command.Actor{UserID: 3}, "restart")
 	if err != nil {
 		t.Fatalf("owner should be able to look up restart, got error: %v", err)
 	}
@@ -280,9 +282,9 @@ func TestHelpAdminCanLookUpRoleDetails(t *testing.T) {
 	t.Parallel()
 
 	registry := buildHelpTestRegistry(t)
-	h := NewHelpHandler(registry, staticRoleProvider{role: zulip.RoleAdmin})
+	h := command.NewHelpHandler(registry, staticRoleProvider{role: zulip.RoleAdmin})
 
-	out, err := runHelp(t, h, Actor{UserID: 2}, "role")
+	out, err := runHelp(t, h, command.Actor{UserID: 2}, "role")
 	if err != nil {
 		t.Fatalf("admin should be able to look up role details, got error: %v", err)
 	}

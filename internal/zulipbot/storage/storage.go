@@ -20,6 +20,9 @@ import (
 
 const currentSchemaVersion = 1
 
+// CurrentSchemaVersion exposes the expected schema version for tests.
+const CurrentSchemaVersion = currentSchemaVersion
+
 const schemaBaselineName = "development baseline"
 
 const restartStatusInProgress = "in_progress"
@@ -66,25 +69,33 @@ func Open(ctx context.Context, path string) (*Repository, error) {
 	}
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
+	repo, err := New(ctx, db)
+	if err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return repo, nil
+}
+
+func New(ctx context.Context, db *sql.DB) (*Repository, error) {
+	if db == nil {
+		return nil, errors.New("database connection must not be nil")
+	}
 	repo := &Repository{
 		db:      db,
 		queries: storagedb.New(db),
 		now:     func() time.Time { return time.Now().UTC() },
 	}
 	if _, err := repo.db.ExecContext(ctx, "PRAGMA foreign_keys = ON"); err != nil {
-		_ = repo.db.Close()
 		return nil, fmt.Errorf("enable SQLite foreign keys: %w", err)
 	}
 	if _, err := repo.db.ExecContext(ctx, "PRAGMA busy_timeout = 5000"); err != nil {
-		_ = repo.db.Close()
 		return nil, fmt.Errorf("configure SQLite busy timeout: %w", err)
 	}
 	if _, err := repo.db.ExecContext(ctx, "PRAGMA journal_mode = WAL"); err != nil {
-		_ = repo.db.Close()
 		return nil, fmt.Errorf("enable SQLite WAL journal mode: %w", err)
 	}
 	if err := repo.Migrate(ctx); err != nil {
-		_ = repo.db.Close()
 		return nil, err
 	}
 	return repo, nil
@@ -95,6 +106,18 @@ func (repo *Repository) Close() error {
 		return nil
 	}
 	return repo.db.Close()
+}
+
+// SetNowForTest overrides the clock used by the repository.
+func (repo *Repository) SetNowForTest(now func() time.Time) {
+	if repo == nil {
+		return
+	}
+	if now == nil {
+		repo.now = func() time.Time { return time.Now().UTC() }
+		return
+	}
+	repo.now = now
 }
 
 func (repo *Repository) Migrate(ctx context.Context) error {
@@ -149,7 +172,7 @@ func (repo *Repository) SetConfigValue(ctx context.Context, change ConfigChange)
 	if change.Key == "" {
 		return errors.New("config key must not be empty")
 	}
-	return repo.withTx(ctx, func(q *storagedb.Queries) error {
+	return repo.WithTx(ctx, func(q *storagedb.Queries) error {
 		now := repo.now()
 		if err := q.SetConfigValue(ctx, storagedb.SetConfigValueParams{
 			Key:             change.Key,
@@ -247,7 +270,7 @@ func (repo *Repository) CleanupProcessedMessages(
 	maxRows int,
 ) (int64, error) {
 	var deleted int64
-	err := repo.withTx(ctx, func(q *storagedb.Queries) error {
+	err := repo.WithTx(ctx, func(q *storagedb.Queries) error {
 		if retention > 0 {
 			count, err := q.DeleteExpiredProcessedMessages(ctx, formatTime(repo.now().Add(-retention)))
 			if err != nil {
@@ -291,7 +314,7 @@ func (repo *Repository) CreateRestartRequest(ctx context.Context, request Restar
 	}
 
 	var id int64
-	err = repo.withTx(ctx, func(q *storagedb.Queries) error {
+	err = repo.WithTx(ctx, func(q *storagedb.Queries) error {
 		if err := q.CreateRestartRequest(ctx, storagedb.CreateRestartRequestParams{
 			RequestedByUserID: request.RequestedByUserID,
 			RequestMessageID:  request.RequestMessageID,
@@ -404,7 +427,7 @@ func (repo *Repository) AuditRecords(ctx context.Context) ([]audit.Record, error
 }
 
 func (repo *Repository) RecordAudit(ctx context.Context, record audit.Record) error {
-	return repo.withTx(ctx, func(q *storagedb.Queries) error {
+	return repo.WithTx(ctx, func(q *storagedb.Queries) error {
 		return repo.recordAuditTx(ctx, q, record)
 	})
 }
@@ -430,7 +453,8 @@ func (repo *Repository) recordAuditTx(ctx context.Context, q *storagedb.Queries,
 	return nil
 }
 
-func (repo *Repository) withTx(ctx context.Context, fn func(*storagedb.Queries) error) error {
+// WithTx runs fn inside a transaction.
+func (repo *Repository) WithTx(ctx context.Context, fn func(*storagedb.Queries) error) error {
 	tx, err := repo.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin SQLite transaction: %w", err)

@@ -1,14 +1,16 @@
-package command
+package command_test
 
 import (
 	"errors"
 	"testing"
+
+	"github.com/tum-zulip/go-campusbot/internal/zulipbot/command"
 )
 
 func TestParserParsesDirectMessageCommand(t *testing.T) {
 	t.Parallel()
 
-	invocation, err := Parse(`config set command_prefix "!bot"`)
+	invocation, err := command.Parse(`config set command_prefix "!bot"`)
 	if err != nil {
 		t.Fatalf("Parse() failed: %v", err)
 	}
@@ -29,7 +31,7 @@ func TestParserParsesDirectMessageCommand(t *testing.T) {
 func TestParserHandlesLeadingAndTrailingWhitespace(t *testing.T) {
 	t.Parallel()
 
-	invocation, err := Parse("  restart  ")
+	invocation, err := command.Parse("  restart  ")
 	if err != nil {
 		t.Fatalf("Parse() failed: %v", err)
 	}
@@ -52,8 +54,8 @@ func TestParserIgnoresEmptyAndWhitespaceOnlyMessages(t *testing.T) {
 	for _, input := range tests {
 		t.Run(input, func(t *testing.T) {
 			t.Parallel()
-			_, err := Parse(input)
-			if !errors.Is(err, ErrNotCommand) {
+			_, err := command.Parse(input)
+			if !errors.Is(err, command.ErrNotCommand) {
 				t.Fatalf("Parse(%q) error = %v, want ErrNotCommand", input, err)
 			}
 		})
@@ -75,8 +77,8 @@ func TestParserRejectsMalformedCommands(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			_, err := Parse(tt.input)
-			if !errors.Is(err, ErrMalformed) {
+			_, err := command.Parse(tt.input)
+			if !errors.Is(err, command.ErrMalformed) {
 				t.Fatalf("Parse(%q) error = %v, want ErrMalformed", tt.input, err)
 			}
 		})
@@ -100,7 +102,7 @@ func TestParserParsesMultiWordCommands(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
 			t.Parallel()
-			invocation, err := Parse(tt.input)
+			invocation, err := command.Parse(tt.input)
 			if err != nil {
 				t.Fatalf("Parse(%q) failed: %v", tt.input, err)
 			}
@@ -123,7 +125,7 @@ func TestParserUnknownCommandNameIsStillParsed(t *testing.T) {
 	t.Parallel()
 
 	// Unknown commands (e.g., 'hello') are parsed successfully; the router handles them.
-	invocation, err := Parse("hello world")
+	invocation, err := command.Parse("hello world")
 	if err != nil {
 		t.Fatalf("Parse() failed: %v", err)
 	}

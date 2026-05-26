@@ -1,6 +1,7 @@
 package command
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"unicode"
@@ -24,7 +25,7 @@ func Parse(content string) (Invocation, error) {
 
 	parts, err := splitArgs(trimmed)
 	if err != nil {
-		return Invocation{}, fmt.Errorf("%w: %v", ErrMalformed, err)
+		return Invocation{}, fmt.Errorf("%w: %w", ErrMalformed, err)
 	}
 	if len(parts) == 0 {
 		return Invocation{}, ErrNotCommand
@@ -109,10 +110,10 @@ func splitArgs(value string) ([]string, error) {
 	}
 
 	if escaped {
-		return nil, fmt.Errorf("trailing escape character")
+		return nil, errors.New("trailing escape character")
 	}
 	if quote != 0 {
-		return nil, fmt.Errorf("unterminated quoted argument")
+		return nil, errors.New("unterminated quoted argument")
 	}
 	if inToken {
 		flush()

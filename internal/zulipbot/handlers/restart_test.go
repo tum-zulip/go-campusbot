@@ -1,4 +1,4 @@
-package handlers
+package handlers_test
 
 import (
 	"context"
@@ -8,13 +8,14 @@ import (
 	"github.com/tum-zulip/go-zulip/zulip"
 
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/command"
+	"github.com/tum-zulip/go-campusbot/internal/zulipbot/handlers"
 )
 
 func TestRestartHandlerSchedulesOnlyAfterAcknowledgementHook(t *testing.T) {
 	t.Parallel()
 
 	service := &fakeRestartService{}
-	handler := NewRestartHandler(service)
+	handler := handlers.NewRestartHandler(service)
 	result, err := handler.Handle(context.Background(), command.Request{
 		Invocation: command.Invocation{Name: "restart"},
 		Actor:      command.Actor{UserID: 10},
@@ -58,7 +59,7 @@ func TestRestartHandlerAcknowledgementContentIsPresent(t *testing.T) {
 	t.Parallel()
 
 	service := &fakeRestartService{}
-	handler := NewRestartHandler(service)
+	handler := handlers.NewRestartHandler(service)
 	result, err := handler.Handle(context.Background(), command.Request{
 		Invocation: command.Invocation{Name: "restart"},
 		Actor:      command.Actor{UserID: 10},
@@ -80,7 +81,7 @@ func TestRestartHandlerAcknowledgementContentIsPresent(t *testing.T) {
 func TestRestartMetadataIsOwnerOnly(t *testing.T) {
 	t.Parallel()
 
-	handler := NewRestartHandler(&fakeRestartService{})
+	handler := handlers.NewRestartHandler(&fakeRestartService{})
 	meta := handler.Metadata()
 	if meta.Permission != zulip.RoleOwner {
 		t.Errorf("restart permission = %v, want %v (zulip.RoleOwner)", meta.Permission, zulip.RoleOwner)
@@ -96,7 +97,7 @@ func TestRestartRouterOwnerCanRun(t *testing.T) {
 
 	ctx := context.Background()
 	registry := command.NewRegistry()
-	if err := registry.Register(NewRestartHandler(&fakeRestartService{})); err != nil {
+	if err := registry.Register(handlers.NewRestartHandler(&fakeRestartService{})); err != nil {
 		t.Fatalf("Register() failed: %v", err)
 	}
 
@@ -128,7 +129,7 @@ func TestRestartRouterAdminCannotRun(t *testing.T) {
 
 	ctx := context.Background()
 	registry := command.NewRegistry()
-	if err := registry.Register(NewRestartHandler(&fakeRestartService{})); err != nil {
+	if err := registry.Register(handlers.NewRestartHandler(&fakeRestartService{})); err != nil {
 		t.Fatalf("Register() failed: %v", err)
 	}
 
@@ -157,7 +158,7 @@ func TestRestartRouterNoneUserCannotRun(t *testing.T) {
 
 	ctx := context.Background()
 	registry := command.NewRegistry()
-	if err := registry.Register(NewRestartHandler(&fakeRestartService{})); err != nil {
+	if err := registry.Register(handlers.NewRestartHandler(&fakeRestartService{})); err != nil {
 		t.Fatalf("Register() failed: %v", err)
 	}
 
@@ -185,7 +186,7 @@ func TestRestartNotVisibleInHelpForAdmin(t *testing.T) {
 	t.Parallel()
 
 	registry := command.NewRegistry()
-	if err := registry.Register(NewRestartHandler(&fakeRestartService{})); err != nil {
+	if err := registry.Register(handlers.NewRestartHandler(&fakeRestartService{})); err != nil {
 		t.Fatalf("Register() failed: %v", err)
 	}
 	if err := registry.Register(command.HandlerFunc{
@@ -221,7 +222,7 @@ func TestRestartNotVisibleInHelpForNoneUser(t *testing.T) {
 	t.Parallel()
 
 	registry := command.NewRegistry()
-	if err := registry.Register(NewRestartHandler(&fakeRestartService{})); err != nil {
+	if err := registry.Register(handlers.NewRestartHandler(&fakeRestartService{})); err != nil {
 		t.Fatalf("Register() failed: %v", err)
 	}
 

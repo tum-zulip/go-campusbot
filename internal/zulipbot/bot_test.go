@@ -12,6 +12,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tum-zulip/go-zulip/zulip"
+	zulipclient "github.com/tum-zulip/go-zulip/zulip/client"
+
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot"
 )
 
@@ -51,10 +54,8 @@ func TestBotSendChannelMessage(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
 
-	bot, err := zulipbot.New(ctx, zulipbot.RuntimeConfig{
-		RCPath: rcPath,
-		Logger: newTestLogger(),
-	})
+	client := newTestZulipClient(t, rcPath)
+	bot, err := zulipbot.New(ctx, client)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
@@ -124,4 +125,22 @@ func writeZulipRCAt(t *testing.T, path string, site string) {
 
 func newTestLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+func newTestZulipClient(t *testing.T, rcPath string) zulipclient.Client {
+	t.Helper()
+
+	rc, err := zulip.NewZulipRCFromFile(rcPath)
+	if err != nil {
+		t.Fatalf("load zuliprc: %v", err)
+	}
+	client, err := zulipclient.NewClient(
+		rc,
+		zulipclient.WithClientName(zulipbot.DefaultClientName),
+		zulipclient.WithLogger(newTestLogger()),
+	)
+	if err != nil {
+		t.Fatalf("create Zulip client: %v", err)
+	}
+	return client
 }

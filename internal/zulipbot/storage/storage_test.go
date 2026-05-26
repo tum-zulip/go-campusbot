@@ -1,4 +1,4 @@
-package storage
+package storage_test
 
 import (
 	"context"
@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/command"
+	"github.com/tum-zulip/go-campusbot/internal/zulipbot/storage"
 	storagedb "github.com/tum-zulip/go-campusbot/internal/zulipbot/storage/db"
 )
 
@@ -22,11 +23,11 @@ func TestRepositoryPersistsCoreState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SchemaVersion() failed: %v", err)
 	}
-	if version != currentSchemaVersion {
-		t.Fatalf("schema version = %d, want %d", version, currentSchemaVersion)
+	if version != storage.CurrentSchemaVersion {
+		t.Fatalf("schema version = %d, want %d", version, storage.CurrentSchemaVersion)
 	}
 
-	if err := repo.SetConfigValue(ctx, ConfigChange{Key: "command_prefix", Value: "!bot", ActorUserID: 10}); err != nil {
+	if err := repo.SetConfigValue(ctx, storage.ConfigChange{Key: "command_prefix", Value: "!bot", ActorUserID: 10}); err != nil {
 		t.Fatalf("SetConfigValue() failed: %v", err)
 	}
 	value, ok, err := repo.ConfigValue(ctx, "command_prefix")
@@ -37,7 +38,7 @@ func TestRepositoryPersistsCoreState(t *testing.T) {
 		t.Fatalf("config value = %q, ok=%v", value, ok)
 	}
 
-	if err := repo.SaveEventQueueState(ctx, EventQueueState{QueueID: "queue-1", LastEventID: 42}); err != nil {
+	if err := repo.SaveEventQueueState(ctx, storage.EventQueueState{QueueID: "queue-1", LastEventID: 42}); err != nil {
 		t.Fatalf("SaveEventQueueState() failed: %v", err)
 	}
 	state, ok, err := repo.EventQueueState(ctx)
@@ -68,7 +69,7 @@ func TestRepositoryTracksRestartRequests(t *testing.T) {
 	defer repo.Close()
 
 	target := command.ReplyTarget{Kind: command.ReplyKindDirect, UserIDs: []int64{10, 11}}
-	id, err := repo.CreateRestartRequest(ctx, RestartRequest{
+	id, err := repo.CreateRestartRequest(ctx, storage.RestartRequest{
 		RequestedByUserID: 10,
 		RequestMessageID:  200,
 		Target:            target,
@@ -116,7 +117,7 @@ func TestRepositorySchemaInitializationIsIdempotent(t *testing.T) {
 
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "bot.sqlite3")
-	repo, err := Open(ctx, path)
+	repo, err := storage.Open(ctx, path)
 	if err != nil {
 		t.Fatalf("Open() failed: %v", err)
 	}
@@ -127,7 +128,7 @@ func TestRepositorySchemaInitializationIsIdempotent(t *testing.T) {
 		t.Fatalf("Close() failed: %v", err)
 	}
 
-	reopened, err := Open(ctx, path)
+	reopened, err := storage.Open(ctx, path)
 	if err != nil {
 		t.Fatalf("Open() after migration failed: %v", err)
 	}
@@ -136,8 +137,8 @@ func TestRepositorySchemaInitializationIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SchemaVersion() failed: %v", err)
 	}
-	if version != currentSchemaVersion {
-		t.Fatalf("schema version = %d, want %d", version, currentSchemaVersion)
+	if version != storage.CurrentSchemaVersion {
+		t.Fatalf("schema version = %d, want %d", version, storage.CurrentSchemaVersion)
 	}
 }
 
@@ -149,11 +150,11 @@ func TestRepositoryTransactionRollbackOnFailure(t *testing.T) {
 	defer repo.Close()
 
 	errBoom := errors.New("boom")
-	err := repo.withTx(ctx, func(q *storagedb.Queries) error {
+	err := repo.WithTx(ctx, func(q *storagedb.Queries) error {
 		if err := q.SetConfigValue(ctx, storagedb.SetConfigValueParams{
 			Key:       "command_prefix",
 			Value:     "!rollback",
-			UpdatedAt: formatTime(time.Now().UTC()),
+			UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano),
 		}); err != nil {
 			return err
 		}
@@ -179,13 +180,13 @@ func TestRepositoryCleansProcessedMessages(t *testing.T) {
 	defer repo.Close()
 
 	base := time.Date(2026, 5, 25, 12, 0, 0, 0, time.UTC)
-	repo.now = func() time.Time { return base }
+	repo.SetNowForTest(func() time.Time { return base })
 	for i := int64(1); i <= 5; i++ {
 		if err := repo.MarkMessageProcessed(ctx, i); err != nil {
 			t.Fatalf("MarkMessageProcessed(%d) failed: %v", i, err)
 		}
 	}
-	repo.now = func() time.Time { return base.Add(48 * time.Hour) }
+	repo.SetNowForTest(func() time.Time { return base.Add(48 * time.Hour) })
 	for i := int64(6); i <= 8; i++ {
 		if err := repo.MarkMessageProcessed(ctx, i); err != nil {
 			t.Fatalf("MarkMessageProcessed(%d) failed: %v", i, err)
@@ -217,10 +218,10 @@ func TestRepositoryCleansProcessedMessages(t *testing.T) {
 	}
 }
 
-func openTestRepository(t *testing.T) *Repository {
+func openTestRepository(t *testing.T) *storage.Repository {
 	t.Helper()
 
-	repo, err := Open(context.Background(), filepath.Join(t.TempDir(), "bot.sqlite3"))
+	repo, err := storage.Open(context.Background(), filepath.Join(t.TempDir(), "bot.sqlite3"))
 	if err != nil {
 		t.Fatalf("Open() failed: %v", err)
 	}

@@ -74,6 +74,14 @@ func DefaultDefinitions() map[string]Definition {
 	return result
 }
 
+// AddDefinition registers or overrides a configuration definition.
+func (service *Service) AddDefinition(def Definition) {
+	if service == nil || def.Key == "" {
+		return
+	}
+	service.definitions[def.Key] = def
+}
+
 func (service *Service) Bool(ctx context.Context, key string) (bool, error) {
 	value, err := service.GetRaw(ctx, key)
 	if err != nil {

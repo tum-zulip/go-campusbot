@@ -20,7 +20,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tum-zulip/go-zulip/zulip"
+	zulipclient "github.com/tum-zulip/go-zulip/zulip/client"
+
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot"
+	"github.com/tum-zulip/go-campusbot/internal/zulipbot/storage"
 )
 
 func requireZulipRC(t *testing.T) string {
@@ -41,12 +45,15 @@ func TestIntegration_QueueRegistrationAndCleanup(t *testing.T) {
 	defer cancel()
 
 	dbPath := t.TempDir() + "/integration.sqlite3"
-
-	app, err := zulipbot.NewApp(ctx, zulipbot.RuntimeConfig{
-		RCPath: rcPath,
-		DBPath: dbPath,
-	})
+	client := newIntegrationClient(t, rcPath)
+	repo, err := storage.Open(ctx, dbPath)
 	if err != nil {
+		t.Fatalf("storage.Open failed: %v", err)
+	}
+
+	app, err := zulipbot.NewApp(ctx, zulipbot.RuntimeConfig{}, client, repo)
+	if err != nil {
+		_ = repo.Close()
 		t.Fatalf("NewApp failed: %v", err)
 	}
 	defer func() {
@@ -70,7 +77,8 @@ func TestIntegration_EventQueueRegisterAndCheck(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	bot, err := zulipbot.New(ctx, zulipbot.RuntimeConfig{RCPath: rcPath})
+	client := newIntegrationClient(t, rcPath)
+	bot, err := zulipbot.New(ctx, client)
 	if err != nil {
 		t.Fatalf("New bot failed: %v", err)
 	}
@@ -98,4 +106,18 @@ func TestIntegration_EventQueueRegisterAndCheck(t *testing.T) {
 		t.Fatalf("Delete failed: %v", err)
 	}
 	t.Log("queue deleted successfully")
+}
+
+func newIntegrationClient(t *testing.T, rcPath string) zulipclient.Client {
+	t.Helper()
+
+	rc, err := zulip.NewZulipRCFromFile(rcPath)
+	if err != nil {
+		t.Fatalf("load zuliprc: %v", err)
+	}
+	client, err := zulipclient.NewClient(rc, zulipclient.WithClientName(zulipbot.DefaultClientName))
+	if err != nil {
+		t.Fatalf("create Zulip client: %v", err)
+	}
+	return client
 }

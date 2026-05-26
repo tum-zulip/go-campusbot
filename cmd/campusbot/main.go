@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -12,12 +14,19 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/tum-zulip/go-zulip/zulip"
+	zulipclient "github.com/tum-zulip/go-zulip/zulip/client"
+
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot"
+	"github.com/tum-zulip/go-campusbot/internal/zulipbot/storage"
 )
 
 const (
 	exitSuccess = 0
 	exitFailure = 1
+
+	defaultRCPath = "zuliprc"
+	defaultDBPath = "campusbot.sqlite3"
 
 	startupTimeout     = 15 * time.Second
 	restartMarkTimeout = 5 * time.Second
@@ -26,8 +35,8 @@ const (
 type execFunc func(path string, argv []string, env []string) error
 
 var (
-	zuliprc       = envOrDefault("ZULIPRC", zulipbot.DefaultRCPath)
-	dbPath        = envOrDefault("CAMPUSBOT_DB_PATH", zulipbot.DefaultDBPath)
+	zuliprc       = envOrDefault("ZULIPRC", defaultRCPath)
+	dbPath        = envOrDefault("CAMPUSBOT_DB_PATH", defaultDBPath)
 	pollTimeout   = 90 * time.Second
 	dryRunRestart bool
 	logLevel      = envOrDefault("CAMPUSBOT_LOG_LEVEL", "info")
@@ -64,14 +73,37 @@ func main() {
 	defer stop()
 
 	startupCtx, cancelStartup := context.WithTimeout(runCtx, startupTimeout)
-	app, err := zulipbot.NewApp(startupCtx, zulipbot.RuntimeConfig{
-		RCPath:      zuliprc,
-		DBPath:      dbPath,
-		Logger:      logger,
-		PollTimeout: pollTimeout,
-	})
+	client, err := newZulipClient(zuliprc, logger)
+	if err != nil {
+		cancelStartup()
+		logger.ErrorContext(runCtx, "failed to create Zulip client", "error", err)
+		os.Exit(exitFailure)
+	}
+	db, err := openDatabase(dbPath)
+	if err != nil {
+		cancelStartup()
+		logger.ErrorContext(runCtx, "failed to open database", "error", err)
+		os.Exit(exitFailure)
+	}
+	repo, err := storage.New(startupCtx, db)
+	if err != nil {
+		cancelStartup()
+		_ = db.Close()
+		logger.ErrorContext(runCtx, "failed to open database", "error", err)
+		os.Exit(exitFailure)
+	}
+	app, err := zulipbot.NewApp(
+		startupCtx,
+		zulipbot.RuntimeConfig{
+			Logger:      logger,
+			PollTimeout: pollTimeout,
+		},
+		client,
+		repo,
+	)
 	cancelStartup()
 	if err != nil {
+		_ = repo.Close()
 		logger.ErrorContext(runCtx, "failed to initialize Zulip bot", "error", err)
 		os.Exit(exitFailure)
 	}
@@ -102,6 +134,35 @@ func main() {
 		logger.ErrorContext(runCtx, "failed to restart process", "error", restartErr)
 		os.Exit(exitFailure)
 	}
+}
+
+func newZulipClient(rcPath string, logger *slog.Logger) (zulipclient.Client, error) {
+	rc, err := zulip.NewZulipRCFromFile(rcPath)
+	if err != nil {
+		return nil, fmt.Errorf("load Zulip config %q: %w", rcPath, err)
+	}
+	client, err := zulipclient.NewClient(
+		rc,
+		zulipclient.WithClientName(zulipbot.DefaultClientName),
+		zulipclient.WithLogger(logger),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create Zulip client: %w", err)
+	}
+	return client, nil
+}
+
+func openDatabase(path string) (*sql.DB, error) {
+	if path == "" {
+		return nil, errors.New("database path must not be empty")
+	}
+	db, err := sql.Open("sqlite3", path)
+	if err != nil {
+		return nil, fmt.Errorf("open SQLite database: %w", err)
+	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	return db, nil
 }
 
 func restartProcess(ctx context.Context, app *zulipbot.App, exec execFunc) error {

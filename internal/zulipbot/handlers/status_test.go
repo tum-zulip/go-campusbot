@@ -1,4 +1,4 @@
-package handlers
+package handlers_test
 
 import (
 	"context"
@@ -8,6 +8,7 @@ import (
 	"github.com/tum-zulip/go-zulip/zulip"
 
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/command"
+	"github.com/tum-zulip/go-campusbot/internal/zulipbot/handlers"
 )
 
 type fakeStatusProvider struct {
@@ -51,7 +52,7 @@ func TestStatusHandlerPublicOutputForNonAdmin(t *testing.T) {
 	t.Parallel()
 
 	provider := &fakeStatusProvider{uptimeSeconds: 90, accepting: true}
-	handler := NewStatusHandler(provider, &fakeAdminChecker{allowUserID: 99})
+	handler := handlers.NewStatusHandler(provider, &fakeAdminChecker{allowUserID: 99})
 
 	result, err := handler.Handle(context.Background(), command.Request{
 		Invocation: command.Invocation{Name: "status"},
@@ -78,7 +79,7 @@ func TestStatusHandlerAdminSeesDetailedOutput(t *testing.T) {
 		lastEventID:   42,
 		queueOK:       true,
 	}
-	handler := NewStatusHandler(provider, &fakeAdminChecker{allowUserID: 10})
+	handler := handlers.NewStatusHandler(provider, &fakeAdminChecker{allowUserID: 10})
 
 	result, err := handler.Handle(context.Background(), command.Request{
 		Invocation: command.Invocation{Name: "status"},

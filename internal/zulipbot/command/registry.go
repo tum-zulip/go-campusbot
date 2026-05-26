@@ -2,6 +2,7 @@ package command
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 
@@ -65,7 +66,7 @@ func NewRegistry() *Registry {
 
 func (registry *Registry) Register(handler Handler) error {
 	if handler == nil {
-		return fmt.Errorf("command handler must not be nil")
+		return errors.New("command handler must not be nil")
 	}
 	meta := handler.Metadata()
 	if !validCommandName(meta.Name) {

@@ -1,4 +1,4 @@
-package zulipmock
+package zulipmock_test
 
 import (
 	"context"
@@ -10,28 +10,33 @@ import (
 	"github.com/tum-zulip/go-zulip/zulip"
 	"github.com/tum-zulip/go-zulip/zulip/api/channels"
 	"github.com/tum-zulip/go-zulip/zulip/client"
+
+	"github.com/tum-zulip/go-campusbot/internal/zulipmock"
 )
 
 func TestClientImplementsUpstreamClient(t *testing.T) {
-	var _ client.Client = NewClient()
+	var _ client.Client = zulipmock.NewClient()
 }
 
-func TestBuilderExecuteReturnsNil(t *testing.T) {
-	resp, httpResp, err := NewClient().SendMessage(context.Background()).Execute()
-	if resp != nil {
-		t.Fatalf("response = %#v, want nil", resp)
+func TestBuilderExecuteReturnsMessageID(t *testing.T) {
+	resp, httpResp, err := zulipmock.NewClient().SendMessage(context.Background()).Execute()
+	if err != nil {
+		t.Fatalf("error = %v", err)
 	}
 	if httpResp != nil {
 		t.Fatalf("http response = %#v, want nil", httpResp)
 	}
-	if err != nil {
-		t.Fatalf("error = %v, want nil", err)
+	if resp == nil {
+		t.Fatalf("response = nil, want non-nil")
+	}
+	if resp.ID == 0 {
+		t.Fatalf("message ID = %d, want non-zero", resp.ID)
 	}
 }
 
 func TestUserGroupsAreInMemoryPerClient(t *testing.T) {
 	ctx := context.Background()
-	client := NewClient()
+	client := zulipmock.NewClient()
 
 	created, _, err := client.CreateUserGroup(ctx).
 		Name("testers").
@@ -83,7 +88,7 @@ func TestUserGroupsAreInMemoryPerClient(t *testing.T) {
 		t.Fatalf("GetUserGroupMembers after deactivate error = %v", err)
 	}
 
-	otherClient := NewClient()
+	otherClient := zulipmock.NewClient()
 	_, _, err = otherClient.GetUserGroupMembers(ctx, created.GroupID).Execute()
 	if err == nil {
 		t.Fatalf("second client found first client's user group")
@@ -92,10 +97,10 @@ func TestUserGroupsAreInMemoryPerClient(t *testing.T) {
 
 func TestFailNextFailsOneMatchingRequest(t *testing.T) {
 	ctx := context.Background()
-	client := NewClient()
+	client := zulipmock.NewClient()
 	injected := errors.New("injected subscribe failure")
 
-	client.FailNext(OperationSubscribe, injected)
+	client.FailNext(zulipmock.OperationSubscribe, injected)
 	_, _, err := client.Subscribe(ctx).
 		Subscriptions([]channels.SubscriptionRequest{{Name: "course"}}).
 		Principals(zulip.UserIDsAsPrincipals(10)).
@@ -120,7 +125,7 @@ func TestSerializeRequestsForcesOperationOrder(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
-	client := NewClient()
+	client := zulipmock.NewClient()
 	_, _, err := client.Subscribe(ctx).
 		Subscriptions([]channels.SubscriptionRequest{{Name: "course"}}).
 		Principals(zulip.UserIDsAsPrincipals(10)).
@@ -129,7 +134,7 @@ func TestSerializeRequestsForcesOperationOrder(t *testing.T) {
 		t.Fatalf("setup Subscribe error = %v", err)
 	}
 
-	serialization := client.SerializeRequests(OperationGetSubscribers, OperationSubscribe)
+	serialization := client.SerializeRequests(zulipmock.OperationGetSubscribers, zulipmock.OperationSubscribe)
 	defer client.ClearRequestSerialization()
 
 	errs := make(chan error, 2)
@@ -174,7 +179,7 @@ func TestSerializeRequestsForcesOperationOrder(t *testing.T) {
 
 func TestSubscribeUnsubscribeAndGetChannelByID(t *testing.T) {
 	ctx := context.Background()
-	client := NewClient()
+	client := zulipmock.NewClient()
 	description := "Course channel"
 
 	resp, _, err := client.Subscribe(ctx).

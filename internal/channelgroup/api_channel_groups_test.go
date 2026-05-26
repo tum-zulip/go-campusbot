@@ -1,4 +1,4 @@
-package channelgroup
+package channelgroup_test
 
 import (
 	"context"
@@ -14,10 +14,13 @@ import (
 
 	_ "github.com/mattn/go-sqlite3"
 
+	"github.com/tum-zulip/go-campusbot/internal/channelgroup"
 	"github.com/tum-zulip/go-campusbot/internal/zulipmock"
 	"github.com/tum-zulip/go-zulip/zulip"
 	"github.com/tum-zulip/go-zulip/zulip/api/channels"
 )
+
+const zulipAdministratorsSystemGroupID int64 = 2
 
 func newTestDatabase(t *testing.T) *sql.DB {
 	t.Helper()
@@ -43,17 +46,31 @@ func newTestDatabase(t *testing.T) *sql.DB {
 	return database
 }
 
-func newTestClient(t *testing.T, base zulipmock.Client) Client {
+func newTestClient(t *testing.T, base zulipmock.Client) channelgroup.Client {
 	t.Helper()
 
 	database := newTestDatabase(t)
-	return NewClient(base, database, WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))))
+	return channelgroup.NewClient(
+		base,
+		database,
+		channelgroup.WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
+	)
 }
 
-func newInitializedTestClient(t *testing.T, ctx context.Context, base zulipmock.Client, database *sql.DB) Client {
+func newInitializedTestClient(
+	t *testing.T,
+	ctx context.Context,
+	base zulipmock.Client,
+	database *sql.DB,
+) channelgroup.Client {
 	t.Helper()
 
-	client, err := NewInitializedClient(ctx, base, database, WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))))
+	client, err := channelgroup.NewInitializedClient(
+		ctx,
+		base,
+		database,
+		channelgroup.WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
+	)
 	if err != nil {
 		t.Fatalf("NewInitializedClient error = %v", err)
 	}
@@ -129,7 +146,11 @@ func TestInitializeChannelGroupsRemovesChannelsMissingFromBotSubscriptions(t *te
 	ctx := context.Background()
 	base := zulipmock.NewClient()
 	database := newTestDatabase(t)
-	client := NewClient(base, database, WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))))
+	client := channelgroup.NewClient(
+		base,
+		database,
+		channelgroup.WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
+	)
 	channelIDs := createMockBotSubscribedChannels(t, ctx, base, 2)
 
 	created, _, err := client.CreateChannelGroup(ctx).
@@ -167,7 +188,11 @@ func TestInitializeChannelGroupsRemovesGroupWhenBackingUserGroupMissing(t *testi
 	ctx := context.Background()
 	base := zulipmock.NewClient()
 	database := newTestDatabase(t)
-	client := NewClient(base, database, WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))))
+	client := channelgroup.NewClient(
+		base,
+		database,
+		channelgroup.WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
+	)
 	channelIDs := createMockBotSubscribedChannels(t, ctx, base, 1)
 
 	created, _, err := client.CreateChannelGroup(ctx).
@@ -1017,7 +1042,7 @@ func createMockChannels(t *testing.T, ctx context.Context, client zulipmock.Clie
 	t.Helper()
 
 	ids := make([]int64, 0, count)
-	for i := 0; i < count; i++ {
+	for i := range count {
 		name := mockChannelName(i + 1)
 		_, _, err := client.Subscribe(ctx).
 			Subscriptions([]channels.SubscriptionRequest{{Name: name}}).

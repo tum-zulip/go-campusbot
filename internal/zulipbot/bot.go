@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
-	"log/slog"
 
 	"github.com/tum-zulip/go-zulip/zulip"
 	zulipclient "github.com/tum-zulip/go-zulip/zulip/client"
@@ -15,7 +13,6 @@ import (
 
 const (
 	DefaultClientName = "go-campusbot"
-	DefaultRCPath     = "zuliprc"
 
 	errContentRequired = "content must not be empty"
 	errContextRequired = "context must not be nil"
@@ -26,35 +23,15 @@ type Bot struct {
 	ownUser zulip.User
 }
 
-func New(ctx context.Context, cfg RuntimeConfig) (*Bot, error) {
+func New(ctx context.Context, client zulipclient.Client) (*Bot, error) {
 	if ctx == nil {
 		return nil, errors.New(errContextRequired)
 	}
-	if cfg.RCPath == "" {
-		cfg.RCPath = DefaultRCPath
-	}
-	if cfg.ClientName == "" {
-		cfg.ClientName = DefaultClientName
-	}
-	if cfg.Logger == nil {
-		cfg.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	if client == nil {
+		return nil, errors.New("zulip client must not be nil")
 	}
 
-	rc, err := zulip.NewZulipRCFromFile(cfg.RCPath)
-	if err != nil {
-		return nil, fmt.Errorf("load Zulip config %q: %w", cfg.RCPath, err)
-	}
-
-	apiClient, err := zulipclient.NewClient(
-		rc,
-		zulipclient.WithClientName(cfg.ClientName),
-		zulipclient.WithLogger(cfg.Logger),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("create Zulip client: %w", err)
-	}
-
-	ownUserResp, _, err := apiClient.GetOwnUser(ctx).Execute()
+	ownUserResp, _, err := client.GetOwnUser(ctx).Execute()
 	if err != nil {
 		return nil, fmt.Errorf("get own Zulip user: %w", err)
 	}
@@ -63,7 +40,7 @@ func New(ctx context.Context, cfg RuntimeConfig) (*Bot, error) {
 	}
 
 	return &Bot{
-		client:  apiClient,
+		client:  client,
 		ownUser: ownUserResp.User,
 	}, nil
 }

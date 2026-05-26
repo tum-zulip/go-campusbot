@@ -8,18 +8,15 @@ import (
 	"sync/atomic"
 	"time"
 
+	zulipclient "github.com/tum-zulip/go-zulip/zulip/client"
+
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/command"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/configsvc"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/handlers"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/storage"
 )
 
-const DefaultDBPath = "campusbot.sqlite3"
-
 type RuntimeConfig struct {
-	RCPath      string
-	DBPath      string
-	ClientName  string
 	Logger      *slog.Logger
 	PollTimeout time.Duration
 }
@@ -36,26 +33,17 @@ type App struct {
 	startedAt time.Time
 }
 
-func NewApp(ctx context.Context, cfg RuntimeConfig) (*App, error) {
+const closeDeregisterTimeout = 5 * time.Second
+
+func NewApp(ctx context.Context, cfg RuntimeConfig, client zulipclient.Client, repo *storage.Repository) (*App, error) {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
-	if cfg.DBPath == "" {
-		cfg.DBPath = DefaultDBPath
+	if repo == nil {
+		return nil, errors.New("storage repository must not be nil")
 	}
 
-	repo, err := storage.Open(ctx, cfg.DBPath)
-	if err != nil {
-		return nil, err
-	}
-	cleanup := true
-	defer func() {
-		if cleanup {
-			_ = repo.Close()
-		}
-	}()
-
-	bot, err := New(ctx, cfg)
+	bot, err := New(ctx, client)
 	if err != nil {
 		return nil, err
 	}
@@ -85,25 +73,7 @@ func NewApp(ctx context.Context, cfg RuntimeConfig) (*App, error) {
 		startedAt: startedAt,
 	}
 
-	registry := command.NewRegistry()
-	for _, h := range []command.Handler{
-		command.NewHelpHandler(registry, bot),
-		handlers.NewConfigHandler(configService),
-		handlers.NewRestartHandler(app),
-		handlers.NewStatusHandler(app, bot),
-	} {
-		if err = registry.Register(h); err != nil {
-			return nil, err
-		}
-	}
-
-	router, err := command.NewRouter(command.RouterConfig{
-		Registry:  registry,
-		Auth:      bot,
-		Auditor:   repo,
-		Accepting: restart.Accepting,
-		Logger:    cfg.Logger,
-	})
+	router, err := app.initCommands(configService)
 	if err != nil {
 		return nil, err
 	}
@@ -124,8 +94,31 @@ func NewApp(ctx context.Context, cfg RuntimeConfig) (*App, error) {
 
 	app.loop = loop
 
-	cleanup = false
 	return app, nil
+}
+
+func (app *App) initCommands(configService *configsvc.Service) (*command.Router, error) {
+	registry := command.NewRegistry()
+	if err := registry.Register(command.NewHelpHandler(registry, app.bot)); err != nil {
+		return nil, err
+	}
+	if err := registry.Register(handlers.NewConfigHandler(configService)); err != nil {
+		return nil, err
+	}
+	if err := registry.Register(handlers.NewRestartHandler(app)); err != nil {
+		return nil, err
+	}
+	if err := registry.Register(handlers.NewStatusHandler(app, app.bot)); err != nil {
+		return nil, err
+	}
+
+	return command.NewRouter(command.RouterConfig{
+		Registry:  registry,
+		Auth:      app.bot,
+		Auditor:   app.repo,
+		Accepting: app.restart.Accepting,
+		Logger:    app.logger,
+	})
 }
 
 func (app *App) Run(ctx context.Context) (bool, error) {
@@ -156,7 +149,7 @@ func (app *App) Close() error {
 		return nil
 	}
 	if app.loop != nil && !app.restart.RestartRequested() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), closeDeregisterTimeout)
 		defer cancel()
 		if err := app.loop.DeregisterQueue(ctx); err != nil {
 			app.logger.WarnContext(ctx, "failed to deregister Zulip event queue", "error", err)
@@ -200,6 +193,14 @@ func (app *App) RestartPending(ctx context.Context) (bool, error) {
 // Accepting implements handlers.StatusProvider.
 func (app *App) Accepting() bool {
 	return app.restart.Accepting()
+}
+
+// RestartRequested reports whether a restart was scheduled.
+func (app *App) RestartRequested() bool {
+	if app == nil || app.restart == nil {
+		return false
+	}
+	return app.restart.RestartRequested()
 }
 
 var (

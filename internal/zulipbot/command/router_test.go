@@ -1,4 +1,4 @@
-package command
+package command_test
 
 import (
 	"context"
@@ -8,21 +8,22 @@ import (
 	"github.com/tum-zulip/go-zulip/zulip"
 
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/audit"
+	"github.com/tum-zulip/go-campusbot/internal/zulipbot/command"
 )
 
 func TestRouterRejectsUnauthorizedCommandAndAudits(t *testing.T) {
 	t.Parallel()
 
-	registry := NewRegistry()
-	err := registry.Register(HandlerFunc{
-		Meta: Metadata{
+	registry := command.NewRegistry()
+	err := registry.Register(command.HandlerFunc{
+		Meta: command.Metadata{
 			Name:       "restart",
 			Usage:      "restart",
-			Permission: PermOwner,
+			Permission: command.PermOwner,
 			Privileged: true,
 		},
-		Fn: func(ctx context.Context, req Request) (Result, error) {
-			return Result{Content: "should not run"}, nil
+		Fn: func(_ context.Context, _ command.Request) (command.Result, error) {
+			return command.Result{Content: "should not run"}, nil
 		},
 	})
 	if err != nil {
@@ -30,7 +31,7 @@ func TestRouterRejectsUnauthorizedCommandAndAudits(t *testing.T) {
 	}
 
 	auditor := &recordingAuditor{}
-	router, err := NewRouter(RouterConfig{
+	router, err := command.NewRouter(command.RouterConfig{
 		Registry: registry,
 		Auth:     denyingAuthorizer{},
 		Auditor:  auditor,
@@ -39,9 +40,9 @@ func TestRouterRejectsUnauthorizedCommandAndAudits(t *testing.T) {
 		t.Fatalf("NewRouter() failed: %v", err)
 	}
 
-	result := router.Route(context.Background(), Request{
-		Invocation: Invocation{Name: "restart"},
-		Actor:      Actor{UserID: 123},
+	result := router.Route(context.Background(), command.Request{
+		Invocation: command.Invocation{Name: "restart"},
+		Actor:      command.Actor{UserID: 123},
 		MessageID:  456,
 	})
 	if result.Content != "permission denied" {
@@ -58,17 +59,17 @@ func TestRouterRejectsUnauthorizedCommandAndAudits(t *testing.T) {
 func TestRouterMapsUserErrorsToResponses(t *testing.T) {
 	t.Parallel()
 
-	registry := NewRegistry()
-	err := registry.Register(HandlerFunc{
-		Meta: Metadata{Name: "config", Usage: "config", Permission: PermOpen},
-		Fn: func(ctx context.Context, req Request) (Result, error) {
-			return Result{}, NewUserError("Usage: `config list`")
+	registry := command.NewRegistry()
+	err := registry.Register(command.HandlerFunc{
+		Meta: command.Metadata{Name: "config", Usage: "config", Permission: command.PermOpen},
+		Fn: func(_ context.Context, _ command.Request) (command.Result, error) {
+			return command.Result{}, command.NewUserError("Usage: `config list`")
 		},
 	})
 	if err != nil {
 		t.Fatalf("Register() failed: %v", err)
 	}
-	router, err := NewRouter(RouterConfig{
+	router, err := command.NewRouter(command.RouterConfig{
 		Registry: registry,
 		Auth:     allowingAuthorizer{},
 	})
@@ -76,7 +77,7 @@ func TestRouterMapsUserErrorsToResponses(t *testing.T) {
 		t.Fatalf("NewRouter() failed: %v", err)
 	}
 
-	result := router.Route(context.Background(), Request{Invocation: Invocation{Name: "config"}})
+	result := router.Route(context.Background(), command.Request{Invocation: command.Invocation{Name: "config"}})
 	if result.Content != "Usage: `config list`" {
 		t.Fatalf("Content = %q", result.Content)
 	}
@@ -91,22 +92,22 @@ func TestRouterEnforcesRealPermissionRolesForAdminCommand(t *testing.T) {
 	auth := fakeAuthorizer{3: zulip.RoleOwner}
 
 	var ran int
-	registry := NewRegistry()
-	if err := registry.Register(HandlerFunc{
-		Meta: Metadata{
+	registry := command.NewRegistry()
+	if err := registry.Register(command.HandlerFunc{
+		Meta: command.Metadata{
 			Name:       "restart",
 			Usage:      "restart",
-			Permission: PermOwner,
+			Permission: command.PermOwner,
 			Privileged: true,
 		},
-		Fn: func(ctx context.Context, req Request) (Result, error) {
+		Fn: func(_ context.Context, _ command.Request) (command.Result, error) {
 			ran++
-			return Result{Content: "ok"}, nil
+			return command.Result{Content: "ok"}, nil
 		},
 	}); err != nil {
 		t.Fatalf("Register() failed: %v", err)
 	}
-	router, err := NewRouter(RouterConfig{
+	router, err := command.NewRouter(command.RouterConfig{
 		Registry: registry,
 		Auth:     auth,
 	})
@@ -117,13 +118,16 @@ func TestRouterEnforcesRealPermissionRolesForAdminCommand(t *testing.T) {
 	for _, userID := range []int64{1, 2, 999} {
 		result := router.Route(
 			ctx,
-			Request{Invocation: Invocation{Name: "restart"}, Actor: Actor{UserID: userID}},
+			command.Request{Invocation: command.Invocation{Name: "restart"}, Actor: command.Actor{UserID: userID}},
 		)
 		if result.Content != "permission denied" {
 			t.Fatalf("user %d content = %q", userID, result.Content)
 		}
 	}
-	result := router.Route(ctx, Request{Invocation: Invocation{Name: "restart"}, Actor: Actor{UserID: 3}})
+	result := router.Route(
+		ctx,
+		command.Request{Invocation: command.Invocation{Name: "restart"}, Actor: command.Actor{UserID: 3}},
+	)
 	if result.Content != "ok" {
 		t.Fatalf("owner content = %q, want ok", result.Content)
 	}
@@ -135,7 +139,7 @@ func TestRouterEnforcesRealPermissionRolesForAdminCommand(t *testing.T) {
 // fakeAuthorizer maps user IDs to Zulip roles; unmapped users get RoleMember.
 type fakeAuthorizer map[int64]zulip.Role
 
-func (f fakeAuthorizer) Check(_ context.Context, actor Actor, minRole zulip.Role) error {
+func (f fakeAuthorizer) Check(_ context.Context, actor command.Actor, minRole zulip.Role) error {
 	if minRole == 0 {
 		return nil
 	}
@@ -146,18 +150,18 @@ func (f fakeAuthorizer) Check(_ context.Context, actor Actor, minRole zulip.Role
 	if role <= minRole {
 		return nil
 	}
-	return ErrDenied
+	return command.ErrDenied
 }
 
 type denyingAuthorizer struct{}
 
-func (denyingAuthorizer) Check(_ context.Context, _ Actor, _ zulip.Role) error {
-	return ErrDenied
+func (denyingAuthorizer) Check(_ context.Context, _ command.Actor, _ zulip.Role) error {
+	return command.ErrDenied
 }
 
 type allowingAuthorizer struct{}
 
-func (allowingAuthorizer) Check(_ context.Context, _ Actor, _ zulip.Role) error {
+func (allowingAuthorizer) Check(_ context.Context, _ command.Actor, _ zulip.Role) error {
 	return nil
 }
 

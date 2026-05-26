@@ -1,4 +1,4 @@
-package handlers
+package handlers_test
 
 import (
 	"context"
@@ -11,6 +11,7 @@ import (
 
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/command"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/configsvc"
+	"github.com/tum-zulip/go-campusbot/internal/zulipbot/handlers"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/storage"
 )
 
@@ -21,7 +22,7 @@ func TestConfigHandlerAdminCanListGetAndSet(t *testing.T) {
 	repo := openHandlerTestRepository(t)
 	defer repo.Close()
 	service := configsvc.NewService(repo, fakeConfigAuth{10: zulip.RoleAdmin})
-	handler := NewConfigHandler(service)
+	handler := handlers.NewConfigHandler(service)
 	actor := command.Actor{UserID: 10}
 
 	setResult, err := handler.Handle(ctx, command.Request{
@@ -69,7 +70,7 @@ func TestConfigHandlerReportsSafeUserErrors(t *testing.T) {
 	repo := openHandlerTestRepository(t)
 	defer repo.Close()
 	service := configsvc.NewService(repo, fakeConfigAuth{10: zulip.RoleAdmin})
-	handler := NewConfigHandler(service)
+	handler := handlers.NewConfigHandler(service)
 
 	_, err := handler.Handle(ctx, command.Request{
 		Invocation: command.Invocation{Name: "config", Args: []string{"get", "does_not_exist"}},
@@ -99,7 +100,7 @@ func TestConfigHandlerFailsClosedWhenPermissionsUnavailable(t *testing.T) {
 	repo := openHandlerTestRepository(t)
 	defer repo.Close()
 	service := configsvc.NewService(repo, failingPermission{})
-	handler := NewConfigHandler(service)
+	handler := handlers.NewConfigHandler(service)
 
 	_, err := handler.Handle(ctx, command.Request{
 		Invocation: command.Invocation{Name: "config", Args: []string{"list"}},
