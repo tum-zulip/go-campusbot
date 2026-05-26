@@ -28,9 +28,12 @@ func TestConfigHandlerAdminCanListGetAndSet(t *testing.T) {
 	actor := model.Actor{UserID: 10}
 
 	setResult, err := handler.Handle(ctx, command.Request{
-		Invocation: command.Invocation{Name: "config", Args: []string{"set", configsvc.KeyRestartStartupNotification, "true"}},
-		Actor:      actor,
-		MessageID:  100,
+		Invocation: command.Invocation{
+			Name: "config",
+			Args: []string{"set", configsvc.KeyRestartStartupNotification, "true"},
+		},
+		Actor:     actor,
+		MessageID: 100,
 	})
 	if err != nil {
 		t.Fatalf("Handle(set) failed: %v", err)
@@ -84,8 +87,11 @@ func TestConfigHandlerReportsSafeUserErrors(t *testing.T) {
 	}
 
 	_, err = handler.Handle(ctx, command.Request{
-		Invocation: command.Invocation{Name: "config", Args: []string{"set", configsvc.KeyRestartStartupNotification, "maybe"}},
-		Actor:      model.Actor{UserID: 10},
+		Invocation: command.Invocation{
+			Name: "config",
+			Args: []string{"set", configsvc.KeyRestartStartupNotification, "maybe"},
+		},
+		Actor: model.Actor{UserID: 10},
 	})
 	if !errors.As(err, &userErr) || !strings.Contains(userErr.Message, "Invalid value") {
 		t.Fatalf("Handle(set invalid) error = %v", err)
@@ -106,7 +112,8 @@ func TestConfigHandlerFailsClosedWhenPermissionsUnavailable(t *testing.T) {
 		Actor:      model.Actor{UserID: 10},
 	})
 	var userErr command.UserError
-	if !errors.As(err, &userErr) || userErr.Message != "I cannot verify permissions right now, so I will not access configuration." {
+	if !errors.As(err, &userErr) ||
+		userErr.Message != "I cannot verify permissions right now, so I will not access configuration." {
 		t.Fatalf("Handle(list) error = %v", err)
 	}
 }

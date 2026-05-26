@@ -100,7 +100,12 @@ func (service *Service) RestartRequested() bool {
 	return service.manager.RestartRequested()
 }
 
-func (service *Service) ScheduleRestart(ctx context.Context, actor model.Actor, messageID int64, target model.ReplyTarget) (int64, bool, error) {
+func (service *Service) ScheduleRestart(
+	ctx context.Context,
+	actor model.Actor,
+	messageID int64,
+	target model.ReplyTarget,
+) (int64, bool, error) {
 	id, err := service.repo.CreateRestartRequest(ctx, storage.RestartRequest{
 		RequestedByUserID: actor.UserID,
 		RequestMessageID:  messageID,
@@ -154,10 +159,21 @@ func (notifier *StartupNotifier) NotifyRestartComplete(ctx context.Context) erro
 		return nil
 	}
 
-	messageID, sendErr := notifier.messenger.SendReply(ctx, request.Target, "Restart complete. Event processing is back online.")
+	messageID, sendErr := notifier.messenger.SendReply(
+		ctx,
+		request.Target,
+		"Restart complete. Event processing is back online.",
+	)
 	if sendErr != nil {
 		if err := notifier.repo.CompleteRestartRequest(ctx, request.ID, 0, sendErr.Error()); err != nil {
-			notifier.logger.WarnContext(ctx, "failed to mark restart notification failure", "restart_request_id", request.ID, "error", err)
+			notifier.logger.WarnContext(
+				ctx,
+				"failed to mark restart notification failure",
+				"restart_request_id",
+				request.ID,
+				"error",
+				err,
+			)
 		}
 		return fmt.Errorf("send restart completion notification: %w", sendErr)
 	}

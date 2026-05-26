@@ -17,11 +17,17 @@ func TestServiceUnknownUserHasNoneRole(t *testing.T) {
 		t.Fatalf("unknown user should be allowed PermissionNone: %v", err)
 	}
 	// Unknown user cannot run PermissionAdmin commands
-	if err := service.Check(context.Background(), model.Actor{UserID: 42}, PermissionAdmin); !errors.Is(err, ErrDenied) {
+	if err := service.Check(context.Background(), model.Actor{UserID: 42}, PermissionAdmin); !errors.Is(
+		err,
+		ErrDenied,
+	) {
 		t.Fatalf("unknown user admin check = %v, want ErrDenied", err)
 	}
 	// Unknown user cannot run PermissionOwner commands
-	if err := service.Check(context.Background(), model.Actor{UserID: 42}, PermissionOwner); !errors.Is(err, ErrDenied) {
+	if err := service.Check(context.Background(), model.Actor{UserID: 42}, PermissionOwner); !errors.Is(
+		err,
+		ErrDenied,
+	) {
 		t.Fatalf("unknown user owner check = %v, want ErrDenied", err)
 	}
 }
@@ -30,7 +36,10 @@ func TestServiceExplicitNoneRoleHasNoPrivilege(t *testing.T) {
 	t.Parallel()
 
 	service := NewService(fakeRoleStore{roles: map[int64]Role{10: RoleNone}}, nil)
-	if err := service.Check(context.Background(), model.Actor{UserID: 10}, PermissionAdmin); !errors.Is(err, ErrDenied) {
+	if err := service.Check(context.Background(), model.Actor{UserID: 10}, PermissionAdmin); !errors.Is(
+		err,
+		ErrDenied,
+	) {
 		t.Fatalf("explicit none role admin check = %v, want ErrDenied", err)
 	}
 }
@@ -42,7 +51,10 @@ func TestServiceAdminCanRunAdminCommands(t *testing.T) {
 	if err := service.Check(context.Background(), model.Actor{UserID: 10}, PermissionAdmin); err != nil {
 		t.Fatalf("admin should be allowed PermissionAdmin: %v", err)
 	}
-	if err := service.Check(context.Background(), model.Actor{UserID: 10}, PermissionOwner); !errors.Is(err, ErrDenied) {
+	if err := service.Check(context.Background(), model.Actor{UserID: 10}, PermissionOwner); !errors.Is(
+		err,
+		ErrDenied,
+	) {
 		t.Fatalf("admin owner check = %v, want ErrDenied", err)
 	}
 }
@@ -75,8 +87,9 @@ func TestServiceStoredOwnerRoleDoesNotGrantOwnerPermission(t *testing.T) {
 		t.Fatalf("RoleFor() error = %v, want ErrPermissionUnavailable", err)
 	}
 
-	if err := service.Check(context.Background(), model.Actor{UserID: 10}, PermissionOwner); !errors.Is(err, ErrPermissionUnavailable) {
-		t.Fatalf("DB owner PermissionOwner = %v, want ErrPermissionUnavailable", err)
+	checkErr := service.Check(context.Background(), model.Actor{UserID: 10}, PermissionOwner)
+	if !errors.Is(checkErr, ErrPermissionUnavailable) {
+		t.Fatalf("DB owner PermissionOwner = %v, want ErrPermissionUnavailable", checkErr)
 	}
 }
 
@@ -142,10 +155,16 @@ func TestServiceFailsClosedWhenRoleStoreFails(t *testing.T) {
 	t.Parallel()
 
 	service := NewService(fakeRoleStore{err: errors.New("database offline")}, nil)
-	if err := service.Check(context.Background(), model.Actor{UserID: 10}, PermissionAdmin); !errors.Is(err, ErrPermissionUnavailable) {
+	if err := service.Check(context.Background(), model.Actor{UserID: 10}, PermissionAdmin); !errors.Is(
+		err,
+		ErrPermissionUnavailable,
+	) {
 		t.Fatalf("Check() error = %v, want ErrPermissionUnavailable", err)
 	}
-	if err := service.Check(context.Background(), model.Actor{UserID: 10}, PermissionOwner); !errors.Is(err, ErrPermissionUnavailable) {
+	if err := service.Check(context.Background(), model.Actor{UserID: 10}, PermissionOwner); !errors.Is(
+		err,
+		ErrPermissionUnavailable,
+	) {
 		t.Fatalf("Check() error = %v, want ErrPermissionUnavailable", err)
 	}
 }
@@ -206,7 +225,10 @@ func TestServiceMissingBotOwnerFailsClosedForOwnerCommands(t *testing.T) {
 	service := NewService(fakeRoleStore{roles: map[int64]Role{}}, fakeOwnerProvider{ownerID: 0})
 
 	// No one can run owner commands
-	if err := service.Check(context.Background(), model.Actor{UserID: 10}, PermissionOwner); !errors.Is(err, ErrDenied) {
+	if err := service.Check(context.Background(), model.Actor{UserID: 10}, PermissionOwner); !errors.Is(
+		err,
+		ErrDenied,
+	) {
 		t.Fatalf("owner command with no owner = %v, want ErrDenied", err)
 	}
 }
@@ -222,7 +244,10 @@ func TestServiceDBAdminCannotRunOwnerCommands(t *testing.T) {
 		t.Fatalf("DB admin PermissionAdmin = %v, want nil", err)
 	}
 	// User 10 is NOT the bot owner (20 is); cannot run owner commands
-	if err := service.Check(context.Background(), model.Actor{UserID: 10}, PermissionOwner); !errors.Is(err, ErrDenied) {
+	if err := service.Check(context.Background(), model.Actor{UserID: 10}, PermissionOwner); !errors.Is(
+		err,
+		ErrDenied,
+	) {
 		t.Fatalf("DB admin PermissionOwner = %v, want ErrDenied", err)
 	}
 }

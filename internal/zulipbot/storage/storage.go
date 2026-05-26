@@ -9,6 +9,7 @@ import (
 	"time"
 
 	_ "embed"
+
 	_ "modernc.org/sqlite"
 
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/audit"
@@ -186,7 +187,12 @@ func (repo *Repository) UserRole(ctx context.Context, userID int64) (permissions
 	return role, true, nil
 }
 
-func (repo *Repository) SetUserRole(ctx context.Context, userID int64, role permissions.Role, grantedByUserID int64) error {
+func (repo *Repository) SetUserRole(
+	ctx context.Context,
+	userID int64,
+	role permissions.Role,
+	grantedByUserID int64,
+) error {
 	if userID <= 0 {
 		return errors.New("user ID must be positive")
 	}
@@ -194,7 +200,9 @@ func (repo *Repository) SetUserRole(ctx context.Context, userID int64, role perm
 		return fmt.Errorf("invalid role %q", role)
 	}
 	if role == permissions.RoleOwner {
-		return errors.New("role 'owner' cannot be stored in the database; the bot owner is determined automatically from the Zulip API")
+		return errors.New(
+			"role 'owner' cannot be stored in the database; the bot owner is determined automatically from the Zulip API",
+		)
 	}
 	return repo.withTx(ctx, func(q *storagedb.Queries) error {
 		if role == permissions.RoleNone {
@@ -326,7 +334,11 @@ func (repo *Repository) MarkMessageProcessed(ctx context.Context, messageID int6
 	return nil
 }
 
-func (repo *Repository) CleanupProcessedMessages(ctx context.Context, retention time.Duration, maxRows int) (int64, error) {
+func (repo *Repository) CleanupProcessedMessages(
+	ctx context.Context,
+	retention time.Duration,
+	maxRows int,
+) (int64, error) {
 	var deleted int64
 	err := repo.withTx(ctx, func(q *storagedb.Queries) error {
 		if retention > 0 {
@@ -433,7 +445,12 @@ func (repo *Repository) LatestActiveRestartRequestID(ctx context.Context) (int64
 	return id, true, nil
 }
 
-func (repo *Repository) CompleteRestartRequest(ctx context.Context, id int64, completionMessageID int64, failure string) error {
+func (repo *Repository) CompleteRestartRequest(
+	ctx context.Context,
+	id int64,
+	completionMessageID int64,
+	failure string,
+) error {
 	if id <= 0 {
 		return errors.New("restart request ID must be positive")
 	}
@@ -504,308 +521,6 @@ func (repo *Repository) recordAuditTx(ctx context.Context, q *storagedb.Queries,
 		return fmt.Errorf("record audit event %q: %w", record.Action, err)
 	}
 	return nil
-}
-
-// RawEvent is a row from raw_events.
-type RawEvent struct {
-	QueueID    string
-	EventID    int64
-	EventType  string
-	ReceivedAt time.Time
-	RawJSON    []byte
-}
-
-// LifecycleKind identifies the type of channel lifecycle event in the persistent queue.
-type LifecycleKind string
-
-const (
-	LifecycleKindChannelCreated         LifecycleKind = "channel_created"
-	LifecycleKindChannelUpdated         LifecycleKind = "channel_updated"
-	LifecycleKindChannelDeleted         LifecycleKind = "channel_deleted"
-	LifecycleKindSubscriptionAdded      LifecycleKind = "subscription_added"
-	LifecycleKindSubscriptionRemoved    LifecycleKind = "subscription_removed"
-	LifecycleKindSubscriptionPeerAdd    LifecycleKind = "subscription_peer_add"
-	LifecycleKindSubscriptionPeerRemove LifecycleKind = "subscription_peer_remove"
-)
-
-// LifecycleStatus is the processing status of a channel lifecycle queue entry.
-type LifecycleStatus string
-
-const (
-	LifecycleStatusPending    LifecycleStatus = "pending"
-	LifecycleStatusProcessing LifecycleStatus = "processing"
-	LifecycleStatusDone       LifecycleStatus = "done"
-	LifecycleStatusFailed     LifecycleStatus = "failed"
-	LifecycleStatusSkipped    LifecycleStatus = "skipped"
-)
-
-// ChannelLifecycleEnqueueItem is an item to insert into the channel lifecycle queue.
-type ChannelLifecycleEnqueueItem struct {
-	LifecycleKind LifecycleKind
-	ChannelID     *int64
-	ChannelName   *string
-	Op            string
-}
-
-// ChannelLifecycleEntry is a row from channel_lifecycle_queue.
-type ChannelLifecycleEntry struct {
-	ID             int64
-	ZulipEventID   int64
-	ZulipEventType string
-	LifecycleKind  LifecycleKind
-	ChannelID      *int64
-	ChannelName    *string
-	Op             string
-	PayloadJSON    []byte
-	Status         LifecycleStatus
-	Attempts       int
-	AvailableAt    time.Time
-	LockedAt       *time.Time
-	LockedBy       string
-	ProcessedAt    *time.Time
-	LastError      string
-	CreatedAt      time.Time
-}
-
-// LifecycleQueueStatusCount is a status count for the lifecycle queue.
-type LifecycleQueueStatusCount struct {
-	Status LifecycleStatus
-	Count  int
-}
-
-// ChannelLifecycleQueue is the interface for the persistent channel lifecycle queue.
-// It is implemented by *Repository. Defined here so future workers can depend on
-// an interface rather than the concrete Repository type.
-type ChannelLifecycleQueue interface {
-	ListPendingChannelLifecycleEntries(ctx context.Context, now time.Time, limit int) ([]ChannelLifecycleEntry, error)
-	ClaimChannelLifecycleEntry(ctx context.Context, id int64, lockedBy string) (bool, error)
-	MarkChannelLifecycleEntryDone(ctx context.Context, id int64) error
-	MarkChannelLifecycleEntryFailed(ctx context.Context, id int64, errMsg string) error
-	MarkChannelLifecycleEntrySkipped(ctx context.Context, id int64) error
-	ResetChannelLifecycleEntryToPending(ctx context.Context, id int64) (bool, error)
-	ResetAllFailedChannelLifecycleEntries(ctx context.Context) (int64, error)
-	GetChannelLifecycleEntry(ctx context.Context, id int64) (ChannelLifecycleEntry, bool, error)
-	ChannelLifecycleQueueStatusCounts(ctx context.Context) ([]LifecycleQueueStatusCount, error)
-	CleanupChannelLifecycleEntries(ctx context.Context, retention time.Duration) (int64, error)
-}
-
-// Compile-time check that *Repository satisfies ChannelLifecycleQueue.
-var _ ChannelLifecycleQueue = (*Repository)(nil)
-
-// StoreRawEvent inserts a raw event into the raw_events table.
-// It uses INSERT OR IGNORE so duplicate events are silently skipped.
-func (repo *Repository) StoreRawEvent(ctx context.Context, event RawEvent) error {
-	if err := repo.queries.StoreRawEvent(ctx, storagedb.StoreRawEventParams{
-		QueueID:    event.QueueID,
-		EventID:    event.EventID,
-		EventType:  event.EventType,
-		ReceivedAt: formatTime(event.ReceivedAt),
-		RawJson:    string(event.RawJSON),
-	}); err != nil {
-		return fmt.Errorf("store raw event %d: %w", event.EventID, err)
-	}
-	return nil
-}
-
-// CleanupRawEvents removes old raw events beyond the retention window or row cap.
-func (repo *Repository) CleanupRawEvents(ctx context.Context, retention time.Duration, maxRows int) (int64, error) {
-	var deleted int64
-	err := repo.withTx(ctx, func(q *storagedb.Queries) error {
-		if retention > 0 {
-			count, err := q.DeleteExpiredRawEvents(ctx, formatTime(repo.now().Add(-retention)))
-			if err != nil {
-				return fmt.Errorf("delete expired raw events: %w", err)
-			}
-			deleted += count
-		}
-		if maxRows > 0 {
-			count, err := q.TrimRawEvents(ctx, int64(maxRows))
-			if err != nil {
-				return fmt.Errorf("trim raw events cache: %w", err)
-			}
-			deleted += count
-		}
-		return nil
-	})
-	return deleted, err
-}
-
-// RawEventCount returns the number of rows in raw_events.
-func (repo *Repository) RawEventCount(ctx context.Context) (int, error) {
-	count, err := repo.queries.CountRawEvents(ctx)
-	if err != nil {
-		return 0, fmt.Errorf("count raw events: %w", err)
-	}
-	return int(count), nil
-}
-
-// StoreRawEventAndEnqueueLifecycle stores a raw event and derived channel lifecycle items
-// in one transaction. Both inserts use INSERT OR IGNORE so duplicate deliveries are safely
-// skipped. If items is empty, only the raw event is stored.
-// Failure is returned; callers should treat this as non-fatal (log and continue).
-func (repo *Repository) StoreRawEventAndEnqueueLifecycle(ctx context.Context, event RawEvent, items []ChannelLifecycleEnqueueItem) error {
-	return repo.withTx(ctx, func(q *storagedb.Queries) error {
-		if err := q.StoreRawEvent(ctx, storagedb.StoreRawEventParams{
-			QueueID:    event.QueueID,
-			EventID:    event.EventID,
-			EventType:  event.EventType,
-			ReceivedAt: formatTime(event.ReceivedAt),
-			RawJson:    string(event.RawJSON),
-		}); err != nil {
-			return fmt.Errorf("store raw event %d: %w", event.EventID, err)
-		}
-		now := repo.now()
-		for _, item := range items {
-			if err := q.EnqueueChannelLifecycleItem(ctx, storagedb.EnqueueChannelLifecycleItemParams{
-				ZulipEventID:   event.EventID,
-				ZulipEventType: event.EventType,
-				LifecycleKind:  string(item.LifecycleKind),
-				ChannelID:      nullableInt64Ptr(item.ChannelID),
-				ChannelName:    nullableStringPtr(item.ChannelName),
-				Op:             nullableString(item.Op),
-				PayloadJson:    string(event.RawJSON),
-				AvailableAt:    formatTime(now),
-				CreatedAt:      formatTime(now),
-			}); err != nil {
-				return fmt.Errorf("enqueue lifecycle item %s for event %d: %w", item.LifecycleKind, event.EventID, err)
-			}
-		}
-		return nil
-	})
-}
-
-// ListPendingChannelLifecycleEntries returns up to limit pending entries available at or
-// before now, ordered by available_at ASC, id ASC (deterministic FIFO order).
-func (repo *Repository) ListPendingChannelLifecycleEntries(ctx context.Context, now time.Time, limit int) ([]ChannelLifecycleEntry, error) {
-	rows, err := repo.queries.ListPendingChannelLifecycleEntries(ctx, storagedb.ListPendingChannelLifecycleEntriesParams{
-		AvailableAt: formatTime(now),
-		Limit:       int64(limit),
-	})
-	if err != nil {
-		return nil, fmt.Errorf("list pending channel lifecycle entries: %w", err)
-	}
-	return channelLifecycleEntriesFromRows(rows)
-}
-
-// ClaimChannelLifecycleEntry atomically claims a pending entry by ID.
-// Returns true if the entry was claimed (status changed from pending to processing).
-// Returns false if the entry was not pending (already claimed or processed).
-func (repo *Repository) ClaimChannelLifecycleEntry(ctx context.Context, id int64, lockedBy string) (bool, error) {
-	affected, err := repo.queries.ClaimChannelLifecycleEntry(ctx, storagedb.ClaimChannelLifecycleEntryParams{
-		LockedAt: nullableString(formatTime(repo.now())),
-		LockedBy: nullableString(lockedBy),
-		ID:       id,
-	})
-	if err != nil {
-		return false, fmt.Errorf("claim channel lifecycle entry %d: %w", id, err)
-	}
-	return affected > 0, nil
-}
-
-// MarkChannelLifecycleEntryDone marks an entry as done.
-func (repo *Repository) MarkChannelLifecycleEntryDone(ctx context.Context, id int64) error {
-	if err := repo.queries.MarkChannelLifecycleEntryDone(ctx, storagedb.MarkChannelLifecycleEntryDoneParams{
-		ProcessedAt: nullableString(formatTime(repo.now())),
-		ID:          id,
-	}); err != nil {
-		return fmt.Errorf("mark channel lifecycle entry %d done: %w", id, err)
-	}
-	return nil
-}
-
-// MarkChannelLifecycleEntryFailed marks an entry as failed with an error message.
-func (repo *Repository) MarkChannelLifecycleEntryFailed(ctx context.Context, id int64, errMsg string) error {
-	if err := repo.queries.MarkChannelLifecycleEntryFailed(ctx, storagedb.MarkChannelLifecycleEntryFailedParams{
-		LastError:   nullableString(errMsg),
-		ProcessedAt: nullableString(formatTime(repo.now())),
-		ID:          id,
-	}); err != nil {
-		return fmt.Errorf("mark channel lifecycle entry %d failed: %w", id, err)
-	}
-	return nil
-}
-
-// MarkChannelLifecycleEntrySkipped marks an entry as skipped.
-func (repo *Repository) MarkChannelLifecycleEntrySkipped(ctx context.Context, id int64) error {
-	if err := repo.queries.MarkChannelLifecycleEntrySkipped(ctx, storagedb.MarkChannelLifecycleEntrySkippedParams{
-		ProcessedAt: nullableString(formatTime(repo.now())),
-		ID:          id,
-	}); err != nil {
-		return fmt.Errorf("mark channel lifecycle entry %d skipped: %w", id, err)
-	}
-	return nil
-}
-
-// ResetChannelLifecycleEntryToPending resets a single entry back to pending for replay.
-func (repo *Repository) ResetChannelLifecycleEntryToPending(ctx context.Context, id int64) (bool, error) {
-	affected, err := repo.queries.ResetChannelLifecycleEntryToPending(ctx, storagedb.ResetChannelLifecycleEntryToPendingParams{
-		AvailableAt: formatTime(repo.now()),
-		ID:          id,
-	})
-	if err != nil {
-		return false, fmt.Errorf("reset channel lifecycle entry %d to pending: %w", id, err)
-	}
-	return affected > 0, nil
-}
-
-// ResetAllFailedChannelLifecycleEntries resets all failed entries to pending for retry/replay.
-func (repo *Repository) ResetAllFailedChannelLifecycleEntries(ctx context.Context) (int64, error) {
-	count, err := repo.queries.ResetAllFailedChannelLifecycleEntries(ctx, formatTime(repo.now()))
-	if err != nil {
-		return 0, fmt.Errorf("reset all failed channel lifecycle entries: %w", err)
-	}
-	return count, nil
-}
-
-// GetChannelLifecycleEntry reads a single entry by ID.
-func (repo *Repository) GetChannelLifecycleEntry(ctx context.Context, id int64) (ChannelLifecycleEntry, bool, error) {
-	row, err := repo.queries.GetChannelLifecycleEntry(ctx, id)
-	if errors.Is(err, sql.ErrNoRows) {
-		return ChannelLifecycleEntry{}, false, nil
-	}
-	if err != nil {
-		return ChannelLifecycleEntry{}, false, fmt.Errorf("get channel lifecycle entry %d: %w", id, err)
-	}
-	entry, err := channelLifecycleEntryFromRow(row)
-	if err != nil {
-		return ChannelLifecycleEntry{}, false, err
-	}
-	return entry, true, nil
-}
-
-// ChannelLifecycleQueueStatusCounts returns the count of entries by status.
-func (repo *Repository) ChannelLifecycleQueueStatusCounts(ctx context.Context) ([]LifecycleQueueStatusCount, error) {
-	rows, err := repo.queries.CountChannelLifecycleEntriesByStatus(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("count channel lifecycle entries by status: %w", err)
-	}
-	counts := make([]LifecycleQueueStatusCount, 0, len(rows))
-	for _, row := range rows {
-		counts = append(counts, LifecycleQueueStatusCount{
-			Status: LifecycleStatus(row.Status),
-			Count:  int(row.Count),
-		})
-	}
-	return counts, nil
-}
-
-// CleanupChannelLifecycleEntries deletes done/skipped entries older than the retention period.
-func (repo *Repository) CleanupChannelLifecycleEntries(ctx context.Context, retention time.Duration) (int64, error) {
-	count, err := repo.queries.DeleteCompletedChannelLifecycleEntries(ctx,
-		nullableString(formatTime(repo.now().Add(-retention))))
-	if err != nil {
-		return 0, fmt.Errorf("cleanup channel lifecycle entries: %w", err)
-	}
-	return count, nil
-}
-
-// ChannelLifecycleQueueEntryCount returns the total number of entries in the lifecycle queue.
-func (repo *Repository) ChannelLifecycleQueueEntryCount(ctx context.Context) (int, error) {
-	count, err := repo.queries.CountAllChannelLifecycleEntries(ctx)
-	if err != nil {
-		return 0, fmt.Errorf("count all channel lifecycle entries: %w", err)
-	}
-	return int(count), nil
 }
 
 func (repo *Repository) withTx(ctx context.Context, fn func(*storagedb.Queries) error) error {
@@ -897,76 +612,4 @@ func parseTime(value string) (time.Time, error) {
 		return time.Time{}, fmt.Errorf("parse stored timestamp %q: %w", value, err)
 	}
 	return parsed, nil
-}
-
-func nullableInt64Ptr(v *int64) sql.NullInt64 {
-	if v == nil {
-		return sql.NullInt64{}
-	}
-	return sql.NullInt64{Int64: *v, Valid: true}
-}
-
-func nullableStringPtr(v *string) sql.NullString {
-	if v == nil {
-		return sql.NullString{}
-	}
-	return sql.NullString{String: *v, Valid: *v != ""}
-}
-
-func channelLifecycleEntryFromRow(row storagedb.ChannelLifecycleQueue) (ChannelLifecycleEntry, error) {
-	availableAt, err := parseTime(row.AvailableAt)
-	if err != nil {
-		return ChannelLifecycleEntry{}, err
-	}
-	createdAt, err := parseTime(row.CreatedAt)
-	if err != nil {
-		return ChannelLifecycleEntry{}, err
-	}
-	entry := ChannelLifecycleEntry{
-		ID:             row.ID,
-		ZulipEventID:   row.ZulipEventID,
-		ZulipEventType: row.ZulipEventType,
-		LifecycleKind:  LifecycleKind(row.LifecycleKind),
-		Op:             nullStringValue(row.Op),
-		PayloadJSON:    []byte(row.PayloadJson),
-		Status:         LifecycleStatus(row.Status),
-		Attempts:       int(row.Attempts),
-		AvailableAt:    availableAt,
-		LockedBy:       nullStringValue(row.LockedBy),
-		LastError:      nullStringValue(row.LastError),
-		CreatedAt:      createdAt,
-	}
-	if row.ChannelID.Valid {
-		entry.ChannelID = &row.ChannelID.Int64
-	}
-	if row.ChannelName.Valid && row.ChannelName.String != "" {
-		entry.ChannelName = &row.ChannelName.String
-	}
-	if row.LockedAt.Valid {
-		t, err := parseTime(row.LockedAt.String)
-		if err != nil {
-			return ChannelLifecycleEntry{}, err
-		}
-		entry.LockedAt = &t
-	}
-	if row.ProcessedAt.Valid {
-		t, err := parseTime(row.ProcessedAt.String)
-		if err != nil {
-			return ChannelLifecycleEntry{}, err
-		}
-		entry.ProcessedAt = &t
-	}
-	return entry, nil
-}
-
-func channelLifecycleEntriesFromRows(rows []storagedb.ChannelLifecycleQueue) ([]ChannelLifecycleEntry, error) {
-	entries := make([]ChannelLifecycleEntry, 0, len(rows))
-	for _, row := range rows {
-		entry, err := channelLifecycleEntryFromRow(row)
-		if err != nil {
-			return nil, err
-		}
-		entries = append(entries, entry)
-	}
-	return entries, nil
 }

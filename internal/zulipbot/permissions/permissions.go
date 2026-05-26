@@ -75,7 +75,11 @@ func (service *Service) RoleFor(ctx context.Context, actor model.Actor) (Role, e
 		return RoleNone, fmt.Errorf("%w: invalid stored role for Zulip user %d", ErrPermissionUnavailable, actor.UserID)
 	}
 	if role == RoleOwner {
-		return RoleNone, fmt.Errorf("%w: local owner role for Zulip user %d is invalid; owner is Zulip-derived", ErrPermissionUnavailable, actor.UserID)
+		return RoleNone, fmt.Errorf(
+			"%w: local owner role for Zulip user %d is invalid; owner is Zulip-derived",
+			ErrPermissionUnavailable,
+			actor.UserID,
+		)
 	}
 	return role, nil
 }

@@ -128,7 +128,10 @@ func TestRouterEnforcesRealPermissionRolesForAdminCommand(t *testing.T) {
 	}
 
 	for _, userID := range []int64{1, 2, 999} {
-		result := router.Route(ctx, Request{Invocation: Invocation{Name: "restart"}, Actor: model.Actor{UserID: userID}})
+		result := router.Route(
+			ctx,
+			Request{Invocation: Invocation{Name: "restart"}, Actor: model.Actor{UserID: userID}},
+		)
 		if result.Content != "permission denied" {
 			t.Fatalf("user %d content = %q", userID, result.Content)
 		}

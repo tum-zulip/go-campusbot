@@ -86,7 +86,8 @@ func NewApp(ctx context.Context, cfg RuntimeConfig) (*App, error) {
 		)
 	}
 	if identity.OwnerID == 0 {
-		cfg.Logger.WarnContext(ctx,
+		cfg.Logger.WarnContext(
+			ctx,
 			"bot has no owner configured in Zulip (bot_owner_id is missing); owner-only commands (restart, role set) will be unavailable",
 		)
 	} else {

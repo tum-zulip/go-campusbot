@@ -46,7 +46,8 @@ type Service struct {
 
 func NewService(repo *storage.Repository, permission interface {
 	Check(ctx context.Context, actor model.Actor, permission permissions.Permission) error
-}) *Service {
+},
+) *Service {
 	return &Service{
 		repo:        repo,
 		permission:  permission,
@@ -136,7 +137,13 @@ func (service *Service) List(ctx context.Context, actor model.Actor) ([]Value, e
 	return values, nil
 }
 
-func (service *Service) Set(ctx context.Context, actor model.Actor, messageID int64, key string, value string) (Value, Value, error) {
+func (service *Service) Set(
+	ctx context.Context,
+	actor model.Actor,
+	messageID int64,
+	key string,
+	value string,
+) (Value, Value, error) {
 	def, ok := service.definitions[key]
 	if !ok {
 		return Value{}, Value{}, fmt.Errorf("%w: %s", ErrUnknownKey, key)

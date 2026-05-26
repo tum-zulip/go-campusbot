@@ -9,7 +9,12 @@ import (
 )
 
 type RestartService interface {
-	ScheduleRestart(ctx context.Context, actor model.Actor, messageID int64, target model.ReplyTarget) (int64, bool, error)
+	ScheduleRestart(
+		ctx context.Context,
+		actor model.Actor,
+		messageID int64,
+		target model.ReplyTarget,
+	) (int64, bool, error)
 }
 
 type RestartHandler struct {

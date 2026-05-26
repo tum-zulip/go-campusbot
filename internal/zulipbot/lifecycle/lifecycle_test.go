@@ -35,7 +35,12 @@ func TestServiceRequestsRestartAndExecutesInjectedExec(t *testing.T) {
 	}
 	service := NewService(repo, manager)
 
-	_, scheduled, err := service.ScheduleRestart(ctx, model.Actor{UserID: 10}, 99, model.ReplyTarget{Kind: model.ReplyKindDirect, UserIDs: []int64{10}})
+	_, scheduled, err := service.ScheduleRestart(
+		ctx,
+		model.Actor{UserID: 10},
+		99,
+		model.ReplyTarget{Kind: model.ReplyKindDirect, UserIDs: []int64{10}},
+	)
 	if err != nil {
 		t.Fatalf("RequestRestart() failed: %v", err)
 	}
@@ -64,7 +69,10 @@ func TestStartupNotifierCompletesPendingRestart(t *testing.T) {
 	defer repo.Close()
 
 	target := model.ReplyTarget{Kind: model.ReplyKindDirect, UserIDs: []int64{10}}
-	id, err := repo.CreateRestartRequest(ctx, storage.RestartRequest{RequestedByUserID: 10, RequestMessageID: 55, Target: target})
+	id, err := repo.CreateRestartRequest(
+		ctx,
+		storage.RestartRequest{RequestedByUserID: 10, RequestMessageID: 55, Target: target},
+	)
 	if err != nil {
 		t.Fatalf("CreateRestartRequest() failed: %v", err)
 	}
@@ -90,7 +98,11 @@ type fakeMessenger struct {
 	sentTo model.ReplyTarget
 }
 
-func (messenger *fakeMessenger) SendReply(ctx context.Context, target model.ReplyTarget, content string) (int64, error) {
+func (messenger *fakeMessenger) SendReply(
+	_ context.Context,
+	target model.ReplyTarget,
+	_ string,
+) (int64, error) {
 	messenger.sentTo = target
 	return 123, nil
 }
@@ -121,7 +133,12 @@ func TestDryRunExecCompletesWithoutError(t *testing.T) {
 	}
 	service := NewService(repo, manager)
 
-	_, scheduled, err := service.ScheduleRestart(ctx, model.Actor{UserID: 10}, 99, model.ReplyTarget{Kind: model.ReplyKindDirect, UserIDs: []int64{10}})
+	_, scheduled, err := service.ScheduleRestart(
+		ctx,
+		model.Actor{UserID: 10},
+		99,
+		model.ReplyTarget{Kind: model.ReplyKindDirect, UserIDs: []int64{10}},
+	)
 	if err != nil {
 		t.Fatalf("ScheduleRestart() failed: %v", err)
 	}
@@ -165,7 +182,12 @@ func TestExecRestartReturnsErrorOnExecFailure(t *testing.T) {
 	}
 	service := NewService(repo, manager)
 
-	_, _, err = service.ScheduleRestart(ctx, model.Actor{UserID: 1}, 1, model.ReplyTarget{Kind: model.ReplyKindDirect, UserIDs: []int64{1}})
+	_, _, err = service.ScheduleRestart(
+		ctx,
+		model.Actor{UserID: 1},
+		1,
+		model.ReplyTarget{Kind: model.ReplyKindDirect, UserIDs: []int64{1}},
+	)
 	if err != nil {
 		t.Fatalf("ScheduleRestart() failed: %v", err)
 	}
@@ -221,7 +243,12 @@ func TestRequestRestartStopsAcceptingCommands(t *testing.T) {
 		t.Fatal("service should be accepting before restart is scheduled")
 	}
 
-	_, _, err = service.ScheduleRestart(ctx, model.Actor{UserID: 1}, 10, model.ReplyTarget{Kind: model.ReplyKindDirect, UserIDs: []int64{1}})
+	_, _, err = service.ScheduleRestart(
+		ctx,
+		model.Actor{UserID: 1},
+		10,
+		model.ReplyTarget{Kind: model.ReplyKindDirect, UserIDs: []int64{1}},
+	)
 	if err != nil {
 		t.Fatalf("ScheduleRestart() failed: %v", err)
 	}

@@ -91,7 +91,13 @@ func (handler *ConfigHandler) set(ctx context.Context, req command.Request) (com
 	if len(req.Invocation.Args) != 3 {
 		return command.Result{}, command.NewUserError("Usage: `config set <key> <value>`")
 	}
-	_, newValue, err := handler.service.Set(ctx, req.Actor, req.MessageID, req.Invocation.Args[1], req.Invocation.Args[2])
+	_, newValue, err := handler.service.Set(
+		ctx,
+		req.Actor,
+		req.MessageID,
+		req.Invocation.Args[1],
+		req.Invocation.Args[2],
+	)
 	if err != nil {
 		return command.Result{}, handler.userFacingConfigError(err, "change")
 	}

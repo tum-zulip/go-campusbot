@@ -10,9 +10,9 @@ import (
 )
 
 type Metadata struct {
-	Name       string
-	Summary    string
-	Usage      string
+	Name    string
+	Summary string
+	Usage   string
 	// OwnerUsage, when non-empty, overrides Usage in help output shown to owners.
 	// Use this for commands that expose additional subcommands only owners may run.
 	OwnerUsage string

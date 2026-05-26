@@ -44,7 +44,12 @@ type fakeRestartService struct {
 	calls int
 }
 
-func (service *fakeRestartService) ScheduleRestart(ctx context.Context, actor model.Actor, messageID int64, target model.ReplyTarget) (int64, bool, error) {
+func (service *fakeRestartService) ScheduleRestart(
+	_ context.Context,
+	_ model.Actor,
+	_ int64,
+	_ model.ReplyTarget,
+) (int64, bool, error) {
 	service.calls++
 	return 1, true, nil
 }

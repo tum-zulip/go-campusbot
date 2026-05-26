@@ -57,7 +57,9 @@ func NewRouter(cfg RouterConfig) (*Router, error) {
 func (router *Router) Route(ctx context.Context, req Request) Result {
 	handler, ok := router.registry.Lookup(req.Invocation.Name)
 	if !ok {
-		return Result{Content: fmt.Sprintf("Unknown command %q. Use `help` to see supported commands.", req.Invocation.Name)}
+		return Result{
+			Content: fmt.Sprintf("Unknown command %q. Use `help` to see supported commands.", req.Invocation.Name),
+		}
 	}
 
 	meta := handler.Metadata()
@@ -68,7 +70,16 @@ func (router *Router) Route(ctx context.Context, req Request) Result {
 
 	if err := router.auth.Check(ctx, req.Actor, meta.Permission); err != nil {
 		router.audit(ctx, req, meta, audit.StatusDenied, "")
-		router.logger.WarnContext(ctx, "command permission denied", "command", meta.Name, "actor_user_id", req.Actor.UserID, "error", err)
+		router.logger.WarnContext(
+			ctx,
+			"command permission denied",
+			"command",
+			meta.Name,
+			"actor_user_id",
+			req.Actor.UserID,
+			"error",
+			err,
+		)
 		if errors.Is(err, permissions.ErrPermissionUnavailable) {
 			return Result{Content: "I cannot verify permissions right now, so I will not run that command."}
 		}
@@ -88,7 +99,16 @@ func (router *Router) Route(ctx context.Context, req Request) Result {
 	}
 
 	router.audit(ctx, req, meta, audit.StatusFailure, "")
-	router.logger.ErrorContext(ctx, "command handler failed", "command", meta.Name, "actor_user_id", req.Actor.UserID, "error", err)
+	router.logger.ErrorContext(
+		ctx,
+		"command handler failed",
+		"command",
+		meta.Name,
+		"actor_user_id",
+		req.Actor.UserID,
+		"error",
+		err,
+	)
 	return Result{Content: "Command failed because of an internal error."}
 }
 

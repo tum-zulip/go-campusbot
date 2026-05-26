@@ -115,7 +115,8 @@ func TestRoleHandlerListDistinguishesZulipOwnerAndLocalAdmin(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Handle() failed: %v", err)
 	}
-	if !strings.Contains(result.Content, "user_id=42 role=owner") || !strings.Contains(result.Content, "Zulip-derived") {
+	if !strings.Contains(result.Content, "user_id=42 role=owner") ||
+		!strings.Contains(result.Content, "Zulip-derived") {
 		t.Fatalf("expected Zulip-derived owner in list, got: %q", result.Content)
 	}
 	if !strings.Contains(result.Content, "user_id=10 role=admin") || !strings.Contains(result.Content, "local SQLite") {

@@ -45,7 +45,11 @@ func TestZulipSourceRegisterSendsBroadQueueCapabilities(t *testing.T) {
 		}
 		if !capabilities["notification_settings_null"] {
 			w.WriteHeader(http.StatusBadRequest)
-			writeJSON(t, w, `{"result":"error","code":"BAD_REQUEST","msg":"client_capabilities[\"notification_settings_null\"] field is missing: Field required"}`)
+			writeJSON(
+				t,
+				w,
+				`{"result":"error","code":"BAD_REQUEST","msg":"client_capabilities[\"notification_settings_null\"] field is missing: Field required"}`,
+			)
 			return
 		}
 
@@ -151,7 +155,12 @@ func TestZulipSourceRegisterToleratesUnknownResponseFields(t *testing.T) {
 				t.Fatalf("Register() failed: %v", err)
 			}
 			if state.QueueID != tc.wantQueueID || state.LastEventID != tc.wantLastEventID {
-				t.Fatalf("state = %#v, want queue ID %q and last event ID %d", state, tc.wantQueueID, tc.wantLastEventID)
+				t.Fatalf(
+					"state = %#v, want queue ID %q and last event ID %d",
+					state,
+					tc.wantQueueID,
+					tc.wantLastEventID,
+				)
 			}
 		})
 	}

@@ -89,9 +89,20 @@ func (handler *RoleHandler) list(ctx context.Context, req command.Request) (comm
 	for _, r := range records {
 		switch {
 		case r.Role == string(permissions.RoleOwner):
-			fmt.Fprintf(&sb, "- user_id=%d role=%s (Zulip-derived bot_owner_id; not stored locally)\n", r.UserID, r.Role)
+			fmt.Fprintf(
+				&sb,
+				"- user_id=%d role=%s (Zulip-derived bot_owner_id; not stored locally)\n",
+				r.UserID,
+				r.Role,
+			)
 		case r.GrantedByUserID != 0:
-			fmt.Fprintf(&sb, "- user_id=%d role=%s (local SQLite, granted by user_id=%d)\n", r.UserID, r.Role, r.GrantedByUserID)
+			fmt.Fprintf(
+				&sb,
+				"- user_id=%d role=%s (local SQLite, granted by user_id=%d)\n",
+				r.UserID,
+				r.Role,
+				r.GrantedByUserID,
+			)
 		default:
 			fmt.Fprintf(&sb, "- user_id=%d role=%s (local SQLite)\n", r.UserID, r.Role)
 		}
@@ -112,10 +123,17 @@ func (handler *RoleHandler) get(ctx context.Context, req command.Request) (comma
 		return command.Result{}, err
 	}
 	if !found {
-		return command.Result{Content: fmt.Sprintf("User %d has role: none (default; no local role assignment).", userID)}, nil
+		return command.Result{
+			Content: fmt.Sprintf("User %d has role: none (default; no local role assignment).", userID),
+		}, nil
 	}
 	if role == string(permissions.RoleOwner) {
-		return command.Result{Content: fmt.Sprintf("User %d has role: owner (Zulip-derived from bot_owner_id; not stored locally).", userID)}, nil
+		return command.Result{
+			Content: fmt.Sprintf(
+				"User %d has role: owner (Zulip-derived from bot_owner_id; not stored locally).",
+				userID,
+			),
+		}, nil
 	}
 	return command.Result{Content: fmt.Sprintf("User %d has role: %s (local SQLite role).", userID, role)}, nil
 }
@@ -128,7 +146,9 @@ func (handler *RoleHandler) set(ctx context.Context, req command.Request) (comma
 	// role set requires owner permission.
 	if err := handler.authorizer.Check(ctx, req.Actor, permissions.PermissionOwner); err != nil {
 		if errors.Is(err, permissions.ErrPermissionUnavailable) {
-			return command.Result{}, command.NewUserError("I cannot verify permissions right now, so I will not set roles.")
+			return command.Result{}, command.NewUserError(
+				"I cannot verify permissions right now, so I will not set roles.",
+			)
 		}
 		return command.Result{}, command.NewUserError("You are not authorized to set roles.")
 	}
@@ -144,7 +164,9 @@ func (handler *RoleHandler) set(ctx context.Context, req command.Request) (comma
 		)
 	}
 	if err := handler.service.SetUserRole(ctx, userID, roleStr, req.Actor.UserID); err != nil {
-		return command.Result{}, command.NewUserError(fmt.Sprintf("Invalid role %q. Valid roles: none, admin.", roleStr))
+		return command.Result{}, command.NewUserError(
+			fmt.Sprintf("Invalid role %q. Valid roles: none, admin.", roleStr),
+		)
 	}
 	return command.Result{Content: fmt.Sprintf("User %d role set to: %s", userID, roleStr)}, nil
 }

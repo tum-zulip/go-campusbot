@@ -2,7 +2,6 @@ package eventloop
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -21,9 +20,6 @@ import (
 const (
 	processedMessageRetention = 7 * 24 * time.Hour
 	processedMessageMaxRows   = 100000
-
-	rawEventRetention = 7 * 24 * time.Hour
-	rawEventMaxRows   = 100000
 )
 
 type Messenger interface {
@@ -101,12 +97,6 @@ func (loop *Loop) Run(ctx context.Context) error {
 		loop.logger.DebugContext(ctx, "cleaned processed message cache", "deleted", deleted)
 	}
 
-	if deleted, err := loop.repo.CleanupRawEvents(ctx, rawEventRetention, rawEventMaxRows); err != nil {
-		loop.logger.WarnContext(ctx, "failed to clean raw events", "error", err)
-	} else if deleted > 0 {
-		loop.logger.DebugContext(ctx, "cleaned raw events", "deleted", deleted)
-	}
-
 	state, err := loop.ensureQueue(ctx)
 	if err != nil {
 		return err
@@ -165,7 +155,16 @@ func (loop *Loop) Run(ctx context.Context) error {
 				continue
 			}
 			if err := loop.handleEvent(ctx, event, &state); err != nil {
-				loop.logger.ErrorContext(ctx, "failed to handle Zulip event", "event_id", event.GetID(), "event_type", event.GetType(), "error", err)
+				loop.logger.ErrorContext(
+					ctx,
+					"failed to handle Zulip event",
+					"event_id",
+					event.GetID(),
+					"event_type",
+					event.GetType(),
+					"error",
+					err,
+				)
 			}
 			if err := loop.repo.SaveEventQueueState(ctx, storage.EventQueueState{
 				QueueID:     state.QueueID,
@@ -202,7 +201,14 @@ func (loop *Loop) ensureQueue(ctx context.Context) (QueueState, error) {
 	if ok {
 		state := QueueState{QueueID: stored.QueueID, LastEventID: stored.LastEventID}
 		if err := loop.source.Check(ctx, state); err == nil {
-			loop.logger.InfoContext(ctx, "resuming Zulip event queue", "queue_id", state.QueueID, "last_event_id", state.LastEventID)
+			loop.logger.InfoContext(
+				ctx,
+				"resuming Zulip event queue",
+				"queue_id",
+				state.QueueID,
+				"last_event_id",
+				state.LastEventID,
+			)
 			return state, nil
 		} else if !errors.Is(err, ErrBadEventQueueID) {
 			return QueueState{}, err
@@ -227,7 +233,14 @@ func (loop *Loop) registerQueue(ctx context.Context) (QueueState, error) {
 	}); err != nil {
 		return QueueState{}, err
 	}
-	loop.logger.InfoContext(ctx, "registered Zulip event queue", "queue_id", state.QueueID, "last_event_id", state.LastEventID)
+	loop.logger.InfoContext(
+		ctx,
+		"registered Zulip event queue",
+		"queue_id",
+		state.QueueID,
+		"last_event_id",
+		state.LastEventID,
+	)
 	return state, nil
 }
 
@@ -246,11 +259,9 @@ func (loop *Loop) handleEvent(ctx context.Context, event events.Event, state *Qu
 			return err
 		}
 		state.LastEventID = event.GetID()
-		loop.storeRawEventAndEnqueue(ctx, event, state.QueueID)
 		return nil
 	default:
 		state.LastEventID = event.GetID()
-		loop.storeRawEventAndEnqueue(ctx, event, state.QueueID)
 		return nil
 	}
 }
@@ -327,40 +338,6 @@ func (loop *Loop) send(ctx context.Context, target model.ReplyTarget, content st
 	}
 	loop.logger.DebugContext(ctx, "sent command response", "message_id", messageID, "target_kind", target.Kind)
 	return nil
-}
-
-// storeRawEventAndEnqueue stores a raw event and derives channel lifecycle queue entries,
-// both in one transaction.
-// Failure is logged but does NOT prevent command execution or event state advancement.
-func (loop *Loop) storeRawEventAndEnqueue(ctx context.Context, event events.Event, queueID string) {
-	rawJSON := marshalEventJSON(event)
-	lifecycleItems := classifyEvent(event)
-
-	if err := loop.repo.StoreRawEventAndEnqueueLifecycle(ctx, storage.RawEvent{
-		QueueID:    queueID,
-		EventID:    event.GetID(),
-		EventType:  string(event.GetType()),
-		ReceivedAt: time.Now().UTC(),
-		RawJSON:    rawJSON,
-	}, lifecycleItems); err != nil {
-		loop.logger.WarnContext(ctx, "failed to store raw event or enqueue lifecycle items",
-			"event_id", event.GetID(),
-			"event_type", event.GetType(),
-			"lifecycle_item_count", len(lifecycleItems),
-			"error", err,
-		)
-	}
-}
-
-func marshalEventJSON(event events.Event) []byte {
-	if errEvent, ok := event.(*events.EventUnmarshalingError); ok {
-		return errEvent.Data
-	}
-	data, err := json.Marshal(event)
-	if err != nil {
-		return []byte(fmt.Sprintf(`{"type":%q,"id":%d}`, event.GetType(), event.GetID()))
-	}
-	return data
 }
 
 func ReplyTargetFromMessage(msg z.Message, ownUserID int64) (model.ReplyTarget, error) {
