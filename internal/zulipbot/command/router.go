@@ -6,13 +6,14 @@ import (
 	"fmt"
 	"log/slog"
 
+	"github.com/tum-zulip/go-zulip/zulip"
+
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/audit"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/model"
-	"github.com/tum-zulip/go-campusbot/internal/zulipbot/permissions"
 )
 
 type Authorizer interface {
-	Check(ctx context.Context, actor model.Actor, permission permissions.Permission) error
+	Check(ctx context.Context, actor model.Actor, minRole zulip.Role) error
 }
 
 type Auditor interface {
@@ -80,7 +81,7 @@ func (router *Router) Route(ctx context.Context, req Request) Result {
 			"error",
 			err,
 		)
-		if errors.Is(err, permissions.ErrPermissionUnavailable) {
+		if errors.Is(err, ErrPermissionUnavailable) {
 			return Result{Content: "I cannot verify permissions right now, so I will not run that command."}
 		}
 		return Result{Content: "permission denied"}

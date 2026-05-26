@@ -8,12 +8,14 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/tum-zulip/go-zulip/zulip"
+
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/command"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/configsvc"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/eventloop"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/handlers"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/lifecycle"
-	"github.com/tum-zulip/go-campusbot/internal/zulipbot/permissions"
+	"github.com/tum-zulip/go-campusbot/internal/zulipbot/model"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/storage"
 )
 
@@ -40,13 +42,6 @@ type App struct {
 	closed          atomic.Bool
 	startedAt       time.Time
 }
-
-// staticOwnerProvider is an OwnerProvider backed by a fixed user ID resolved at startup.
-type staticOwnerProvider struct {
-	ownerUserID int64
-}
-
-func (p *staticOwnerProvider) OwnerUserID() int64 { return p.ownerUserID }
 
 func NewApp(ctx context.Context, cfg RuntimeConfig) (*App, error) {
 	if cfg.Logger == nil {
@@ -85,24 +80,13 @@ func NewApp(ctx context.Context, cfg RuntimeConfig) (*App, error) {
 			"campusbot must run as a Zulip bot account; the configured credentials belong to a regular user account",
 		)
 	}
-	if identity.OwnerID == 0 {
-		cfg.Logger.WarnContext(
-			ctx,
-			"bot has no owner configured in Zulip (bot_owner_id is missing); owner-only commands (restart, role set) will be unavailable",
-		)
-	} else {
-		cfg.Logger.InfoContext(ctx, "bot owner resolved from Zulip", "owner_user_id", identity.OwnerID)
-	}
-
-	ownerProvider := &staticOwnerProvider{ownerUserID: identity.OwnerID}
-
 	manager, err := lifecycle.NewManager(lifecycle.ManagerConfig{Exec: cfg.RestartExec})
 	if err != nil {
 		return nil, err
 	}
 	lifecycleService := lifecycle.NewService(repo, manager)
-	permissionService := permissions.NewService(repo, ownerProvider)
-	configService := configsvc.NewService(repo, permissionService)
+	auth := &zulipAuthorizer{bot: bot}
+	configService := configsvc.NewService(repo, auth)
 
 	startedAt := time.Now().UTC()
 
@@ -111,28 +95,22 @@ func NewApp(ctx context.Context, cfg RuntimeConfig) (*App, error) {
 		lifecycle: lifecycleService,
 		startedAt: startedAt,
 	}
-	roleService := &appRoleService{repo: repo, ownerUserID: identity.OwnerID}
 
 	registry := command.NewRegistry()
-	if err := registry.Register(command.NewHelpHandler(registry, permissionService)); err != nil {
-		return nil, err
-	}
-	if err := registry.Register(handlers.NewConfigHandler(configService)); err != nil {
-		return nil, err
-	}
-	if err := registry.Register(handlers.NewRestartHandler(lifecycleService)); err != nil {
-		return nil, err
-	}
-	if err := registry.Register(handlers.NewStatusHandler(statusProvider, permissionService)); err != nil {
-		return nil, err
-	}
-	if err := registry.Register(handlers.NewRoleHandler(roleService, permissionService)); err != nil {
-		return nil, err
+	for _, h := range []command.Handler{
+		command.NewHelpHandler(registry, auth),
+		handlers.NewConfigHandler(configService),
+		handlers.NewRestartHandler(lifecycleService),
+		handlers.NewStatusHandler(statusProvider, auth),
+	} {
+		if err = registry.Register(h); err != nil {
+			return nil, err
+		}
 	}
 
 	router, err := command.NewRouter(command.RouterConfig{
 		Registry:  registry,
-		Auth:      permissionService,
+		Auth:      auth,
 		Auditor:   repo,
 		Accepting: lifecycleService.Accepting,
 		Logger:    cfg.Logger,
@@ -257,61 +235,40 @@ func (p *appStatusProvider) Accepting() bool {
 	return p.lifecycle.Accepting()
 }
 
-// appRoleService implements handlers.RoleService using the storage repository.
-type appRoleService struct {
-	repo        *storage.Repository
-	ownerUserID int64
+// zulipAuthorizer implements command.Authorizer and command.RoleProvider
+// by querying the Zulip API for user roles directly.
+type zulipAuthorizer struct {
+	bot *Bot
 }
 
-func (s *appRoleService) GetUserRole(ctx context.Context, userID int64) (string, bool, error) {
-	if s.ownerUserID > 0 && userID == s.ownerUserID {
-		return string(permissions.RoleOwner), true, nil
+func (z *zulipAuthorizer) Check(ctx context.Context, actor model.Actor, minRole zulip.Role) error {
+	if minRole == 0 {
+		return nil
 	}
-	role, ok, err := s.repo.UserRole(ctx, userID)
+	actorRole, err := z.fetchRole(ctx, actor.UserID)
 	if err != nil {
-		return "", false, err
+		return fmt.Errorf("%w: %w", command.ErrPermissionUnavailable, err)
 	}
-	if !ok {
-		return "", false, nil
+	if actorRole <= minRole {
+		return nil
 	}
-	return string(role), true, nil
+	return fmt.Errorf("%w", command.ErrDenied)
 }
 
-func (s *appRoleService) SetUserRole(ctx context.Context, userID int64, role string, grantedByUserID int64) error {
-	parsed, err := permissions.ParseRole(role)
-	if err != nil {
-		return err
-	}
-	return s.repo.SetUserRole(ctx, userID, parsed, grantedByUserID)
+func (z *zulipAuthorizer) RoleFor(ctx context.Context, actor model.Actor) (zulip.Role, error) {
+	return z.fetchRole(ctx, actor.UserID)
 }
 
-func (s *appRoleService) ListUserRoles(ctx context.Context) ([]handlers.RoleRecord, error) {
-	records, err := s.repo.ListUserRoles(ctx)
+func (z *zulipAuthorizer) fetchRole(ctx context.Context, userID int64) (zulip.Role, error) {
+	resp, _, err := z.bot.Client().GetUser(ctx, userID).Execute()
 	if err != nil {
-		return nil, err
+		return 0, fmt.Errorf("get Zulip user %d: %w", userID, err)
 	}
-	result := make([]handlers.RoleRecord, 0, len(records)+1)
-	if s.ownerUserID > 0 {
-		result = append(result, handlers.RoleRecord{
-			UserID: s.ownerUserID,
-			Role:   string(permissions.RoleOwner),
-		})
+	if resp == nil {
+		return 0, fmt.Errorf("get Zulip user %d: empty response", userID)
 	}
-	for _, r := range records {
-		if r.UserID == s.ownerUserID {
-			continue
-		}
-		result = append(result, handlers.RoleRecord{
-			UserID:          r.UserID,
-			Role:            string(r.Role),
-			GrantedByUserID: r.GrantedByUserID,
-		})
-	}
-	return result, nil
+	return resp.User.Role, nil
 }
 
 // Ensure appStatusProvider satisfies the interface at compile time.
 var _ handlers.StatusProvider = (*appStatusProvider)(nil)
-
-// Ensure appRoleService satisfies the interface at compile time.
-var _ handlers.RoleService = (*appRoleService)(nil)

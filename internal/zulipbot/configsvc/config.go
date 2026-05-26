@@ -8,9 +8,10 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/tum-zulip/go-zulip/zulip"
+
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/command"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/model"
-	"github.com/tum-zulip/go-campusbot/internal/zulipbot/permissions"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/storage"
 )
 
@@ -25,8 +26,8 @@ type Definition struct {
 	Summary         string
 	Default         string
 	Sensitive       bool
-	ReadPermission  permissions.Permission
-	WritePermission permissions.Permission
+	ReadPermission  zulip.Role
+	WritePermission zulip.Role
 	Validate        func(string) (string, error)
 }
 
@@ -39,13 +40,13 @@ type Value struct {
 type Service struct {
 	repo       *storage.Repository
 	permission interface {
-		Check(ctx context.Context, actor model.Actor, permission permissions.Permission) error
+		Check(ctx context.Context, actor model.Actor, minRole zulip.Role) error
 	}
 	definitions map[string]Definition
 }
 
 func NewService(repo *storage.Repository, permission interface {
-	Check(ctx context.Context, actor model.Actor, permission permissions.Permission) error
+	Check(ctx context.Context, actor model.Actor, minRole zulip.Role) error
 },
 ) *Service {
 	return &Service{
@@ -61,8 +62,8 @@ func DefaultDefinitions() map[string]Definition {
 			Key:             KeyRestartStartupNotification,
 			Summary:         "Whether the bot sends a restart completion message after coming back online.",
 			Default:         "true",
-			ReadPermission:  permissions.PermissionAdmin,
-			WritePermission: permissions.PermissionAdmin,
+			ReadPermission:  zulip.RoleAdmin,
+			WritePermission: zulip.RoleAdmin,
 			Validate:        validateBool,
 		},
 	}
@@ -126,7 +127,7 @@ func (service *Service) List(ctx context.Context, actor model.Actor) ([]Value, e
 	values := make([]Value, 0, len(keys))
 	for _, key := range keys {
 		value, err := service.Get(ctx, actor, key)
-		if errors.Is(err, permissions.ErrDenied) {
+		if errors.Is(err, command.ErrDenied) {
 			continue
 		}
 		if err != nil {

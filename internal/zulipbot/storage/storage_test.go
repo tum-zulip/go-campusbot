@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/model"
-	"github.com/tum-zulip/go-campusbot/internal/zulipbot/permissions"
 	storagedb "github.com/tum-zulip/go-campusbot/internal/zulipbot/storage/db"
 )
 
@@ -36,17 +35,6 @@ func TestRepositoryPersistsCoreState(t *testing.T) {
 	}
 	if !ok || value != "!bot" {
 		t.Fatalf("config value = %q, ok=%v", value, ok)
-	}
-
-	if err := repo.SetUserRole(ctx, 10, permissions.RoleAdmin, 0); err != nil {
-		t.Fatalf("SetUserRole() failed: %v", err)
-	}
-	role, ok, err := repo.UserRole(ctx, 10)
-	if err != nil {
-		t.Fatalf("UserRole() failed: %v", err)
-	}
-	if !ok || role != permissions.RoleAdmin {
-		t.Fatalf("role = %q, ok=%v", role, ok)
 	}
 
 	if err := repo.SaveEventQueueState(ctx, EventQueueState{QueueID: "queue-1", LastEventID: 42}); err != nil {
@@ -226,50 +214,6 @@ func TestRepositoryCleansProcessedMessages(t *testing.T) {
 		if !processed {
 			t.Fatalf("message %d should remain processed", messageID)
 		}
-	}
-}
-
-func TestRepositoryOwnerRoleIsRejectedBySetUserRole(t *testing.T) {
-	t.Parallel()
-
-	ctx := context.Background()
-	repo := openTestRepository(t)
-	defer repo.Close()
-
-	err := repo.SetUserRole(ctx, 10, permissions.RoleOwner, 0)
-	if err == nil {
-		t.Fatal("SetUserRole with RoleOwner should have failed")
-	}
-}
-
-func TestRepositorySetUserRoleNoneDeletesLocalRole(t *testing.T) {
-	t.Parallel()
-
-	ctx := context.Background()
-	repo := openTestRepository(t)
-	defer repo.Close()
-
-	if err := repo.SetUserRole(ctx, 10, permissions.RoleAdmin, 99); err != nil {
-		t.Fatalf("SetUserRole(admin) failed: %v", err)
-	}
-	if err := repo.SetUserRole(ctx, 10, permissions.RoleNone, 99); err != nil {
-		t.Fatalf("SetUserRole(none) failed: %v", err)
-	}
-
-	role, ok, err := repo.UserRole(ctx, 10)
-	if err != nil {
-		t.Fatalf("UserRole() failed: %v", err)
-	}
-	if ok {
-		t.Fatalf("UserRole() found role %q after setting none; want no local row", role)
-	}
-
-	records, err := repo.ListUserRoles(ctx)
-	if err != nil {
-		t.Fatalf("ListUserRoles() failed: %v", err)
-	}
-	if len(records) != 0 {
-		t.Fatalf("ListUserRoles() len = %d, want 0 after deleting local role", len(records))
 	}
 }
 

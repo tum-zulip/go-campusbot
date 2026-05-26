@@ -6,9 +6,10 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/tum-zulip/go-zulip/zulip"
+
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/command"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/model"
-	"github.com/tum-zulip/go-campusbot/internal/zulipbot/permissions"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/storage"
 )
 
@@ -18,10 +19,7 @@ func TestServiceValidatesAndPersistsConfig(t *testing.T) {
 	ctx := context.Background()
 	repo := openConfigTestRepository(t)
 	defer repo.Close()
-	if err := repo.SetUserRole(ctx, 10, permissions.RoleAdmin, 0); err != nil {
-		t.Fatalf("SetUserRole() failed: %v", err)
-	}
-	service := NewService(repo, permissions.NewService(repo, nil))
+	service := NewService(repo, fakeConfigPerm{10: zulip.RoleAdmin})
 	actor := model.Actor{UserID: 10}
 
 	_, newValue, err := service.Set(ctx, actor, 123, KeyRestartStartupNotification, "yes")
@@ -45,10 +43,7 @@ func TestServiceRejectsUnknownAndInvalidConfig(t *testing.T) {
 	ctx := context.Background()
 	repo := openConfigTestRepository(t)
 	defer repo.Close()
-	if err := repo.SetUserRole(ctx, 10, permissions.RoleAdmin, 0); err != nil {
-		t.Fatalf("SetUserRole() failed: %v", err)
-	}
-	service := NewService(repo, permissions.NewService(repo, nil))
+	service := NewService(repo, fakeConfigPerm{10: zulip.RoleAdmin})
 	actor := model.Actor{UserID: 10}
 
 	if _, err := service.Get(ctx, actor, "not_a_real_key"); !errors.Is(err, ErrUnknownKey) {
@@ -70,17 +65,14 @@ func TestServiceMasksSensitiveValuesAndAuditsWrites(t *testing.T) {
 	ctx := context.Background()
 	repo := openConfigTestRepository(t)
 	defer repo.Close()
-	if err := repo.SetUserRole(ctx, 10, permissions.RoleAdmin, 0); err != nil {
-		t.Fatalf("SetUserRole() failed: %v", err)
-	}
-	service := NewService(repo, permissions.NewService(repo, nil))
+	service := NewService(repo, fakeConfigPerm{10: zulip.RoleAdmin})
 	service.definitions["secret_token"] = Definition{
 		Key:             "secret_token",
 		Summary:         "test secret",
 		Default:         "default-secret",
 		Sensitive:       true,
-		ReadPermission:  permissions.PermissionAdmin,
-		WritePermission: permissions.PermissionAdmin,
+		ReadPermission:  zulip.RoleAdmin,
+		WritePermission: zulip.RoleAdmin,
 		Validate: func(value string) (string, error) {
 			if value == "" {
 				return "", errors.New("must not be empty")
@@ -112,11 +104,11 @@ func TestServiceProtectsWrites(t *testing.T) {
 	ctx := context.Background()
 	repo := openConfigTestRepository(t)
 	defer repo.Close()
-	service := NewService(repo, permissions.NewService(repo, nil))
+	service := NewService(repo, fakeConfigPerm{})
 
-	// Unknown user (none role) cannot write config (requires admin)
+	// Unknown user (member role) cannot write config (requires admin)
 	_, _, err := service.Set(ctx, model.Actor{UserID: 20}, 123, KeyRestartStartupNotification, "true")
-	if !errors.Is(err, permissions.ErrDenied) {
+	if !errors.Is(err, command.ErrDenied) {
 		t.Fatalf("regular user Set() error = %v, want ErrDenied", err)
 	}
 }
@@ -127,16 +119,13 @@ func TestServiceProtectsSensitiveConfig(t *testing.T) {
 	ctx := context.Background()
 	repo := openConfigTestRepository(t)
 	defer repo.Close()
-	if err := repo.SetUserRole(ctx, 10, permissions.RoleAdmin, 0); err != nil {
-		t.Fatalf("SetUserRole() failed: %v", err)
-	}
-	service := NewService(repo, permissions.NewService(repo, nil))
+	service := NewService(repo, fakeConfigPerm{10: zulip.RoleAdmin})
 	service.definitions["secret_token"] = Definition{
 		Key:             "secret_token",
 		Default:         "default-secret",
 		Sensitive:       true,
-		ReadPermission:  permissions.PermissionOwner,
-		WritePermission: permissions.PermissionOwner,
+		ReadPermission:  zulip.RoleOwner,
+		WritePermission: zulip.RoleOwner,
 		Validate: func(value string) (string, error) {
 			return value, nil
 		},
@@ -144,13 +133,30 @@ func TestServiceProtectsSensitiveConfig(t *testing.T) {
 
 	// Admin can't read owner-only sensitive config
 	_, err := service.Get(ctx, model.Actor{UserID: 10}, "secret_token")
-	if !errors.Is(err, permissions.ErrDenied) {
+	if !errors.Is(err, command.ErrDenied) {
 		t.Fatalf("admin sensitive Get() error = %v, want ErrDenied", err)
 	}
 	_, _, err = service.Set(ctx, model.Actor{UserID: 10}, 123, "secret_token", "value")
-	if !errors.Is(err, permissions.ErrDenied) {
+	if !errors.Is(err, command.ErrDenied) {
 		t.Fatalf("admin sensitive Set() error = %v, want ErrDenied", err)
 	}
+}
+
+// fakeConfigPerm maps user IDs to Zulip roles; unmapped users get RoleMember.
+type fakeConfigPerm map[int64]zulip.Role
+
+func (f fakeConfigPerm) Check(_ context.Context, actor model.Actor, minRole zulip.Role) error {
+	if minRole == 0 {
+		return nil
+	}
+	role, ok := f[actor.UserID]
+	if !ok {
+		role = zulip.RoleMember
+	}
+	if role <= minRole {
+		return nil
+	}
+	return command.ErrDenied
 }
 
 func openConfigTestRepository(t *testing.T) *storage.Repository {

@@ -3,9 +3,10 @@ package handlers
 import (
 	"context"
 
+	"github.com/tum-zulip/go-zulip/zulip"
+
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/command"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/model"
-	"github.com/tum-zulip/go-campusbot/internal/zulipbot/permissions"
 )
 
 type RestartService interface {
@@ -30,7 +31,7 @@ func (handler *RestartHandler) Metadata() command.Metadata {
 		Name:       "restart",
 		Summary:    "Gracefully restart the bot process.",
 		Usage:      "restart",
-		Permission: permissions.PermissionOwner,
+		Permission: zulip.RoleOwner,
 		Privileged: true,
 	}
 }

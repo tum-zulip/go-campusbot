@@ -14,7 +14,6 @@ import (
 
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/audit"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/model"
-	"github.com/tum-zulip/go-campusbot/internal/zulipbot/permissions"
 	storagedb "github.com/tum-zulip/go-campusbot/internal/zulipbot/storage/db"
 )
 
@@ -170,99 +169,6 @@ func (repo *Repository) SetConfigValue(ctx context.Context, change ConfigChange)
 			NewValue:    change.NewValueRedacted,
 		})
 	})
-}
-
-func (repo *Repository) UserRole(ctx context.Context, userID int64) (permissions.Role, bool, error) {
-	value, err := repo.queries.GetLocalUserRole(ctx, userID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", false, nil
-	}
-	if err != nil {
-		return "", false, fmt.Errorf("read role for Zulip user %d: %w", userID, err)
-	}
-	role, err := parseLocalRole(value)
-	if err != nil {
-		return "", false, err
-	}
-	return role, true, nil
-}
-
-func (repo *Repository) SetUserRole(
-	ctx context.Context,
-	userID int64,
-	role permissions.Role,
-	grantedByUserID int64,
-) error {
-	if userID <= 0 {
-		return errors.New("user ID must be positive")
-	}
-	if !role.Valid() {
-		return fmt.Errorf("invalid role %q", role)
-	}
-	if role == permissions.RoleOwner {
-		return errors.New(
-			"role 'owner' cannot be stored in the database; the bot owner is determined automatically from the Zulip API",
-		)
-	}
-	return repo.withTx(ctx, func(q *storagedb.Queries) error {
-		if role == permissions.RoleNone {
-			if err := q.DeleteLocalUserRole(ctx, userID); err != nil {
-				return fmt.Errorf("delete local role for Zulip user %d: %w", userID, err)
-			}
-		} else {
-			if err := q.SetLocalUserRole(ctx, storagedb.SetLocalUserRoleParams{
-				UserID:          userID,
-				Role:            string(role),
-				GrantedByUserID: nullableInt64(grantedByUserID),
-				UpdatedAt:       formatTime(repo.now()),
-			}); err != nil {
-				return fmt.Errorf("write role for Zulip user %d: %w", userID, err)
-			}
-		}
-		return repo.recordAuditTx(ctx, q, audit.Record{
-			At:          repo.now(),
-			ActorUserID: grantedByUserID,
-			Action:      "role.set",
-			Target:      fmt.Sprintf("zulip_user:%d", userID),
-			Status:      audit.StatusSuccess,
-			OldValue:    "",
-			NewValue:    string(role),
-		})
-	})
-}
-
-// UserRoleRecord is a row from user_roles.
-type UserRoleRecord struct {
-	UserID          int64
-	Role            permissions.Role
-	GrantedByUserID int64
-	UpdatedAt       time.Time
-}
-
-// ListUserRoles returns all explicitly assigned local roles, newest-first.
-func (repo *Repository) ListUserRoles(ctx context.Context) ([]UserRoleRecord, error) {
-	rows, err := repo.queries.ListLocalUserRoles(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("list user roles: %w", err)
-	}
-	records := make([]UserRoleRecord, 0, len(rows))
-	for _, row := range rows {
-		role, err := parseLocalRole(row.Role)
-		if err != nil {
-			return nil, err
-		}
-		updatedAt, err := parseTime(row.UpdatedAt)
-		if err != nil {
-			return nil, err
-		}
-		records = append(records, UserRoleRecord{
-			UserID:          row.UserID,
-			Role:            role,
-			GrantedByUserID: nullInt64Value(row.GrantedByUserID),
-			UpdatedAt:       updatedAt,
-		})
-	}
-	return records, nil
 }
 
 // Ping checks if the database is reachable.
@@ -567,17 +473,6 @@ func restartRequestFromRow(row storagedb.GetPendingRestartRequestRow) (RestartRe
 		request.Target.ChannelID = row.ChannelID.Int64
 	}
 	return request, true, nil
-}
-
-func parseLocalRole(value string) (permissions.Role, error) {
-	role, err := permissions.ParseRole(value)
-	if err != nil {
-		return "", err
-	}
-	if role == permissions.RoleOwner {
-		return "", errors.New("invalid local role 'owner'; bot owner is Zulip-derived")
-	}
-	return role, nil
 }
 
 func nullableInt64(value int64) sql.NullInt64 {

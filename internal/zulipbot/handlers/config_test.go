@@ -7,10 +7,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/tum-zulip/go-zulip/zulip"
+
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/command"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/configsvc"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/model"
-	"github.com/tum-zulip/go-campusbot/internal/zulipbot/permissions"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/storage"
 )
 
@@ -20,10 +21,7 @@ func TestConfigHandlerAdminCanListGetAndSet(t *testing.T) {
 	ctx := context.Background()
 	repo := openHandlerTestRepository(t)
 	defer repo.Close()
-	if err := repo.SetUserRole(ctx, 10, permissions.RoleAdmin, 0); err != nil {
-		t.Fatalf("SetUserRole() failed: %v", err)
-	}
-	service := configsvc.NewService(repo, permissions.NewService(repo, nil))
+	service := configsvc.NewService(repo, fakeConfigAuth{10: zulip.RoleAdmin})
 	handler := NewConfigHandler(service)
 	actor := model.Actor{UserID: 10}
 
@@ -71,10 +69,7 @@ func TestConfigHandlerReportsSafeUserErrors(t *testing.T) {
 	ctx := context.Background()
 	repo := openHandlerTestRepository(t)
 	defer repo.Close()
-	if err := repo.SetUserRole(ctx, 10, permissions.RoleAdmin, 0); err != nil {
-		t.Fatalf("SetUserRole() failed: %v", err)
-	}
-	service := configsvc.NewService(repo, permissions.NewService(repo, nil))
+	service := configsvc.NewService(repo, fakeConfigAuth{10: zulip.RoleAdmin})
 	handler := NewConfigHandler(service)
 
 	_, err := handler.Handle(ctx, command.Request{
@@ -118,10 +113,27 @@ func TestConfigHandlerFailsClosedWhenPermissionsUnavailable(t *testing.T) {
 	}
 }
 
+// fakeConfigAuth maps user IDs to Zulip roles; unmapped users get RoleMember.
+type fakeConfigAuth map[int64]zulip.Role
+
+func (f fakeConfigAuth) Check(_ context.Context, actor model.Actor, minRole zulip.Role) error {
+	if minRole == 0 {
+		return nil
+	}
+	role, ok := f[actor.UserID]
+	if !ok {
+		role = zulip.RoleMember
+	}
+	if role <= minRole {
+		return nil
+	}
+	return command.ErrDenied
+}
+
 type failingPermission struct{}
 
-func (failingPermission) Check(ctx context.Context, actor model.Actor, permission permissions.Permission) error {
-	return permissions.ErrPermissionUnavailable
+func (failingPermission) Check(_ context.Context, _ model.Actor, _ zulip.Role) error {
+	return command.ErrPermissionUnavailable
 }
 
 func openHandlerTestRepository(t *testing.T) *storage.Repository {

@@ -20,28 +20,6 @@ ON CONFLICT(key) DO UPDATE SET
   updated_by_user_id = excluded.updated_by_user_id,
   updated_at = excluded.updated_at;
 
--- name: GetLocalUserRole :one
-SELECT role
-FROM user_roles
-WHERE user_id = ?;
-
--- name: SetLocalUserRole :exec
-INSERT INTO user_roles(user_id, role, granted_by_user_id, updated_at)
-VALUES (?, ?, ?, ?)
-ON CONFLICT(user_id) DO UPDATE SET
-  role = excluded.role,
-  granted_by_user_id = excluded.granted_by_user_id,
-  updated_at = excluded.updated_at;
-
--- name: DeleteLocalUserRole :exec
-DELETE FROM user_roles
-WHERE user_id = ?;
-
--- name: ListLocalUserRoles :many
-SELECT user_id, role, granted_by_user_id, updated_at
-FROM user_roles
-ORDER BY updated_at DESC, user_id ASC;
-
 -- name: GetEventQueueState :one
 SELECT queue_id, last_event_id, updated_at
 FROM event_queue_state

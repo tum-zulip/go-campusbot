@@ -6,9 +6,10 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/tum-zulip/go-zulip/zulip"
+
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/command"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/configsvc"
-	"github.com/tum-zulip/go-campusbot/internal/zulipbot/permissions"
 )
 
 type ConfigHandler struct {
@@ -24,7 +25,7 @@ func (handler *ConfigHandler) Metadata() command.Metadata {
 		Name:       "config",
 		Summary:    "Read or update bot configuration.",
 		Usage:      "config <list|get|set> [key] [value]",
-		Permission: permissions.PermissionAdmin,
+		Permission: zulip.RoleAdmin,
 		Privileged: true,
 	}
 }
@@ -110,10 +111,10 @@ func (handler *ConfigHandler) userFacingConfigError(err error, action string) er
 	if errors.Is(err, configsvc.ErrUnknownKey) {
 		return command.NewUserError("Unknown configuration key.")
 	}
-	if errors.Is(err, permissions.ErrDenied) {
+	if errors.Is(err, command.ErrDenied) {
 		return command.NewUserError(fmt.Sprintf("You are not authorized to %s that configuration value.", action))
 	}
-	if errors.Is(err, permissions.ErrPermissionUnavailable) {
+	if errors.Is(err, command.ErrPermissionUnavailable) {
 		return command.NewUserError("I cannot verify permissions right now, so I will not access configuration.")
 	}
 	return err

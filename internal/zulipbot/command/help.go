@@ -5,15 +5,16 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/tum-zulip/go-zulip/zulip"
+
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/model"
-	"github.com/tum-zulip/go-campusbot/internal/zulipbot/permissions"
 )
 
-// RoleProvider resolves the permission role for an actor.
+// RoleProvider resolves the Zulip organizational role for an actor.
 // It is used by HelpHandler to filter visible commands by the actor's role.
-// If role resolution fails, HelpHandler falls back to RoleNone (fail closed).
+// If role resolution fails, HelpHandler falls back to showing only public commands.
 type RoleProvider interface {
-	RoleFor(ctx context.Context, actor model.Actor) (permissions.Role, error)
+	RoleFor(ctx context.Context, actor model.Actor) (zulip.Role, error)
 }
 
 type HelpHandler struct {
@@ -23,7 +24,7 @@ type HelpHandler struct {
 
 // NewHelpHandler creates a HelpHandler.
 // roles is used to determine which commands are visible to the requesting actor.
-// If roles is nil, only public (PermissionNone) commands are shown.
+// If roles is nil, only public (PermOpen) commands are shown.
 func NewHelpHandler(registry *Registry, roles RoleProvider) *HelpHandler {
 	return &HelpHandler{registry: registry, roles: roles}
 }
@@ -33,7 +34,7 @@ func (handler *HelpHandler) Metadata() Metadata {
 		Name:       "help",
 		Summary:    "Show commands available to you.",
 		Usage:      "help [command]",
-		Permission: permissions.PermissionNone,
+		Permission: PermOpen,
 	}
 }
 
@@ -56,26 +57,25 @@ func (handler *HelpHandler) Handle(ctx context.Context, req Request) (Result, er
 	return Result{Content: formatHelp(metas, role)}, nil
 }
 
-// actorRole resolves the actor's role, failing closed to RoleNone on any error.
-// This ensures that a DB outage never leaks admin/owner commands in help output.
-func (handler *HelpHandler) actorRole(ctx context.Context, actor model.Actor) permissions.Role {
+// actorRole resolves the actor's Zulip role, falling back to RoleMember on any error.
+// This ensures that a lookup failure never leaks admin/owner commands in help output.
+func (handler *HelpHandler) actorRole(ctx context.Context, actor model.Actor) zulip.Role {
 	if handler.roles == nil {
-		return permissions.RoleNone
+		return zulip.RoleMember
 	}
 	role, err := handler.roles.RoleFor(ctx, actor)
 	if err != nil {
-		// Fail closed: if permission state is unavailable, show only public commands.
-		return permissions.RoleNone
+		return zulip.RoleMember
 	}
 	return role
 }
 
 // visibleMetas returns the subset of registered commands the actor may run.
-func (handler *HelpHandler) visibleMetas(role permissions.Role) []Metadata {
+func (handler *HelpHandler) visibleMetas(role zulip.Role) []Metadata {
 	all := handler.registry.Metadata()
 	visible := make([]Metadata, 0, len(all))
 	for _, meta := range all {
-		if role.Allows(meta.Permission) {
+		if roleAllows(role, meta.Permission) {
 			visible = append(visible, meta)
 		}
 	}
@@ -83,14 +83,12 @@ func (handler *HelpHandler) visibleMetas(role permissions.Role) []Metadata {
 }
 
 // formatHelp renders the help text for the given command list and actor role.
-// When meta.OwnerUsage is set and the actor is an owner, the owner-specific
-// usage string is shown (which may include owner-only subcommands).
-func formatHelp(metas []Metadata, role permissions.Role) string {
+func formatHelp(metas []Metadata, role zulip.Role) string {
 	var builder strings.Builder
 	builder.WriteString("Supported commands (send as a private message, no prefix needed):\n")
 	for _, meta := range metas {
 		usage := meta.Usage
-		if meta.OwnerUsage != "" && role == permissions.RoleOwner {
+		if meta.OwnerUsage != "" && role <= zulip.RoleOwner {
 			usage = meta.OwnerUsage
 		}
 		builder.WriteString("- `")
@@ -103,4 +101,11 @@ func formatHelp(metas []Metadata, role permissions.Role) string {
 		builder.WriteByte('\n')
 	}
 	return strings.TrimSpace(builder.String())
+}
+
+// roleAllows returns true if actorRole has at least the required privilege level.
+// A required role of 0 (PermOpen) allows everyone.
+// Lower numeric Zulip role values represent higher privilege (owner=100 < admin=200 < member=400).
+func roleAllows(actorRole, requiredRole zulip.Role) bool {
+	return requiredRole == 0 || actorRole <= requiredRole
 }

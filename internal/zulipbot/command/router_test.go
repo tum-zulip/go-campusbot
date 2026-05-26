@@ -3,13 +3,12 @@ package command
 import (
 	"context"
 	"errors"
-	"path/filepath"
 	"testing"
+
+	"github.com/tum-zulip/go-zulip/zulip"
 
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/audit"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/model"
-	"github.com/tum-zulip/go-campusbot/internal/zulipbot/permissions"
-	"github.com/tum-zulip/go-campusbot/internal/zulipbot/storage"
 )
 
 func TestRouterRejectsUnauthorizedCommandAndAudits(t *testing.T) {
@@ -20,7 +19,7 @@ func TestRouterRejectsUnauthorizedCommandAndAudits(t *testing.T) {
 		Meta: Metadata{
 			Name:       "restart",
 			Usage:      "restart",
-			Permission: permissions.PermissionOwner,
+			Permission: PermOwner,
 			Privileged: true,
 		},
 		Fn: func(ctx context.Context, req Request) (Result, error) {
@@ -62,7 +61,7 @@ func TestRouterMapsUserErrorsToResponses(t *testing.T) {
 
 	registry := NewRegistry()
 	err := registry.Register(HandlerFunc{
-		Meta: Metadata{Name: "config", Usage: "config", Permission: permissions.PermissionNone},
+		Meta: Metadata{Name: "config", Usage: "config", Permission: PermOpen},
 		Fn: func(ctx context.Context, req Request) (Result, error) {
 			return Result{}, NewUserError("Usage: `config list`")
 		},
@@ -88,18 +87,9 @@ func TestRouterEnforcesRealPermissionRolesForAdminCommand(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
-	repo, err := storage.Open(ctx, filepath.Join(t.TempDir(), "bot.sqlite3"))
-	if err != nil {
-		t.Fatalf("Open() failed: %v", err)
-	}
-	defer repo.Close()
-	if err := repo.SetUserRole(ctx, 1, permissions.RoleNone, 0); err != nil {
-		t.Fatalf("SetUserRole(none) failed: %v", err)
-	}
-	if err := repo.SetUserRole(ctx, 2, permissions.RoleAdmin, 0); err != nil {
-		t.Fatalf("SetUserRole(admin) failed: %v", err)
-	}
-	// User 3 is the bot owner (resolved via ownerProvider, not stored in DB).
+
+	// User 3 is the Zulip org owner; users 1, 2, 999 are regular members.
+	auth := fakeAuthorizer{3: zulip.RoleOwner}
 
 	var ran int
 	registry := NewRegistry()
@@ -107,7 +97,7 @@ func TestRouterEnforcesRealPermissionRolesForAdminCommand(t *testing.T) {
 		Meta: Metadata{
 			Name:       "restart",
 			Usage:      "restart",
-			Permission: permissions.PermissionOwner,
+			Permission: PermOwner,
 			Privileged: true,
 		},
 		Fn: func(ctx context.Context, req Request) (Result, error) {
@@ -117,11 +107,9 @@ func TestRouterEnforcesRealPermissionRolesForAdminCommand(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Register() failed: %v", err)
 	}
-	// Use ownerProvider to make user 3 the bot owner.
 	router, err := NewRouter(RouterConfig{
 		Registry: registry,
-		Auth:     permissions.NewService(repo, staticOwnerID(3)),
-		Auditor:  repo,
+		Auth:     auth,
 	})
 	if err != nil {
 		t.Fatalf("NewRouter() failed: %v", err)
@@ -145,20 +133,32 @@ func TestRouterEnforcesRealPermissionRolesForAdminCommand(t *testing.T) {
 	}
 }
 
-// staticOwnerID is a test OwnerProvider that returns a fixed user ID.
-type staticOwnerID int64
+// fakeAuthorizer maps user IDs to Zulip roles; unmapped users get RoleMember.
+type fakeAuthorizer map[int64]zulip.Role
 
-func (id staticOwnerID) OwnerUserID() int64 { return int64(id) }
+func (f fakeAuthorizer) Check(_ context.Context, actor model.Actor, minRole zulip.Role) error {
+	if minRole == 0 {
+		return nil
+	}
+	role, ok := f[actor.UserID]
+	if !ok {
+		role = zulip.RoleMember
+	}
+	if role <= minRole {
+		return nil
+	}
+	return ErrDenied
+}
 
 type denyingAuthorizer struct{}
 
-func (denyingAuthorizer) Check(ctx context.Context, actor model.Actor, permission permissions.Permission) error {
-	return permissions.ErrDenied
+func (denyingAuthorizer) Check(_ context.Context, _ model.Actor, _ zulip.Role) error {
+	return ErrDenied
 }
 
 type allowingAuthorizer struct{}
 
-func (allowingAuthorizer) Check(ctx context.Context, actor model.Actor, permission permissions.Permission) error {
+func (allowingAuthorizer) Check(_ context.Context, _ model.Actor, _ zulip.Role) error {
 	return nil
 }
 
@@ -166,7 +166,7 @@ type recordingAuditor struct {
 	records []audit.Record
 }
 
-func (auditor *recordingAuditor) RecordAudit(ctx context.Context, record audit.Record) error {
+func (auditor *recordingAuditor) RecordAudit(_ context.Context, record audit.Record) error {
 	if record.Action == "" {
 		return errors.New("empty action")
 	}

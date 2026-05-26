@@ -14,7 +14,6 @@ import (
 
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/command"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/model"
-	"github.com/tum-zulip/go-campusbot/internal/zulipbot/permissions"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/storage"
 )
 
@@ -25,12 +24,11 @@ func TestLoopProcessesMessageCommandsAndPersistsEventState(t *testing.T) {
 
 	repo := openEventLoopTestRepository(t)
 	defer repo.Close()
-	permissionService := permissions.NewService(repo, nil)
 	registry := command.NewRegistry()
 	if err := registry.Register(command.NewHelpHandler(registry, nil)); err != nil {
 		t.Fatalf("Register() failed: %v", err)
 	}
-	router, err := command.NewRouter(command.RouterConfig{Registry: registry, Auth: permissionService})
+	router, err := command.NewRouter(command.RouterConfig{Registry: registry, Auth: allowingAuthorizer{}})
 	if err != nil {
 		t.Fatalf("NewRouter() failed: %v", err)
 	}
@@ -87,12 +85,11 @@ func TestLoopRecoversFromBadStoredQueue(t *testing.T) {
 		t.Fatalf("SaveEventQueueState() failed: %v", err)
 	}
 
-	permissionService := permissions.NewService(repo, nil)
 	registry := command.NewRegistry()
 	if err := registry.Register(command.NewHelpHandler(registry, nil)); err != nil {
 		t.Fatalf("Register() failed: %v", err)
 	}
-	router, err := command.NewRouter(command.RouterConfig{Registry: registry, Auth: permissionService})
+	router, err := command.NewRouter(command.RouterConfig{Registry: registry, Auth: allowingAuthorizer{}})
 	if err != nil {
 		t.Fatalf("NewRouter() failed: %v", err)
 	}
@@ -132,12 +129,11 @@ func TestLoopSkipsDuplicateMessageEvents(t *testing.T) {
 	ctx := context.Background()
 	repo := openEventLoopTestRepository(t)
 	defer repo.Close()
-	permissionService := permissions.NewService(repo, nil)
 	registry := command.NewRegistry()
 	if err := registry.Register(command.NewHelpHandler(registry, nil)); err != nil {
 		t.Fatalf("Register() failed: %v", err)
 	}
-	router, err := command.NewRouter(command.RouterConfig{Registry: registry, Auth: permissionService})
+	router, err := command.NewRouter(command.RouterConfig{Registry: registry, Auth: allowingAuthorizer{}})
 	if err != nil {
 		t.Fatalf("NewRouter() failed: %v", err)
 	}
@@ -194,12 +190,11 @@ func TestLoopResumesStoredQueueWithoutRegistering(t *testing.T) {
 	if err := repo.SaveEventQueueState(ctx, storage.EventQueueState{QueueID: "saved", LastEventID: 77}); err != nil {
 		t.Fatalf("SaveEventQueueState() failed: %v", err)
 	}
-	permissionService := permissions.NewService(repo, nil)
 	registry := command.NewRegistry()
 	if err := registry.Register(command.NewHelpHandler(registry, nil)); err != nil {
 		t.Fatalf("Register() failed: %v", err)
 	}
-	router, err := command.NewRouter(command.RouterConfig{Registry: registry, Auth: permissionService})
+	router, err := command.NewRouter(command.RouterConfig{Registry: registry, Auth: allowingAuthorizer{}})
 	if err != nil {
 		t.Fatalf("NewRouter() failed: %v", err)
 	}
@@ -235,12 +230,11 @@ func TestLoopRecoversFromBadQueueDuringPollAndAudits(t *testing.T) {
 	ctx := context.Background()
 	repo := openEventLoopTestRepository(t)
 	defer repo.Close()
-	permissionService := permissions.NewService(repo, nil)
 	registry := command.NewRegistry()
 	if err := registry.Register(command.NewHelpHandler(registry, nil)); err != nil {
 		t.Fatalf("Register() failed: %v", err)
 	}
-	router, err := command.NewRouter(command.RouterConfig{Registry: registry, Auth: permissionService})
+	router, err := command.NewRouter(command.RouterConfig{Registry: registry, Auth: allowingAuthorizer{}})
 	if err != nil {
 		t.Fatalf("NewRouter() failed: %v", err)
 	}
@@ -289,12 +283,11 @@ func TestLoopHeartbeatUpdatesOnlyEventState(t *testing.T) {
 	ctx := context.Background()
 	repo := openEventLoopTestRepository(t)
 	defer repo.Close()
-	permissionService := permissions.NewService(repo, nil)
 	registry := command.NewRegistry()
 	if err := registry.Register(command.NewHelpHandler(registry, nil)); err != nil {
 		t.Fatalf("Register() failed: %v", err)
 	}
-	router, err := command.NewRouter(command.RouterConfig{Registry: registry, Auth: permissionService})
+	router, err := command.NewRouter(command.RouterConfig{Registry: registry, Auth: allowingAuthorizer{}})
 	if err != nil {
 		t.Fatalf("NewRouter() failed: %v", err)
 	}
@@ -344,12 +337,11 @@ func TestLoopHandlesMalformedMessageEventWithoutAdvancing(t *testing.T) {
 	ctx := context.Background()
 	repo := openEventLoopTestRepository(t)
 	defer repo.Close()
-	permissionService := permissions.NewService(repo, nil)
 	registry := command.NewRegistry()
 	if err := registry.Register(command.NewHelpHandler(registry, nil)); err != nil {
 		t.Fatalf("Register() failed: %v", err)
 	}
-	router, err := command.NewRouter(command.RouterConfig{Registry: registry, Auth: permissionService})
+	router, err := command.NewRouter(command.RouterConfig{Registry: registry, Auth: allowingAuthorizer{}})
 	if err != nil {
 		t.Fatalf("NewRouter() failed: %v", err)
 	}
@@ -537,12 +529,11 @@ func TestLoopPollTimeoutRetriesWithoutBackoff(t *testing.T) {
 	ctx := context.Background()
 	repo := openEventLoopTestRepository(t)
 	defer repo.Close()
-	permissionService := permissions.NewService(repo, nil)
 	registry := command.NewRegistry()
 	if err := registry.Register(command.NewHelpHandler(registry, nil)); err != nil {
 		t.Fatalf("Register() failed: %v", err)
 	}
-	router, err := command.NewRouter(command.RouterConfig{Registry: registry, Auth: permissionService})
+	router, err := command.NewRouter(command.RouterConfig{Registry: registry, Auth: allowingAuthorizer{}})
 	if err != nil {
 		t.Fatalf("NewRouter() failed: %v", err)
 	}
@@ -595,9 +586,8 @@ func TestLoopPollTimeoutDefaultIs90s(t *testing.T) {
 
 	repo := openEventLoopTestRepository(t)
 	defer repo.Close()
-	permissionService := permissions.NewService(repo, nil)
 	registry := command.NewRegistry()
-	router, err := command.NewRouter(command.RouterConfig{Registry: registry, Auth: permissionService})
+	router, err := command.NewRouter(command.RouterConfig{Registry: registry, Auth: allowingAuthorizer{}})
 	if err != nil {
 		t.Fatalf("NewRouter() failed: %v", err)
 	}
@@ -641,4 +631,11 @@ func (s *callbackSource) Poll(ctx context.Context, state QueueState) ([]events.E
 
 func (s *callbackSource) Delete(ctx context.Context, queueID string) error {
 	return s.deleteFn(ctx, queueID)
+}
+
+// allowingAuthorizer satisfies command.Authorizer and permits all actions.
+type allowingAuthorizer struct{}
+
+func (allowingAuthorizer) Check(_ context.Context, _ model.Actor, _ z.Role) error {
+	return nil
 }

@@ -5,8 +5,16 @@ import (
 	"fmt"
 	"sort"
 
+	"github.com/tum-zulip/go-zulip/zulip"
+
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/model"
-	"github.com/tum-zulip/go-campusbot/internal/zulipbot/permissions"
+)
+
+// Permission levels for command authorization, mapped directly to Zulip organizational roles.
+const (
+	PermOpen  zulip.Role = 0               // no restriction; open to everyone
+	PermAdmin            = zulip.RoleAdmin // org admin or owner (Zulip role <= 200)
+	PermOwner            = zulip.RoleOwner // org owner only (Zulip role <= 100)
 )
 
 type Metadata struct {
@@ -14,9 +22,8 @@ type Metadata struct {
 	Summary string
 	Usage   string
 	// OwnerUsage, when non-empty, overrides Usage in help output shown to owners.
-	// Use this for commands that expose additional subcommands only owners may run.
 	OwnerUsage string
-	Permission permissions.Permission
+	Permission zulip.Role
 	Privileged bool
 }
 
@@ -65,9 +72,6 @@ func (registry *Registry) Register(handler Handler) error {
 	meta := handler.Metadata()
 	if !validCommandName(meta.Name) {
 		return fmt.Errorf("invalid command name %q", meta.Name)
-	}
-	if meta.Permission == "" {
-		return fmt.Errorf("command %q has no permission", meta.Name)
 	}
 	if _, exists := registry.handlers[meta.Name]; exists {
 		return fmt.Errorf("command %q already registered", meta.Name)

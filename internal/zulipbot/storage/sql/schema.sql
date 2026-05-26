@@ -14,13 +14,6 @@ CREATE TABLE IF NOT EXISTS bot_config (
   updated_at TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS user_roles (
-  user_id INTEGER PRIMARY KEY,
-  role TEXT NOT NULL CHECK (role IN ('admin', 'none')),
-  granted_by_user_id INTEGER,
-  updated_at TEXT NOT NULL
-);
-
 CREATE TABLE IF NOT EXISTS event_queue_state (
   id INTEGER PRIMARY KEY CHECK (id = 1),
   queue_id TEXT NOT NULL,

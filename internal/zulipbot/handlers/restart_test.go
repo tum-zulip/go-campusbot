@@ -2,14 +2,13 @@ package handlers
 
 import (
 	"context"
-	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/tum-zulip/go-zulip/zulip"
+
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/command"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/model"
-	"github.com/tum-zulip/go-campusbot/internal/zulipbot/permissions"
-	"github.com/tum-zulip/go-campusbot/internal/zulipbot/storage"
 )
 
 func TestRestartHandlerSchedulesOnlyAfterAcknowledgementHook(t *testing.T) {
@@ -73,7 +72,6 @@ func TestRestartHandlerAcknowledgementContentIsPresent(t *testing.T) {
 	if result.Content == "" {
 		t.Fatal("restart should return a non-empty acknowledgement message")
 	}
-	// Ack must be sent before scheduling (service.calls==0 here).
 	if service.calls != 0 {
 		t.Fatal("restart must not be scheduled before the response is sent")
 	}
@@ -85,35 +83,26 @@ func TestRestartMetadataIsOwnerOnly(t *testing.T) {
 
 	handler := NewRestartHandler(&fakeRestartService{})
 	meta := handler.Metadata()
-	if meta.Permission != permissions.PermissionOwner {
-		t.Errorf("restart permission = %q, want %q", meta.Permission, permissions.PermissionOwner)
+	if meta.Permission != zulip.RoleOwner {
+		t.Errorf("restart permission = %v, want %v (zulip.RoleOwner)", meta.Permission, zulip.RoleOwner)
 	}
 	if !meta.Privileged {
 		t.Error("restart should be marked Privileged")
 	}
 }
 
-// TestRestartRouterOwnerCanRun verifies that an owner-authenticated actor
-// can run restart end-to-end through the router.
+// TestRestartRouterOwnerCanRun verifies that a Zulip org owner can run restart.
 func TestRestartRouterOwnerCanRun(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
-	dbPath := filepath.Join(t.TempDir(), "bot.sqlite3")
-	repo, err := storage.Open(ctx, dbPath)
-	if err != nil {
-		t.Fatalf("Open() failed: %v", err)
-	}
-	defer repo.Close()
-
 	registry := command.NewRegistry()
 	if err := registry.Register(NewRestartHandler(&fakeRestartService{})); err != nil {
 		t.Fatalf("Register() failed: %v", err)
 	}
 
-	// Owner is user 3; no DB roles needed.
-	type staticOwner int64
-	auth := permissions.NewService(repo, staticOwnerIDForRestart(3))
+	// User 3 is the Zulip org owner.
+	auth := fakeRestartAuth{3: zulip.RoleOwner}
 	router, err := command.NewRouter(command.RouterConfig{
 		Registry: registry,
 		Auth:     auth,
@@ -139,23 +128,13 @@ func TestRestartRouterAdminCannotRun(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
-	dbPath := filepath.Join(t.TempDir(), "bot.sqlite3")
-	repo, err := storage.Open(ctx, dbPath)
-	if err != nil {
-		t.Fatalf("Open() failed: %v", err)
-	}
-	defer repo.Close()
-
-	if err := repo.SetUserRole(ctx, 2, permissions.RoleAdmin, 0); err != nil {
-		t.Fatalf("SetUserRole() failed: %v", err)
-	}
-
 	registry := command.NewRegistry()
 	if err := registry.Register(NewRestartHandler(&fakeRestartService{})); err != nil {
 		t.Fatalf("Register() failed: %v", err)
 	}
 
-	auth := permissions.NewService(repo, staticOwnerIDForRestart(99))
+	// User 2 is a Zulip admin; user 99 is the owner.
+	auth := fakeRestartAuth{2: zulip.RoleAdmin, 99: zulip.RoleOwner}
 	router, err := command.NewRouter(command.RouterConfig{
 		Registry: registry,
 		Auth:     auth,
@@ -173,24 +152,17 @@ func TestRestartRouterAdminCannotRun(t *testing.T) {
 	}
 }
 
-// TestRestartRouterNoneUserCannotRun verifies a none user cannot run restart.
+// TestRestartRouterNoneUserCannotRun verifies a regular member cannot run restart.
 func TestRestartRouterNoneUserCannotRun(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
-	dbPath := filepath.Join(t.TempDir(), "bot.sqlite3")
-	repo, err := storage.Open(ctx, dbPath)
-	if err != nil {
-		t.Fatalf("Open() failed: %v", err)
-	}
-	defer repo.Close()
-
 	registry := command.NewRegistry()
 	if err := registry.Register(NewRestartHandler(&fakeRestartService{})); err != nil {
 		t.Fatalf("Register() failed: %v", err)
 	}
 
-	auth := permissions.NewService(repo, staticOwnerIDForRestart(99))
+	auth := fakeRestartAuth{}
 	router, err := command.NewRouter(command.RouterConfig{
 		Registry: registry,
 		Auth:     auth,
@@ -204,7 +176,7 @@ func TestRestartRouterNoneUserCannotRun(t *testing.T) {
 		Actor:      model.Actor{UserID: 1},
 	})
 	if result.Content != "permission denied" {
-		t.Fatalf("none user should be denied restart, got: %q", result.Content)
+		t.Fatalf("member should be denied restart, got: %q", result.Content)
 	}
 }
 
@@ -222,7 +194,7 @@ func TestRestartNotVisibleInHelpForAdmin(t *testing.T) {
 			Name:       "status",
 			Summary:    "Status.",
 			Usage:      "status",
-			Permission: permissions.PermissionNone,
+			Permission: command.PermOpen,
 		},
 		Fn: func(_ context.Context, _ command.Request) (command.Result, error) {
 			return command.Result{}, nil
@@ -231,7 +203,7 @@ func TestRestartNotVisibleInHelpForAdmin(t *testing.T) {
 		t.Fatalf("Register(status) failed: %v", err)
 	}
 
-	helpHandler := command.NewHelpHandler(registry, fixedRoleProvider{permissions.RoleAdmin})
+	helpHandler := command.NewHelpHandler(registry, fixedRoleProvider{zulip.RoleAdmin})
 	result, err := helpHandler.Handle(context.Background(), command.Request{
 		Invocation: command.Invocation{Name: "help"},
 		Actor:      model.Actor{UserID: 2},
@@ -245,7 +217,7 @@ func TestRestartNotVisibleInHelpForAdmin(t *testing.T) {
 }
 
 // TestRestartNotVisibleInHelpForNoneUser verifies restart does not appear in
-// help output for a none user.
+// help output for a regular member.
 func TestRestartNotVisibleInHelpForNoneUser(t *testing.T) {
 	t.Parallel()
 
@@ -254,7 +226,7 @@ func TestRestartNotVisibleInHelpForNoneUser(t *testing.T) {
 		t.Fatalf("Register() failed: %v", err)
 	}
 
-	helpHandler := command.NewHelpHandler(registry, fixedRoleProvider{permissions.RoleNone})
+	helpHandler := command.NewHelpHandler(registry, fixedRoleProvider{zulip.RoleMember})
 	result, err := helpHandler.Handle(context.Background(), command.Request{
 		Invocation: command.Invocation{Name: "help"},
 		Actor:      model.Actor{UserID: 1},
@@ -263,20 +235,32 @@ func TestRestartNotVisibleInHelpForNoneUser(t *testing.T) {
 		t.Fatalf("help failed: %v", err)
 	}
 	if strings.Contains(result.Content, "restart") {
-		t.Errorf("restart must not appear in none-user help, got: %q", result.Content)
+		t.Errorf("restart must not appear in member help, got: %q", result.Content)
 	}
 }
 
-// staticOwnerIDForRestart is a test OwnerProvider for restart tests.
-type staticOwnerIDForRestart int64
+// fakeRestartAuth maps user IDs to Zulip roles; unmapped users get RoleMember.
+type fakeRestartAuth map[int64]zulip.Role
 
-func (id staticOwnerIDForRestart) OwnerUserID() int64 { return int64(id) }
+func (f fakeRestartAuth) Check(_ context.Context, actor model.Actor, minRole zulip.Role) error {
+	if minRole == 0 {
+		return nil
+	}
+	role, ok := f[actor.UserID]
+	if !ok {
+		role = zulip.RoleMember
+	}
+	if role <= minRole {
+		return nil
+	}
+	return command.ErrDenied
+}
 
 // fixedRoleProvider implements command.RoleProvider with a fixed role.
 type fixedRoleProvider struct {
-	role permissions.Role
+	role zulip.Role
 }
 
-func (p fixedRoleProvider) RoleFor(_ context.Context, _ model.Actor) (permissions.Role, error) {
+func (p fixedRoleProvider) RoleFor(_ context.Context, _ model.Actor) (zulip.Role, error) {
 	return p.role, nil
 }

@@ -5,9 +5,10 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/tum-zulip/go-zulip/zulip"
+
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/command"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/model"
-	"github.com/tum-zulip/go-campusbot/internal/zulipbot/permissions"
 )
 
 // StatusProvider is the interface used by StatusHandler.
@@ -24,9 +25,9 @@ type StatusProvider interface {
 	Accepting() bool
 }
 
-// AdminChecker checks whether an actor has a given permission.
+// AdminChecker checks whether an actor has at least the given Zulip role.
 type AdminChecker interface {
-	Check(ctx context.Context, actor model.Actor, permission permissions.Permission) error
+	Check(ctx context.Context, actor model.Actor, minRole zulip.Role) error
 }
 
 // StatusHandler handles the 'status' command.
@@ -45,7 +46,7 @@ func (handler *StatusHandler) Metadata() command.Metadata {
 		Name:       "status",
 		Summary:    "Show bot status and health information.",
 		Usage:      "status",
-		Permission: permissions.PermissionNone,
+		Permission: command.PermOpen,
 		Privileged: false,
 	}
 }
@@ -70,7 +71,7 @@ func (handler *StatusHandler) Handle(ctx context.Context, req command.Request) (
 		hours, minutes, seconds, accepting)
 
 	// Admin-only details.
-	isAdmin := handler.adminAuth.Check(ctx, req.Actor, permissions.PermissionAdmin) == nil
+	isAdmin := handler.adminAuth.Check(ctx, req.Actor, zulip.RoleAdmin) == nil
 	if isAdmin {
 		queueID, lastEventID, ok, err := handler.provider.QueueStatus(ctx)
 		if err != nil {
