@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"reflect"
 	"sort"
+	"strings"
 	"sync"
 	"unsafe"
 )
@@ -30,6 +31,20 @@ type Client struct {
 	state *state
 }
 
+type Operation string
+
+const (
+	OperationCreateUserGroup        Operation = "CreateUserGroup"
+	OperationDeactivateUserGroup    Operation = "DeactivateUserGroup"
+	OperationGetChannelByID         Operation = "GetChannelByID"
+	OperationGetSubscribers         Operation = "GetSubscribers"
+	OperationGetIsUserGroupMember   Operation = "GetIsUserGroupMember"
+	OperationGetUserGroupMembers    Operation = "GetUserGroupMembers"
+	OperationSubscribe              Operation = "Subscribe"
+	OperationUnsubscribe            Operation = "Unsubscribe"
+	OperationUpdateUserGroupMembers Operation = "UpdateUserGroupMembers"
+)
+
 type state struct {
 	mu              sync.Mutex
 	nextChannelID   int64
@@ -37,6 +52,41 @@ type state struct {
 	channels        map[int64]channelState
 	channelIDs      map[string]int64
 	userGroups      map[int64]userGroupState
+	failures        map[Operation][]error
+	serialization   *RequestSerialization
+}
+
+type RequestSerialization struct {
+	mu     sync.Mutex
+	cond   *sync.Cond
+	order  []RequestStep
+	next   int
+	closed bool
+}
+
+type RequestStep struct {
+	Operation Operation
+	Key       string
+}
+
+func OperationRequest(op Operation) RequestStep {
+	return RequestStep{Operation: op}
+}
+
+func ChannelRequest(op Operation, channelID int64) RequestStep {
+	return RequestStep{Operation: op, Key: int64Key(channelID)}
+}
+
+func SubscriptionRequest(op Operation, channelNames []string, userIDs []int64) RequestStep {
+	return RequestStep{Operation: op, Key: subscriptionKey(channelNames, userIDs)}
+}
+
+func UserGroupMembersRequest(userGroupID int64) RequestStep {
+	return RequestStep{Operation: OperationGetUserGroupMembers, Key: int64Key(userGroupID)}
+}
+
+func UpdateUserGroupMembersRequest(userGroupID int64, add []int64, del []int64) RequestStep {
+	return RequestStep{Operation: OperationUpdateUserGroupMembers, Key: updateUserGroupMembersPartsKey(userGroupID, add, del)}
 }
 
 type channelState struct {
@@ -57,6 +107,7 @@ func NewClient() Client {
 		channels:        map[int64]channelState{},
 		channelIDs:      map[string]int64{},
 		userGroups:      map[int64]userGroupState{},
+		failures:        map[Operation][]error{},
 	}}
 }
 func (Client) GetStatistics() statistics.Statistics { return statistics.Statistics{} }
@@ -68,6 +119,210 @@ func (c Client) ensureState() *state {
 	return NewClient().state
 }
 
+func (c Client) SerializeRequests(order ...Operation) *RequestSerialization {
+	steps := make([]RequestStep, 0, len(order))
+	for _, op := range order {
+		steps = append(steps, RequestStep{Operation: op})
+	}
+	return c.SerializeRequestSteps(steps...)
+}
+
+func (c Client) SerializeRequestSteps(order ...RequestStep) *RequestSerialization {
+	serialization := &RequestSerialization{order: append([]RequestStep(nil), order...)}
+	serialization.cond = sync.NewCond(&serialization.mu)
+
+	state := c.ensureState()
+	state.mu.Lock()
+	state.serialization = serialization
+	state.mu.Unlock()
+	return serialization
+}
+
+func (c Client) ClearRequestSerialization() {
+	state := c.ensureState()
+	state.mu.Lock()
+	serialization := state.serialization
+	state.serialization = nil
+	state.mu.Unlock()
+	if serialization != nil {
+		serialization.Close()
+	}
+}
+
+func (c Client) FailNext(op Operation, err error) {
+	state := c.ensureState()
+	state.mu.Lock()
+	defer state.mu.Unlock()
+
+	if err == nil {
+		err = fmt.Errorf("%s failed", op)
+	}
+	state.failures[op] = append(state.failures[op], err)
+}
+
+func (s *state) failLocked(op Operation) error {
+	failures := s.failures[op]
+	if len(failures) == 0 {
+		return nil
+	}
+	err := failures[0]
+	if len(failures) == 1 {
+		delete(s.failures, op)
+	} else {
+		s.failures[op] = failures[1:]
+	}
+	return err
+}
+
+func (s *state) waitForTurn(ctx context.Context, op Operation, key string) error {
+	s.mu.Lock()
+	serialization := s.serialization
+	s.mu.Unlock()
+	if serialization == nil {
+		return nil
+	}
+	return serialization.waitForTurn(ctx, RequestStep{Operation: op, Key: key})
+}
+
+func (s *RequestSerialization) Close() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.closed = true
+	s.cond.Broadcast()
+}
+
+func (s *RequestSerialization) Wait(ctx context.Context) error {
+	return s.WaitForSteps(ctx, len(s.order))
+}
+
+func (s *RequestSerialization) WaitForSteps(ctx context.Context, steps int) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if steps > len(s.order) {
+		steps = len(s.order)
+	}
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			s.mu.Lock()
+			s.cond.Broadcast()
+			s.mu.Unlock()
+		case <-done:
+		}
+	}()
+	defer close(done)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for !s.closed && s.next < steps {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		s.cond.Wait()
+	}
+	return ctx.Err()
+}
+
+func (s *RequestSerialization) waitForTurn(ctx context.Context, step RequestStep) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			s.mu.Lock()
+			s.cond.Broadcast()
+			s.mu.Unlock()
+		case <-done:
+		}
+	}()
+	defer close(done)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for {
+		if s.closed || s.next >= len(s.order) {
+			return nil
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if requestStepMatches(s.order[s.next], step) {
+			s.next++
+			s.cond.Broadcast()
+			return nil
+		}
+		s.cond.Wait()
+	}
+}
+
+func requestStepMatches(expected RequestStep, actual RequestStep) bool {
+	return expected.Operation == actual.Operation && (expected.Key == "" || expected.Key == actual.Key)
+}
+
+func int64Key(value int64) string {
+	return fmt.Sprintf("%d", value)
+}
+
+func userGroupMemberKey[T any](request T) string {
+	return int64Key(requestInt64(request, "userGroupID")) + "/" + int64Key(requestInt64(request, "userID"))
+}
+
+func subscribeKey(request channels.SubscribeRequest) string {
+	subscriptions := requestSubscriptionsPtr(request)
+	if subscriptions == nil {
+		return subscriptionKey(nil, principalUserIDs(requestPrincipalsPtr(request, "principals")))
+	}
+	names := make([]string, 0, len(*subscriptions))
+	for _, subscription := range *subscriptions {
+		names = append(names, subscription.Name)
+	}
+	return subscriptionKey(names, principalUserIDs(requestPrincipalsPtr(request, "principals")))
+}
+
+func unsubscribeKey(request channels.UnsubscribeRequest) string {
+	subscriptions := requestSubscriptionNamesPtr(request)
+	if subscriptions == nil {
+		return subscriptionKey(nil, principalUserIDs(requestPrincipalsPtr(request, "principals")))
+	}
+	return subscriptionKey(*subscriptions, principalUserIDs(requestPrincipalsPtr(request, "principals")))
+}
+
+func subscriptionKey(channelNames []string, userIDs []int64) string {
+	names := append([]string(nil), channelNames...)
+	sort.Strings(names)
+	return "channels=" + strings.Join(names, ",") + ";users=" + int64ListKey(userIDs)
+}
+
+func updateUserGroupMembersKey(request users.UpdateUserGroupMembersRequest) string {
+	add := []int64(nil)
+	if values := requestInt64SlicePtr(request, "add"); values != nil {
+		add = *values
+	}
+	del := []int64(nil)
+	if values := requestInt64SlicePtr(request, "delete"); values != nil {
+		del = *values
+	}
+	return updateUserGroupMembersPartsKey(requestInt64(request, "userGroupID"), add, del)
+}
+
+func updateUserGroupMembersPartsKey(userGroupID int64, add []int64, del []int64) string {
+	return "group=" + int64Key(userGroupID) + ";add=" + int64ListKey(add) + ";delete=" + int64ListKey(del)
+}
+
+func int64ListKey(values []int64) string {
+	values = sortedMemberIDs(values)
+	parts := make([]string, 0, len(values))
+	for _, value := range values {
+		parts = append(parts, int64Key(value))
+	}
+	return strings.Join(parts, ",")
+}
+
 func withAPIService[T any](request T, service Client) T {
 	v := reflect.ValueOf(&request).Elem()
 	field := v.FieldByName("apiService")
@@ -75,6 +330,19 @@ func withAPIService[T any](request T, service Client) T {
 		return request
 	}
 	reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).Elem().Set(reflect.ValueOf(service))
+	return request
+}
+
+func withContext[T any](request T, ctx context.Context) T {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	v := reflect.ValueOf(&request).Elem()
+	field := v.FieldByName("ctx")
+	if !field.IsValid() || !field.CanAddr() {
+		return request
+	}
+	reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).Elem().Set(reflect.ValueOf(ctx))
 	return request
 }
 
@@ -92,6 +360,19 @@ func requestInt64[T any](request T, name string) int64 {
 	v := reflect.ValueOf(request)
 	field := v.FieldByName(name)
 	return field.Int()
+}
+
+func requestContext[T any](request T) context.Context {
+	v := reflect.ValueOf(&request).Elem()
+	field := v.FieldByName("ctx")
+	if !field.IsValid() || field.IsNil() {
+		return context.Background()
+	}
+	ctx, ok := reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).Elem().Interface().(context.Context)
+	if !ok || ctx == nil {
+		return context.Background()
+	}
+	return ctx
 }
 
 func requestStringPtr[T any](request T, name string) *string {
@@ -275,13 +556,19 @@ func (Client) CreateUser(_arg0 context.Context) users.CreateUserRequest {
 func (Client) CreateUserExecute(_arg0 users.CreateUserRequest) (*users.CreateUserResponse, *http.Response, error) {
 	return nil, nil, nil
 }
-func (c Client) CreateUserGroup(_arg0 context.Context) users.CreateUserGroupRequest {
-	return withAPIService(users.CreateUserGroupRequest{}, c)
+func (c Client) CreateUserGroup(ctx context.Context) users.CreateUserGroupRequest {
+	return withContext(withAPIService(users.CreateUserGroupRequest{}, c), ctx)
 }
 func (c Client) CreateUserGroupExecute(r users.CreateUserGroupRequest) (*users.CreateUserGroupResponse, *http.Response, error) {
 	state := c.ensureState()
+	if err := state.waitForTurn(requestContext(r), OperationCreateUserGroup, ""); err != nil {
+		return nil, nil, err
+	}
 	state.mu.Lock()
 	defer state.mu.Unlock()
+	if err := state.failLocked(OperationCreateUserGroup); err != nil {
+		return nil, nil, err
+	}
 
 	name := ""
 	if v := requestStringPtr(r, "name"); v != nil {
@@ -337,13 +624,19 @@ func (Client) DeactivateUser(_arg0 context.Context, _arg1 int64) users.Deactivat
 func (Client) DeactivateUserExecute(_arg0 users.DeactivateUserRequest) (*zulip.Response, *http.Response, error) {
 	return nil, nil, nil
 }
-func (c Client) DeactivateUserGroup(_arg0 context.Context, userGroupID int64) users.DeactivateUserGroupRequest {
-	return withInt64Field(withAPIService(users.DeactivateUserGroupRequest{}, c), "userGroupID", userGroupID)
+func (c Client) DeactivateUserGroup(ctx context.Context, userGroupID int64) users.DeactivateUserGroupRequest {
+	return withInt64Field(withContext(withAPIService(users.DeactivateUserGroupRequest{}, c), ctx), "userGroupID", userGroupID)
 }
 func (c Client) DeactivateUserGroupExecute(r users.DeactivateUserGroupRequest) (*zulip.Response, *http.Response, error) {
 	state := c.ensureState()
+	if err := state.waitForTurn(requestContext(r), OperationDeactivateUserGroup, int64Key(requestInt64(r, "userGroupID"))); err != nil {
+		return nil, nil, err
+	}
 	state.mu.Lock()
 	defer state.mu.Unlock()
+	if err := state.failLocked(OperationDeactivateUserGroup); err != nil {
+		return nil, nil, err
+	}
 
 	id := requestInt64(r, "userGroupID")
 	group, ok := state.userGroups[id]
@@ -451,13 +744,19 @@ func (Client) GetAttachments(_arg0 context.Context) users.GetAttachmentsRequest 
 func (Client) GetAttachmentsExecute(_arg0 users.GetAttachmentsRequest) (*users.GetAttachmentsResponse, *http.Response, error) {
 	return nil, nil, nil
 }
-func (c Client) GetChannelByID(_arg0 context.Context, channelID int64) channels.GetChannelByIDRequest {
-	return withInt64Field(withAPIService(channels.GetChannelByIDRequest{}, c), "channelID", channelID)
+func (c Client) GetChannelByID(ctx context.Context, channelID int64) channels.GetChannelByIDRequest {
+	return withInt64Field(withContext(withAPIService(channels.GetChannelByIDRequest{}, c), ctx), "channelID", channelID)
 }
 func (c Client) GetChannelByIDExecute(r channels.GetChannelByIDRequest) (*channels.GetChannelResponse, *http.Response, error) {
 	state := c.ensureState()
+	if err := state.waitForTurn(requestContext(r), OperationGetChannelByID, int64Key(requestInt64(r, "channelID"))); err != nil {
+		return nil, nil, err
+	}
 	state.mu.Lock()
 	defer state.mu.Unlock()
+	if err := state.failLocked(OperationGetChannelByID); err != nil {
+		return nil, nil, err
+	}
 
 	id := requestInt64(r, "channelID")
 	channel, ok := state.channels[id]
@@ -532,15 +831,21 @@ func (Client) GetInvites(_arg0 context.Context) invites.GetInvitesRequest {
 func (Client) GetInvitesExecute(_arg0 invites.GetInvitesRequest) (*invites.GetInvitesResponse, *http.Response, error) {
 	return nil, nil, nil
 }
-func (c Client) GetIsUserGroupMember(_arg0 context.Context, userGroupID int64, userID int64) users.GetIsUserGroupMemberRequest {
-	r := withAPIService(users.GetIsUserGroupMemberRequest{}, c)
+func (c Client) GetIsUserGroupMember(ctx context.Context, userGroupID int64, userID int64) users.GetIsUserGroupMemberRequest {
+	r := withContext(withAPIService(users.GetIsUserGroupMemberRequest{}, c), ctx)
 	r = withInt64Field(r, "userGroupID", userGroupID)
 	return withInt64Field(r, "userID", userID)
 }
 func (c Client) GetIsUserGroupMemberExecute(r users.GetIsUserGroupMemberRequest) (*users.GetIsUserGroupMemberResponse, *http.Response, error) {
 	state := c.ensureState()
+	if err := state.waitForTurn(requestContext(r), OperationGetIsUserGroupMember, userGroupMemberKey(r)); err != nil {
+		return nil, nil, err
+	}
 	state.mu.Lock()
 	defer state.mu.Unlock()
+	if err := state.failLocked(OperationGetIsUserGroupMember); err != nil {
+		return nil, nil, err
+	}
 
 	groupID := requestInt64(r, "userGroupID")
 	userID := requestInt64(r, "userID")
@@ -639,11 +944,33 @@ func (Client) GetServerSettings(_arg0 context.Context) serverandorganizations.Ge
 func (Client) GetServerSettingsExecute(_arg0 serverandorganizations.GetServerSettingsRequest) (*serverandorganizations.GetServerSettingsResponse, *http.Response, error) {
 	return nil, nil, nil
 }
-func (Client) GetSubscribers(_arg0 context.Context, _arg1 int64) channels.GetSubscribersRequest {
-	return withAPIService(channels.GetSubscribersRequest{}, Client{})
+func (c Client) GetSubscribers(ctx context.Context, channelID int64) channels.GetSubscribersRequest {
+	return withInt64Field(withContext(withAPIService(channels.GetSubscribersRequest{}, c), ctx), "channelID", channelID)
 }
-func (Client) GetSubscribersExecute(_arg0 channels.GetSubscribersRequest) (*channels.GetSubscribersResponse, *http.Response, error) {
-	return nil, nil, nil
+func (c Client) GetSubscribersExecute(r channels.GetSubscribersRequest) (*channels.GetSubscribersResponse, *http.Response, error) {
+	state := c.ensureState()
+	if err := state.waitForTurn(requestContext(r), OperationGetSubscribers, int64Key(requestInt64(r, "channelID"))); err != nil {
+		return nil, nil, err
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if err := state.failLocked(OperationGetSubscribers); err != nil {
+		return nil, nil, err
+	}
+
+	id := requestInt64(r, "channelID")
+	channel, ok := state.channels[id]
+	if !ok {
+		return nil, nil, fmt.Errorf("channel %d not found", id)
+	}
+	subscribers := make([]int64, 0, len(channel.subscribers))
+	for userID := range channel.subscribers {
+		subscribers = append(subscribers, userID)
+	}
+	return &channels.GetSubscribersResponse{
+		Response:    successResponse(),
+		Subscribers: sortedMemberIDs(subscribers),
+	}, nil, nil
 }
 func (Client) GetSubscriptionStatus(_arg0 context.Context, _arg1 int64, _arg2 int64) channels.GetSubscriptionStatusRequest {
 	return withAPIService(channels.GetSubscriptionStatusRequest{}, Client{})
@@ -669,13 +996,19 @@ func (Client) GetUserByEmailExecute(_arg0 users.GetUserByEmailRequest) (*users.G
 func (Client) GetUserExecute(_arg0 users.GetUserRequest) (*users.GetUserResponse, *http.Response, error) {
 	return nil, nil, nil
 }
-func (c Client) GetUserGroupMembers(_arg0 context.Context, userGroupID int64) users.GetUserGroupMembersRequest {
-	return withInt64Field(withAPIService(users.GetUserGroupMembersRequest{}, c), "userGroupID", userGroupID)
+func (c Client) GetUserGroupMembers(ctx context.Context, userGroupID int64) users.GetUserGroupMembersRequest {
+	return withInt64Field(withContext(withAPIService(users.GetUserGroupMembersRequest{}, c), ctx), "userGroupID", userGroupID)
 }
 func (c Client) GetUserGroupMembersExecute(r users.GetUserGroupMembersRequest) (*users.GetUserGroupMembersResponse, *http.Response, error) {
 	state := c.ensureState()
+	if err := state.waitForTurn(requestContext(r), OperationGetUserGroupMembers, int64Key(requestInt64(r, "userGroupID"))); err != nil {
+		return nil, nil, err
+	}
 	state.mu.Lock()
 	defer state.mu.Unlock()
+	if err := state.failLocked(OperationGetUserGroupMembers); err != nil {
+		return nil, nil, err
+	}
 
 	id := requestInt64(r, "userGroupID")
 	group, ok := state.userGroups[id]
@@ -891,13 +1224,19 @@ func (Client) SetTypingStatusForMessageEdit(_arg0 context.Context, _arg1 int64) 
 func (Client) SetTypingStatusForMessageEditExecute(_arg0 users.SetTypingStatusForMessageEditRequest) (*zulip.Response, *http.Response, error) {
 	return nil, nil, nil
 }
-func (c Client) Subscribe(_arg0 context.Context) channels.SubscribeRequest {
-	return withAPIService(channels.SubscribeRequest{}, c)
+func (c Client) Subscribe(ctx context.Context) channels.SubscribeRequest {
+	return withContext(withAPIService(channels.SubscribeRequest{}, c), ctx)
 }
 func (c Client) SubscribeExecute(r channels.SubscribeRequest) (*channels.SubscribeResponse, *http.Response, error) {
 	state := c.ensureState()
+	if err := state.waitForTurn(requestContext(r), OperationSubscribe, subscribeKey(r)); err != nil {
+		return nil, nil, err
+	}
 	state.mu.Lock()
 	defer state.mu.Unlock()
+	if err := state.failLocked(OperationSubscribe); err != nil {
+		return nil, nil, err
+	}
 
 	subscriptions := requestSubscriptionsPtr(r)
 	if subscriptions == nil {
@@ -960,13 +1299,19 @@ func (Client) UnmuteUser(_arg0 context.Context, _arg1 int64) users.UnmuteUserReq
 func (Client) UnmuteUserExecute(_arg0 users.UnmuteUserRequest) (*zulip.Response, *http.Response, error) {
 	return nil, nil, nil
 }
-func (c Client) Unsubscribe(_arg0 context.Context) channels.UnsubscribeRequest {
-	return withAPIService(channels.UnsubscribeRequest{}, c)
+func (c Client) Unsubscribe(ctx context.Context) channels.UnsubscribeRequest {
+	return withContext(withAPIService(channels.UnsubscribeRequest{}, c), ctx)
 }
 func (c Client) UnsubscribeExecute(r channels.UnsubscribeRequest) (*channels.UnsubscribeResponse, *http.Response, error) {
 	state := c.ensureState()
+	if err := state.waitForTurn(requestContext(r), OperationUnsubscribe, unsubscribeKey(r)); err != nil {
+		return nil, nil, err
+	}
 	state.mu.Lock()
 	defer state.mu.Unlock()
+	if err := state.failLocked(OperationUnsubscribe); err != nil {
+		return nil, nil, err
+	}
 
 	subscriptions := requestSubscriptionNamesPtr(r)
 	if subscriptions == nil {
@@ -1100,13 +1445,19 @@ func (Client) UpdateUserGroup(_arg0 context.Context, _arg1 int64) users.UpdateUs
 func (Client) UpdateUserGroupExecute(_arg0 users.UpdateUserGroupRequest) (*zulip.Response, *http.Response, error) {
 	return nil, nil, nil
 }
-func (c Client) UpdateUserGroupMembers(_arg0 context.Context, userGroupID int64) users.UpdateUserGroupMembersRequest {
-	return withInt64Field(withAPIService(users.UpdateUserGroupMembersRequest{}, c), "userGroupID", userGroupID)
+func (c Client) UpdateUserGroupMembers(ctx context.Context, userGroupID int64) users.UpdateUserGroupMembersRequest {
+	return withInt64Field(withContext(withAPIService(users.UpdateUserGroupMembersRequest{}, c), ctx), "userGroupID", userGroupID)
 }
 func (c Client) UpdateUserGroupMembersExecute(r users.UpdateUserGroupMembersRequest) (*zulip.Response, *http.Response, error) {
 	state := c.ensureState()
+	if err := state.waitForTurn(requestContext(r), OperationUpdateUserGroupMembers, updateUserGroupMembersKey(r)); err != nil {
+		return nil, nil, err
+	}
 	state.mu.Lock()
 	defer state.mu.Unlock()
+	if err := state.failLocked(OperationUpdateUserGroupMembers); err != nil {
+		return nil, nil, err
+	}
 
 	id := requestInt64(r, "userGroupID")
 	group, ok := state.userGroups[id]

@@ -2,7 +2,10 @@ package zulipmock
 
 import (
 	"context"
+	"errors"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/tum-zulip/go-zulip/zulip"
 	"github.com/tum-zulip/go-zulip/zulip/api/channels"
@@ -84,6 +87,88 @@ func TestUserGroupsAreInMemoryPerClient(t *testing.T) {
 	_, _, err = otherClient.GetUserGroupMembers(ctx, created.GroupID).Execute()
 	if err == nil {
 		t.Fatalf("second client found first client's user group")
+	}
+}
+
+func TestFailNextFailsOneMatchingRequest(t *testing.T) {
+	ctx := context.Background()
+	client := NewClient()
+	injected := errors.New("injected subscribe failure")
+
+	client.FailNext(OperationSubscribe, injected)
+	_, _, err := client.Subscribe(ctx).
+		Subscriptions([]channels.SubscriptionRequest{{Name: "course"}}).
+		Principals(zulip.UserIDsAsPrincipals(10)).
+		Execute()
+	if !errors.Is(err, injected) {
+		t.Fatalf("Subscribe error = %v, want %v", err, injected)
+	}
+
+	resp, _, err := client.Subscribe(ctx).
+		Subscriptions([]channels.SubscriptionRequest{{Name: "course"}}).
+		Principals(zulip.UserIDsAsPrincipals(10)).
+		Execute()
+	if err != nil {
+		t.Fatalf("second Subscribe error = %v", err)
+	}
+	if got, want := resp.Subscribed["10"], []string{"course"}; !equalStrings(got, want) {
+		t.Fatalf("subscribed[10] = %v, want %v", got, want)
+	}
+}
+
+func TestSerializeRequestsForcesOperationOrder(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	client := NewClient()
+	_, _, err := client.Subscribe(ctx).
+		Subscriptions([]channels.SubscriptionRequest{{Name: "course"}}).
+		Principals(zulip.UserIDsAsPrincipals(10)).
+		Execute()
+	if err != nil {
+		t.Fatalf("setup Subscribe error = %v", err)
+	}
+
+	serialization := client.SerializeRequests(OperationGetSubscribers, OperationSubscribe)
+	defer client.ClearRequestSerialization()
+
+	errs := make(chan error, 2)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_, _, err := client.Subscribe(ctx).
+			Subscriptions([]channels.SubscriptionRequest{{Name: "course"}}).
+			Principals(zulip.UserIDsAsPrincipals(20)).
+			Execute()
+		errs <- err
+	}()
+
+	subscribers, _, err := client.GetSubscribers(ctx, 1).Execute()
+	if err != nil {
+		t.Fatalf("GetSubscribers error = %v", err)
+	}
+	if got, want := subscribers.Subscribers, []int64{10}; !equalInt64s(got, want) {
+		t.Fatalf("subscribers before serialized Subscribe = %v, want %v", got, want)
+	}
+	if err := serialization.Wait(ctx); err != nil {
+		t.Fatalf("serialization did not observe all requests: %v", err)
+	}
+
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("serialized Subscribe error = %v", err)
+		}
+	}
+
+	subscribers, _, err = client.GetSubscribers(ctx, 1).Execute()
+	if err != nil {
+		t.Fatalf("final GetSubscribers error = %v", err)
+	}
+	if got, want := subscribers.Subscribers, []int64{10, 20}; !equalInt64s(got, want) {
+		t.Fatalf("final subscribers = %v, want %v", got, want)
 	}
 }
 
