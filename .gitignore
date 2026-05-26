@@ -1,3 +1,8 @@
 .zuliprc
 zuliprc
 .env.*
+CLAUDE.md
+.claude
+.gitnexus
+AGENTS.md
+campusbot.*
