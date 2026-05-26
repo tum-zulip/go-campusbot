@@ -207,6 +207,18 @@ func (bot *Bot) AddReaction(ctx context.Context, messageID int64, emojiName, emo
 	return nil
 }
 
+// GetUserByID implements command.UserResolver.
+func (bot *Bot) GetUserByID(ctx context.Context, id int64) (zulip.User, error) {
+	resp, _, err := bot.client.GetUser(ctx, id).Execute()
+	if err != nil {
+		return zulip.User{}, fmt.Errorf("get Zulip user %d: %w", id, err)
+	}
+	if resp == nil {
+		return zulip.User{}, fmt.Errorf("get Zulip user %d: empty response", id)
+	}
+	return resp.User, nil
+}
+
 func (bot *Bot) CreateChannel(
 	ctx context.Context,
 	name string,

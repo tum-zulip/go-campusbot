@@ -14,7 +14,6 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 
 	"github.com/tum-zulip/go-campusbot/internal/sqlitemigrate"
-	"github.com/tum-zulip/go-campusbot/internal/zulipbot/audit"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/command"
 	storagedb "github.com/tum-zulip/go-campusbot/internal/zulipbot/storage/db"
 )
@@ -170,16 +169,7 @@ func (repo *Repository) SetConfigValue(ctx context.Context, change ConfigChange)
 		}); err != nil {
 			return fmt.Errorf("write config %q: %w", change.Key, err)
 		}
-		return repo.recordAuditTx(ctx, q, audit.Record{
-			At:          now,
-			ActorUserID: change.ActorUserID,
-			Action:      "config.set",
-			Target:      change.Key,
-			Status:      audit.StatusSuccess,
-			MessageID:   change.MessageID,
-			OldValue:    change.OldValueRedacted,
-			NewValue:    change.NewValueRedacted,
-		})
+		return nil
 	})
 }
 
@@ -384,59 +374,6 @@ func (repo *Repository) CompleteRestartRequest(
 		ID:                  id,
 	}); err != nil {
 		return fmt.Errorf("complete restart request %d: %w", id, err)
-	}
-	return nil
-}
-
-func (repo *Repository) AuditRecords(ctx context.Context) ([]audit.Record, error) {
-	rows, err := repo.queries.ListAuditRecords(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("read audit records: %w", err)
-	}
-	records := make([]audit.Record, 0, len(rows))
-	for _, row := range rows {
-		at, err := parseTime(row.At)
-		if err != nil {
-			return nil, err
-		}
-		records = append(records, audit.Record{
-			At:          at,
-			ActorUserID: nullInt64Value(row.ActorUserID),
-			Action:      row.Action,
-			Target:      nullStringValue(row.Target),
-			Status:      audit.Status(row.Status),
-			MessageID:   nullInt64Value(row.MessageID),
-			OldValue:    nullStringValue(row.OldValue),
-			NewValue:    nullStringValue(row.NewValue),
-			Error:       nullStringValue(row.Error),
-		})
-	}
-	return records, nil
-}
-
-func (repo *Repository) RecordAudit(ctx context.Context, record audit.Record) error {
-	return repo.WithTx(ctx, func(q *storagedb.Queries) error {
-		return repo.recordAuditTx(ctx, q, record)
-	})
-}
-
-func (repo *Repository) recordAuditTx(ctx context.Context, q *storagedb.Queries, record audit.Record) error {
-	if record.Action == "" {
-		return errors.New("audit action must not be empty")
-	}
-	record = record.WithTime(repo.now())
-	if err := q.RecordAudit(ctx, storagedb.RecordAuditParams{
-		At:          formatTime(record.At),
-		ActorUserID: nullableInt64(record.ActorUserID),
-		Action:      record.Action,
-		Target:      nullableString(record.Target),
-		Status:      string(record.Status),
-		MessageID:   nullableInt64(record.MessageID),
-		OldValue:    nullableString(record.OldValue),
-		NewValue:    nullableString(record.NewValue),
-		Error:       nullableString(record.Error),
-	}); err != nil {
-		return fmt.Errorf("record audit event %q: %w", record.Action, err)
 	}
 	return nil
 }

@@ -2,16 +2,14 @@ package command_test
 
 import (
 	"context"
-	"errors"
 	"testing"
 
 	"github.com/tum-zulip/go-zulip/zulip"
 
-	"github.com/tum-zulip/go-campusbot/internal/zulipbot/audit"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/command"
 )
 
-func TestRouterRejectsUnauthorizedCommandAndAudits(t *testing.T) {
+func TestRouterRejectsUnauthorizedCommand(t *testing.T) {
 	t.Parallel()
 
 	registry := command.NewRegistry()
@@ -20,7 +18,6 @@ func TestRouterRejectsUnauthorizedCommandAndAudits(t *testing.T) {
 			Name:       "restart",
 			Usage:      "restart",
 			Permission: command.PermOwner,
-			Privileged: true,
 		},
 		Fn: func(_ context.Context, _ command.Request) (command.Result, error) {
 			return command.Result{Content: "should not run"}, nil
@@ -30,11 +27,9 @@ func TestRouterRejectsUnauthorizedCommandAndAudits(t *testing.T) {
 		t.Fatalf("Register() failed: %v", err)
 	}
 
-	auditor := &recordingAuditor{}
 	router, err := command.NewRouter(command.RouterConfig{
 		Registry: registry,
 		Auth:     denyingAuthorizer{},
-		Auditor:  auditor,
 	})
 	if err != nil {
 		t.Fatalf("NewRouter() failed: %v", err)
@@ -47,12 +42,6 @@ func TestRouterRejectsUnauthorizedCommandAndAudits(t *testing.T) {
 	})
 	if result.Content != "permission denied" {
 		t.Fatalf("Content = %q", result.Content)
-	}
-	if len(auditor.records) != 1 {
-		t.Fatalf("audit record count = %d, want 1", len(auditor.records))
-	}
-	if auditor.records[0].Status != audit.StatusDenied {
-		t.Fatalf("audit status = %q, want denied", auditor.records[0].Status)
 	}
 }
 
@@ -162,17 +151,5 @@ func (denyingAuthorizer) Check(_ context.Context, _ command.Actor, _ zulip.Role)
 type allowingAuthorizer struct{}
 
 func (allowingAuthorizer) Check(_ context.Context, _ command.Actor, _ zulip.Role) error {
-	return nil
-}
-
-type recordingAuditor struct {
-	records []audit.Record
-}
-
-func (auditor *recordingAuditor) RecordAudit(_ context.Context, record audit.Record) error {
-	if record.Action == "" {
-		return errors.New("empty action")
-	}
-	auditor.records = append(auditor.records, record)
 	return nil
 }

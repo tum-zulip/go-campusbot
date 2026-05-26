@@ -32,13 +32,11 @@ func (handler *RestartHandler) Metadata() command.Metadata {
 		Usage:      "restart",
 		Permission: zulip.RoleOwner,
 		Privileged: true,
+		ArgSpec:    command.NoArgs{},
 	}
 }
 
 func (handler *RestartHandler) Handle(_ context.Context, req command.Request) (command.Result, error) {
-	if len(req.Invocation.Args) != 0 {
-		return command.Result{}, command.NewUserError("Usage: `restart`")
-	}
 	return command.Result{
 		Content: "Restarting now. I will resume the current Zulip event queue after the process comes back; Zulip normally retains queued events for about 10 minutes.",
 		AfterResponse: func(ctx context.Context) error {

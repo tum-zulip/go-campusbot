@@ -26,12 +26,9 @@ func TestConfigHandlerAdminCanListGetAndSet(t *testing.T) {
 	actor := command.Actor{UserID: 10}
 
 	setResult, err := handler.Handle(ctx, command.Request{
-		Invocation: command.Invocation{
-			Name: "config",
-			Args: []string{"set", configsvc.KeyRestartStartupNotification, "true"},
-		},
-		Actor:     actor,
-		MessageID: 100,
+		ParsedArgs: handlers.ConfigSetArgs{Key: configsvc.KeyRestartStartupNotification, Value: "true"},
+		Actor:      actor,
+		MessageID:  100,
 	})
 	if err != nil {
 		t.Fatalf("Handle(set) failed: %v", err)
@@ -41,7 +38,7 @@ func TestConfigHandlerAdminCanListGetAndSet(t *testing.T) {
 	}
 
 	getResult, err := handler.Handle(ctx, command.Request{
-		Invocation: command.Invocation{Name: "config", Args: []string{"get", configsvc.KeyRestartStartupNotification}},
+		ParsedArgs: handlers.ConfigGetArgs{Key: configsvc.KeyRestartStartupNotification},
 		Actor:      actor,
 	})
 	if err != nil {
@@ -52,7 +49,7 @@ func TestConfigHandlerAdminCanListGetAndSet(t *testing.T) {
 	}
 
 	listResult, err := handler.Handle(ctx, command.Request{
-		Invocation: command.Invocation{Name: "config", Args: []string{"list"}},
+		ParsedArgs: command.NoArgs{},
 		Actor:      actor,
 	})
 	if err != nil {
@@ -73,7 +70,7 @@ func TestConfigHandlerReportsSafeUserErrors(t *testing.T) {
 	handler := handlers.NewConfigHandler(service)
 
 	_, err := handler.Handle(ctx, command.Request{
-		Invocation: command.Invocation{Name: "config", Args: []string{"get", "does_not_exist"}},
+		ParsedArgs: handlers.ConfigGetArgs{Key: "does_not_exist"},
 		Actor:      command.Actor{UserID: 10},
 	})
 	var userErr command.UserError
@@ -82,11 +79,8 @@ func TestConfigHandlerReportsSafeUserErrors(t *testing.T) {
 	}
 
 	_, err = handler.Handle(ctx, command.Request{
-		Invocation: command.Invocation{
-			Name: "config",
-			Args: []string{"set", configsvc.KeyRestartStartupNotification, "maybe"},
-		},
-		Actor: command.Actor{UserID: 10},
+		ParsedArgs: handlers.ConfigSetArgs{Key: configsvc.KeyRestartStartupNotification, Value: "maybe"},
+		Actor:      command.Actor{UserID: 10},
 	})
 	if !errors.As(err, &userErr) || !strings.Contains(userErr.Message, "Invalid value") {
 		t.Fatalf("Handle(set invalid) error = %v", err)
@@ -103,7 +97,7 @@ func TestConfigHandlerFailsClosedWhenPermissionsUnavailable(t *testing.T) {
 	handler := handlers.NewConfigHandler(service)
 
 	_, err := handler.Handle(ctx, command.Request{
-		Invocation: command.Invocation{Name: "config", Args: []string{"list"}},
+		ParsedArgs: command.NoArgs{},
 		Actor:      command.Actor{UserID: 10},
 	})
 	var userErr command.UserError

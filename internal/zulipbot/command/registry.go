@@ -28,6 +28,10 @@ type Metadata struct {
 	OwnerUsage string
 	Permission zulip.Role
 	Privileged bool
+	// ArgSpec, when non-nil, describes the argument schema. The router parses and
+	// resolves raw args before calling Handle, and places the result in
+	// Request.ParsedArgs. When nil the handler receives unparsed Invocation.Args.
+	ArgSpec any
 }
 
 type Request struct {
@@ -35,6 +39,9 @@ type Request struct {
 	Actor      Actor
 	MessageID  int64
 	Target     ReplyTarget
+	// ParsedArgs is the result of ArgParser.Parse when the handler declares an
+	// ArgSpec. Nil when ArgSpec is nil (handler owns its own arg parsing).
+	ParsedArgs any
 }
 
 type Result struct {

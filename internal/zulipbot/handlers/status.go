@@ -52,14 +52,11 @@ func (handler *StatusHandler) Metadata() command.Metadata {
 		Usage:      "status",
 		Permission: command.PermOpen,
 		Privileged: false,
+		ArgSpec:    command.NoArgs{},
 	}
 }
 
 func (handler *StatusHandler) Handle(ctx context.Context, req command.Request) (command.Result, error) {
-	if len(req.Invocation.Args) != 0 {
-		return command.Result{}, command.NewUserError("Usage: `status`")
-	}
-
 	uptimeSec := handler.provider.UptimeSeconds()
 	hours := uptimeSec / secondsPerHour
 	minutes := (uptimeSec % secondsPerHour) / secondsPerMinute

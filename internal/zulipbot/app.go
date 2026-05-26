@@ -188,7 +188,7 @@ func (app *App) initCommands(
 	return command.NewRouter(command.RouterConfig{
 		Registry:  registry,
 		Auth:      app.bot,
-		Auditor:   app.repo,
+		ArgParser: command.NewArgParser(app.bot),
 		Accepting: app.restart.Accepting,
 		Logger:    app.logger,
 	})

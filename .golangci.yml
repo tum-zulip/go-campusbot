@@ -352,6 +352,10 @@ linters:
         linters:
           - gocognit
       - path: '_test\.go'
+        linters:
+          - gochecknoglobals
+          - goconst
+      - path: '_test\.go'
         text: 'shadow: declaration of "err" shadows declaration at line'
         linters:
           - govet

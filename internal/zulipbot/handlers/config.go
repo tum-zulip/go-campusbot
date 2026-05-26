@@ -12,10 +12,14 @@ import (
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/configsvc"
 )
 
-const (
-	configGetArgCount = 2
-	configSetArgCount = 3
-)
+type ConfigGetArgs struct {
+	Key string `desc:"Configuration key to read"`
+}
+
+type ConfigSetArgs struct {
+	Key   string `desc:"Configuration key to update"`
+	Value string `desc:"New value"`
+}
 
 type ConfigHandler struct {
 	service *configsvc.Service
@@ -32,30 +36,28 @@ func (handler *ConfigHandler) Metadata() command.Metadata {
 		Usage:      "config <list|get|set> [key] [value]",
 		Permission: zulip.RoleAdmin,
 		Privileged: true,
+		ArgSpec: command.SubcmdSpec{
+			"list": command.NoArgs{},
+			"get":  ConfigGetArgs{},
+			"set":  ConfigSetArgs{},
+		},
 	}
 }
 
 func (handler *ConfigHandler) Handle(ctx context.Context, req command.Request) (command.Result, error) {
-	if len(req.Invocation.Args) == 0 {
-		return command.Result{}, command.NewUserError("Usage: `config <list|get|set> [key] [value]`")
-	}
-
-	switch req.Invocation.Args[0] {
-	case "list":
+	switch args := req.ParsedArgs.(type) {
+	case command.NoArgs:
 		return handler.list(ctx, req)
-	case "get":
-		return handler.get(ctx, req)
-	case "set":
-		return handler.set(ctx, req)
+	case ConfigGetArgs:
+		return handler.get(ctx, req, args)
+	case ConfigSetArgs:
+		return handler.set(ctx, req, args)
 	default:
 		return command.Result{}, command.NewUserError("Usage: `config <list|get|set> [key] [value]`")
 	}
 }
 
 func (handler *ConfigHandler) list(ctx context.Context, req command.Request) (command.Result, error) {
-	if len(req.Invocation.Args) != 1 {
-		return command.Result{}, command.NewUserError("Usage: `config list`")
-	}
 	values, err := handler.service.List(ctx, req.Actor)
 	if err != nil {
 		return command.Result{}, handler.userFacingConfigError(err, "read")
@@ -80,11 +82,12 @@ func (handler *ConfigHandler) list(ctx context.Context, req command.Request) (co
 	return command.Result{Content: strings.TrimSpace(builder.String())}, nil
 }
 
-func (handler *ConfigHandler) get(ctx context.Context, req command.Request) (command.Result, error) {
-	if len(req.Invocation.Args) != configGetArgCount {
-		return command.Result{}, command.NewUserError("Usage: `config get <key>`")
-	}
-	value, err := handler.service.Get(ctx, req.Actor, req.Invocation.Args[1])
+func (handler *ConfigHandler) get(
+	ctx context.Context,
+	req command.Request,
+	args ConfigGetArgs,
+) (command.Result, error) {
+	value, err := handler.service.Get(ctx, req.Actor, args.Key)
 	if err != nil {
 		return command.Result{}, handler.userFacingConfigError(err, "read")
 	}
@@ -93,16 +96,17 @@ func (handler *ConfigHandler) get(ctx context.Context, req command.Request) (com
 	}, nil
 }
 
-func (handler *ConfigHandler) set(ctx context.Context, req command.Request) (command.Result, error) {
-	if len(req.Invocation.Args) != configSetArgCount {
-		return command.Result{}, command.NewUserError("Usage: `config set <key> <value>`")
-	}
+func (handler *ConfigHandler) set(
+	ctx context.Context,
+	req command.Request,
+	args ConfigSetArgs,
+) (command.Result, error) {
 	_, newValue, err := handler.service.Set(
 		ctx,
 		req.Actor,
 		req.MessageID,
-		req.Invocation.Args[1],
-		req.Invocation.Args[2],
+		args.Key,
+		args.Value,
 	)
 	if err != nil {
 		return command.Result{}, handler.userFacingConfigError(err, "change")

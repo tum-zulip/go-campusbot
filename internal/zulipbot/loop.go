@@ -11,7 +11,6 @@ import (
 	"github.com/tum-zulip/go-zulip/zulip/events"
 
 	"github.com/tum-zulip/go-campusbot/internal/channelgroup"
-	"github.com/tum-zulip/go-campusbot/internal/zulipbot/audit"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/command"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/storage"
 )
@@ -136,7 +135,6 @@ func (loop *Loop) Run(ctx context.Context) (bool, error) {
 					"last_event_id",
 					state.LastEventID,
 				)
-				loop.auditQueueRecovery(ctx, state)
 				if err := loop.repo.ClearEventQueueState(ctx); err != nil {
 					return false, err
 				}
@@ -539,16 +537,4 @@ func nextBackoff(current time.Duration, maxBackoff time.Duration) time.Duration 
 		return maxBackoff
 	}
 	return next
-}
-
-func (loop *Loop) auditQueueRecovery(ctx context.Context, state QueueState) {
-	if err := loop.repo.RecordAudit(ctx, audit.Record{
-		Action:   "event_queue.recover",
-		Target:   state.QueueID,
-		Status:   audit.StatusFailure,
-		OldValue: fmt.Sprintf("last_event_id=%d", state.LastEventID),
-		Error:    "BAD_EVENT_QUEUE_ID; registered a new queue, events after last_event_id may have been missed",
-	}); err != nil {
-		loop.logger.WarnContext(ctx, "failed to audit Zulip event queue recovery", "error", err)
-	}
 }

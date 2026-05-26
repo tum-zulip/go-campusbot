@@ -224,7 +224,7 @@ func TestLoopResumesStoredQueueWithoutRegistering(t *testing.T) {
 	}
 }
 
-func TestLoopRecoversFromBadQueueDuringPollAndAudits(t *testing.T) {
+func TestLoopRecoversFromBadQueueDuringPoll(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
@@ -267,13 +267,6 @@ func TestLoopRecoversFromBadQueueDuringPollAndAudits(t *testing.T) {
 	}
 	if !ok || state.QueueID != "new" || state.LastEventID != 20 {
 		t.Fatalf("queue state = %#v, ok=%v", state, ok)
-	}
-	records, err := repo.AuditRecords(context.Background())
-	if err != nil {
-		t.Fatalf("AuditRecords() failed: %v", err)
-	}
-	if len(records) != 1 || records[0].Action != "event_queue.recover" || records[0].Target != "old" {
-		t.Fatalf("audit records = %#v", records)
 	}
 }
 

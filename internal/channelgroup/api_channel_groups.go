@@ -205,6 +205,7 @@ func (s *channelGroups) registerChannelGroupEventQueue(ctx context.Context) (str
 		ClientCapabilities(map[string]interface{}{
 			"notification_settings_null": true,
 			"include_deactivated_groups": false,
+			"archived_channels":          true,
 		}).
 		Execute()
 	if err != nil {
@@ -274,12 +275,22 @@ func (s *channelGroups) handleChannelGroupEvent(ctx context.Context, event event
 				return err
 			}
 		}
+	case events.ChannelUpdateEvent:
+		if event.Property == "is_archived" && event.Value != nil && event.Value.Bool != nil && *event.Value.Bool {
+			return s.removeChannelFromChannelGroups(ctx, event.ChannelID)
+		}
 	case events.UserGroupRemoveEvent:
 		return s.removeDeletedUserGroupChannelGroup(ctx, event.GroupID)
 	case events.UserGroupUpdateEvent:
 		if event.Data.Deactivated != nil && *event.Data.Deactivated {
 			return s.removeDeletedUserGroupChannelGroup(ctx, event.GroupID)
 		}
+	case *events.EventUnmarshalingError:
+		s.logger.WarnContext(ctx, "failed to decode channel-group Zulip event",
+			"event_id", event.GetID(),
+			"event_type", event.Type,
+			"error", event.Err,
+		)
 	}
 	return nil
 }

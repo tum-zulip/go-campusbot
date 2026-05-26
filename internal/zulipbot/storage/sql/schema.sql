@@ -44,19 +44,6 @@ CREATE TABLE IF NOT EXISTS restart_requests (
   failure TEXT
 );
 
-CREATE TABLE IF NOT EXISTS audit_log (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  at TEXT NOT NULL,
-  actor_user_id INTEGER,
-  action TEXT NOT NULL,
-  target TEXT,
-  status TEXT NOT NULL,
-  message_id INTEGER,
-  old_value TEXT,
-  new_value TEXT,
-  error TEXT
-);
-
 -- emoji -> channel group mappings
 CREATE TABLE IF NOT EXISTS emoji_group_mappings (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

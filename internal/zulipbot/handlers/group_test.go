@@ -226,9 +226,9 @@ func seedGroupMapping(t *testing.T, repo *storage.Repository, shortName, emojiNa
 	}
 }
 
-func makeGroupRequest(name string, args ...string) command.Request {
+func makeGroupRequest(parsedArgs any) command.Request {
 	return command.Request{
-		Invocation: command.Invocation{Name: "group", Args: append([]string{name}, args...)},
+		ParsedArgs: parsedArgs,
 		Actor:      command.Actor{UserID: 123},
 		MessageID:  1,
 		Target:     command.ReplyTarget{Kind: command.ReplyKindDirect, UserIDs: []int64{123}},
@@ -253,7 +253,7 @@ func TestGroupSubscribe(t *testing.T) {
 		allowAll{},
 	)
 
-	result, err := h.Handle(ctx, makeGroupRequest("subscribe", "WI"))
+	result, err := h.Handle(ctx, makeGroupRequest(handlers.GroupSubscribeArgs{ShortName: "WI"}))
 	if err != nil {
 		t.Fatalf("Handle() failed: %v", err)
 	}
@@ -283,7 +283,7 @@ func TestGroupUnsubscribe(t *testing.T) {
 		allowAll{},
 	)
 
-	result, err := h.Handle(ctx, makeGroupRequest("unsubscribe", "WI"))
+	result, err := h.Handle(ctx, makeGroupRequest(handlers.GroupUnsubscribeArgs{ShortName: "WI"}))
 	if err != nil {
 		t.Fatalf("Handle() failed: %v", err)
 	}
@@ -313,7 +313,7 @@ func TestGroupUnsubscribeKeepChannels(t *testing.T) {
 		allowAll{},
 	)
 
-	result, err := h.Handle(ctx, makeGroupRequest("unsubscribe", "-k", "WI"))
+	result, err := h.Handle(ctx, makeGroupRequest(handlers.GroupUnsubscribeArgs{KeepChannels: true, ShortName: "WI"}))
 	if err != nil {
 		t.Fatalf("Handle() failed: %v", err)
 	}
@@ -345,7 +345,7 @@ func TestGroupSubscribeUnknownGroup(t *testing.T) {
 		allowAll{},
 	)
 
-	_, err := h.Handle(ctx, makeGroupRequest("subscribe", "UNKNOWN"))
+	_, err := h.Handle(ctx, makeGroupRequest(handlers.GroupSubscribeArgs{ShortName: "UNKNOWN"}))
 	var userErr command.UserError
 	if !errors.As(err, &userErr) {
 		t.Errorf("expected UserError for unknown group, got %T: %v", err, err)
@@ -370,7 +370,7 @@ func TestGroupSubscribeUnknownGroupNoneUserDoesNotLeakAdminHint(t *testing.T) {
 		denyAll{},
 	)
 
-	_, err := h.Handle(ctx, makeGroupRequest("subscribe", "UNKNOWN"))
+	_, err := h.Handle(ctx, makeGroupRequest(handlers.GroupSubscribeArgs{ShortName: "UNKNOWN"}))
 	var userErr command.UserError
 	if !errors.As(err, &userErr) {
 		t.Fatalf("expected UserError for unknown group, got %T: %v", err, err)
@@ -402,7 +402,7 @@ func TestGroupSubscribeUnknownGroupAdminSeesHint(t *testing.T) {
 		allowAll{},
 	)
 
-	_, err := h.Handle(ctx, makeGroupRequest("subscribe", "UNKNOWN"))
+	_, err := h.Handle(ctx, makeGroupRequest(handlers.GroupSubscribeArgs{ShortName: "UNKNOWN"}))
 	var userErr command.UserError
 	if !errors.As(err, &userErr) {
 		t.Fatalf("expected UserError for unknown group, got %T: %v", err, err)
@@ -429,7 +429,7 @@ func TestGroupUnsubscribeUnknownGroupNoneUserDoesNotLeakAdminHint(t *testing.T) 
 		denyAll{},
 	)
 
-	_, err := h.Handle(ctx, makeGroupRequest("unsubscribe", "UNKNOWN"))
+	_, err := h.Handle(ctx, makeGroupRequest(handlers.GroupUnsubscribeArgs{ShortName: "UNKNOWN"}))
 	var userErr command.UserError
 	if !errors.As(err, &userErr) {
 		t.Fatalf("expected UserError for unknown group, got %T: %v", err, err)
@@ -442,20 +442,8 @@ func TestGroupUnsubscribeUnknownGroupNoneUserDoesNotLeakAdminHint(t *testing.T) 
 func TestGroupListIsNoLongerRecognised(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	repo := openGroupTestRepo(t)
-
-	h := handlers.NewGroupHandler(
-		&fakeGroupSubscriber{},
-		allExist(),
-		repo,
-		repo,
-		&fakeAnnouncer{},
-		&fakeAnnouncementStateAccessor{},
-		&fakeGroupConfigReader{},
-		allowAll{},
-	)
-
-	_, err := h.Handle(ctx, makeGroupRequest("list"))
+	parser := command.NewArgParser(nil)
+	_, err := parser.Parse(ctx, handlers.GroupArgSpec, []string{"list"})
 	var userErr command.UserError
 	if !errors.As(err, &userErr) {
 		t.Fatalf("expected UserError for removed `group list` subcommand, got %T: %v", err, err)
@@ -481,7 +469,7 @@ func TestGroupCreateAdminCreatesChannelGroupAndMapping(t *testing.T) {
 		allowAll{},
 	)
 
-	result, err := h.Handle(ctx, makeGroupRequest("create", "PGDP", "books"))
+	result, err := h.Handle(ctx, makeGroupRequest(handlers.GroupCreateArgs{ShortName: "PGDP", EmojiName: "books"}))
 	if err != nil {
 		t.Fatalf("Handle() failed: %v", err)
 	}
@@ -522,7 +510,7 @@ func TestGroupCreateDuplicateZulipUserGroupReturnsUserError(t *testing.T) {
 		allowAll{},
 	)
 
-	_, err := h.Handle(ctx, makeGroupRequest("create", "pgdp2", "books"))
+	_, err := h.Handle(ctx, makeGroupRequest(handlers.GroupCreateArgs{ShortName: "pgdp2", EmojiName: "books"}))
 	var userErr command.UserError
 	if !errors.As(err, &userErr) {
 		t.Fatalf("expected UserError for duplicate group, got %T: %v", err, err)
@@ -548,7 +536,7 @@ func TestGroupCreateRollsBackChannelGroupWhenMappingFails(t *testing.T) {
 		allowAll{},
 	)
 
-	_, err := h.Handle(ctx, makeGroupRequest("create", "PGDP", "books"))
+	_, err := h.Handle(ctx, makeGroupRequest(handlers.GroupCreateArgs{ShortName: "PGDP", EmojiName: "books"}))
 	if err == nil {
 		t.Fatal("expected create error")
 	}
@@ -580,7 +568,7 @@ func TestGroupCreateDeniedForNoneUser(t *testing.T) {
 		denyAll{},
 	)
 
-	_, err := h.Handle(ctx, makeGroupRequest("create", "PGDP", "books"))
+	_, err := h.Handle(ctx, makeGroupRequest(handlers.GroupCreateArgs{ShortName: "PGDP", EmojiName: "books"}))
 	var userErr command.UserError
 	if !errors.As(err, &userErr) {
 		t.Fatalf("expected UserError for denied create, got %T: %v", err, err)
@@ -612,7 +600,7 @@ func TestGroupAvailableAdminListsZulipVisibleGroups(t *testing.T) {
 		allowAll{},
 	)
 
-	result, err := h.Handle(ctx, makeGroupRequest("available"))
+	result, err := h.Handle(ctx, makeGroupRequest(handlers.GroupAvailableArgs{}))
 	if err != nil {
 		t.Fatalf("Handle() failed: %v", err)
 	}
@@ -655,7 +643,7 @@ func TestGroupAvailableAdminEmpty(t *testing.T) {
 		allowAll{},
 	)
 
-	result, err := h.Handle(ctx, makeGroupRequest("available"))
+	result, err := h.Handle(ctx, makeGroupRequest(handlers.GroupAvailableArgs{}))
 	if err != nil {
 		t.Fatalf("Handle() failed: %v", err)
 	}
@@ -683,7 +671,7 @@ func TestGroupAvailableDeniedForNoneUser(t *testing.T) {
 		denyAll{},
 	)
 
-	_, err := h.Handle(ctx, makeGroupRequest("available"))
+	_, err := h.Handle(ctx, makeGroupRequest(handlers.GroupAvailableArgs{}))
 	var userErr command.UserError
 	if !errors.As(err, &userErr) {
 		t.Fatalf("expected UserError for denied access, got %T: %v", err, err)
@@ -718,7 +706,10 @@ func TestGroupMappingSetAutoImportsWhenZulipVisibleButNotLocal(t *testing.T) {
 		allowAll{},
 	)
 
-	result, err := h.Handle(ctx, makeGroupRequest("mapping", "set", "PGDP", "30", "math"))
+	result, err := h.Handle(
+		ctx,
+		makeGroupRequest(handlers.GroupMappingSetArgs{ShortName: "PGDP", ZulipGroupID: 30, EmojiName: "math"}),
+	)
 	if err != nil {
 		t.Fatalf("Handle() failed: %v", err)
 	}
@@ -764,7 +755,7 @@ func TestGroupMappingSetSkipsAutoImportWhenAlreadyLocal(t *testing.T) {
 
 	result, err := h.Handle(
 		ctx,
-		makeGroupRequest("mapping", "set", "NEWCOURSE", "55", "newemoji"),
+		makeGroupRequest(handlers.GroupMappingSetArgs{ShortName: "NEWCOURSE", ZulipGroupID: 55, EmojiName: "newemoji"}),
 	)
 	if err != nil {
 		t.Fatalf("Handle() failed: %v", err)
@@ -807,7 +798,10 @@ func TestGroupMappingSetRejectsWhenZulipDoesNotKnowGroup(t *testing.T) {
 		allowAll{},
 	)
 
-	_, err := h.Handle(ctx, makeGroupRequest("mapping", "set", "PGDP", "30", "math"))
+	_, err := h.Handle(
+		ctx,
+		makeGroupRequest(handlers.GroupMappingSetArgs{ShortName: "PGDP", ZulipGroupID: 30, EmojiName: "math"}),
+	)
 	var userErr command.UserError
 	if !errors.As(err, &userErr) {
 		t.Fatalf("expected UserError for invisible Zulip group, got %T: %v", err, err)
@@ -855,7 +849,10 @@ func TestGroupMappingSetFailedImportLeavesNoMapping(t *testing.T) {
 		allowAll{},
 	)
 
-	_, err := h.Handle(ctx, makeGroupRequest("mapping", "set", "PGDP", "30", "math"))
+	_, err := h.Handle(
+		ctx,
+		makeGroupRequest(handlers.GroupMappingSetArgs{ShortName: "PGDP", ZulipGroupID: 30, EmojiName: "math"}),
+	)
 	if err == nil {
 		t.Fatal("expected error when ImportZulipUserGroup fails")
 	}
@@ -889,7 +886,10 @@ func TestGroupMappingSetAcceptsExistingChannelGroup(t *testing.T) {
 		allowAll{},
 	)
 
-	_, err := h.Handle(ctx, makeGroupRequest("mapping", "set", "NEWCOURSE", "55", "newemoji"))
+	_, err := h.Handle(
+		ctx,
+		makeGroupRequest(handlers.GroupMappingSetArgs{ShortName: "NEWCOURSE", ZulipGroupID: 55, EmojiName: "newemoji"}),
+	)
 	if err != nil {
 		t.Fatalf("Handle() failed: %v", err)
 	}
@@ -916,7 +916,7 @@ func TestGroupMappingListAdmin(t *testing.T) {
 		allowAll{},
 	)
 
-	result, err := h.Handle(ctx, makeGroupRequest("mapping", "list"))
+	result, err := h.Handle(ctx, makeGroupRequest(handlers.GroupMappingListArgs{}))
 	if err != nil {
 		t.Fatalf("Handle() failed: %v", err)
 	}
@@ -941,7 +941,7 @@ func TestGroupMappingListDenied(t *testing.T) {
 		denyAll{},
 	)
 
-	_, err := h.Handle(ctx, makeGroupRequest("mapping", "list"))
+	_, err := h.Handle(ctx, makeGroupRequest(handlers.GroupMappingListArgs{}))
 	var userErr command.UserError
 	if !errors.As(err, &userErr) {
 		t.Errorf("expected UserError for denied access, got %T: %v", err, err)
@@ -966,7 +966,7 @@ func TestGroupAnnounceNoConfig(t *testing.T) {
 		allowAll{},
 	)
 
-	_, err := h.Handle(ctx, makeGroupRequest("announce"))
+	_, err := h.Handle(ctx, makeGroupRequest(handlers.GroupAnnounceArgs{}))
 	var userErr command.UserError
 	if !errors.As(err, &userErr) {
 		t.Errorf("expected UserError when config not set, got %T: %v", err, err)
@@ -1001,7 +1001,7 @@ func TestGroupAnnounceRejectsInvalidEnabledMapping(t *testing.T) {
 		allowAll{},
 	)
 
-	_, err := h.Handle(ctx, makeGroupRequest("announce"))
+	_, err := h.Handle(ctx, makeGroupRequest(handlers.GroupAnnounceArgs{}))
 	var userErr command.UserError
 	if !errors.As(err, &userErr) {
 		t.Fatalf("expected UserError when an enabled mapping references a missing channel group, got %T: %v", err, err)
@@ -1043,7 +1043,7 @@ func TestGroupAnnounceIgnoresDisabledInvalidMapping(t *testing.T) {
 		allowAll{},
 	)
 
-	if _, err := h.Handle(ctx, makeGroupRequest("announce")); err != nil {
+	if _, err := h.Handle(ctx, makeGroupRequest(handlers.GroupAnnounceArgs{})); err != nil {
 		t.Fatalf("Handle() failed: %v", err)
 	}
 	if announcer.called != 1 {
@@ -1074,7 +1074,7 @@ func TestGroupAnnounceAllValidMappings(t *testing.T) {
 		allowAll{},
 	)
 
-	if _, err := h.Handle(ctx, makeGroupRequest("announce")); err != nil {
+	if _, err := h.Handle(ctx, makeGroupRequest(handlers.GroupAnnounceArgs{})); err != nil {
 		t.Fatalf("Handle() failed: %v", err)
 	}
 	if announcer.called != 1 {
@@ -1101,7 +1101,7 @@ func TestGroupMappingListAnnotatesMissingChannelGroups(t *testing.T) {
 		allowAll{},
 	)
 
-	result, err := h.Handle(ctx, makeGroupRequest("mapping", "list"))
+	result, err := h.Handle(ctx, makeGroupRequest(handlers.GroupMappingListArgs{}))
 	if err != nil {
 		t.Fatalf("Handle() failed: %v", err)
 	}
@@ -1116,20 +1116,8 @@ func TestGroupMappingListAnnotatesMissingChannelGroups(t *testing.T) {
 func TestGroupInvalidSubcommand(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	repo := openGroupTestRepo(t)
-
-	h := handlers.NewGroupHandler(
-		&fakeGroupSubscriber{},
-		allExist(),
-		repo,
-		repo,
-		&fakeAnnouncer{},
-		&fakeAnnouncementStateAccessor{},
-		&fakeGroupConfigReader{},
-		allowAll{},
-	)
-
-	_, err := h.Handle(ctx, makeGroupRequest("badcmd"))
+	parser := command.NewArgParser(nil)
+	_, err := parser.Parse(ctx, handlers.GroupArgSpec, []string{"badcmd"})
 	var userErr command.UserError
 	if !errors.As(err, &userErr) {
 		t.Errorf("expected UserError for invalid subcommand, got %T: %v", err, err)
@@ -1160,7 +1148,7 @@ func TestGroupAnnounceExistingMessageID(t *testing.T) {
 		allowAll{},
 	)
 
-	result, err := h.Handle(ctx, makeGroupRequest("announce"))
+	result, err := h.Handle(ctx, makeGroupRequest(handlers.GroupAnnounceArgs{}))
 	if err != nil {
 		t.Fatalf("Handle() failed: %v", err)
 	}
@@ -1192,7 +1180,7 @@ func TestGroupAnnounceNoConfigNoMessageID(t *testing.T) {
 		allowAll{},
 	)
 
-	_, err := h.Handle(ctx, makeGroupRequest("announce"))
+	_, err := h.Handle(ctx, makeGroupRequest(handlers.GroupAnnounceArgs{}))
 	var userErr command.UserError
 	if !errors.As(err, &userErr) {
 		t.Errorf("expected UserError when no config and no message_id, got %T: %v", err, err)
@@ -1216,7 +1204,7 @@ func TestGroupAnnounceSetMessageValid(t *testing.T) {
 		allowAll{},
 	)
 
-	result, err := h.Handle(ctx, makeGroupRequest("announce", "set-message", "12345"))
+	result, err := h.Handle(ctx, makeGroupRequest(handlers.GroupAnnounceSetMessageArgs{MessageID: 12345}))
 	if err != nil {
 		t.Fatalf("Handle() failed: %v", err)
 	}
@@ -1245,20 +1233,21 @@ func TestGroupAnnounceSetMessageInvalid(t *testing.T) {
 	)
 
 	// Zero
-	_, err := h.Handle(ctx, makeGroupRequest("announce", "set-message", "0"))
+	_, err := h.Handle(ctx, makeGroupRequest(handlers.GroupAnnounceSetMessageArgs{MessageID: 0}))
 	var userErr command.UserError
 	if !errors.As(err, &userErr) {
 		t.Errorf("expected UserError for 0, got %T: %v", err, err)
 	}
 
 	// Negative
-	_, err = h.Handle(ctx, makeGroupRequest("announce", "set-message", "-1"))
+	_, err = h.Handle(ctx, makeGroupRequest(handlers.GroupAnnounceSetMessageArgs{MessageID: -1}))
 	if !errors.As(err, &userErr) {
 		t.Errorf("expected UserError for -1, got %T: %v", err, err)
 	}
 
-	// Non-numeric
-	_, err = h.Handle(ctx, makeGroupRequest("announce", "set-message", "abc"))
+	// Non-numeric input is rejected by the argparser before Handle is called.
+	parser := command.NewArgParser(nil)
+	_, err = parser.Parse(ctx, handlers.GroupArgSpec, []string{"announce", "set-message", "abc"})
 	if !errors.As(err, &userErr) {
 		t.Errorf("expected UserError for abc, got %T: %v", err, err)
 	}
@@ -1436,7 +1425,6 @@ func TestGroupAdminCommandDeniedForNoneUser(t *testing.T) {
 	ctx := context.Background()
 	repo := openGroupTestRepo(t)
 
-	// denyAll simulates a real auth check that denies non-admin actors.
 	h := handlers.NewGroupHandler(
 		&fakeGroupSubscriber{},
 		allExist(),
@@ -1447,17 +1435,20 @@ func TestGroupAdminCommandDeniedForNoneUser(t *testing.T) {
 		denyAll{},
 	)
 
-	for _, args := range [][]string{
-		{"available"},
-		{"mapping", "list"},
-		{"announce"},
-		{"announce", "inspect"},
+	for _, tc := range []struct {
+		name       string
+		parsedArgs any
+	}{
+		{"available", handlers.GroupAvailableArgs{}},
+		{"mapping_list", handlers.GroupMappingListArgs{}},
+		{"announce", handlers.GroupAnnounceArgs{}},
+		{"announce_inspect", handlers.GroupAnnounceInspectArgs{}},
 	} {
-		t.Run(strings.Join(args, "_"), func(t *testing.T) {
-			_, err := h.Handle(ctx, makeGroupRequest(args[0], args[1:]...))
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := h.Handle(ctx, makeGroupRequest(tc.parsedArgs))
 			var userErr command.UserError
 			if !errors.As(err, &userErr) {
-				t.Errorf("expected UserError for denied %v, got %T: %v", args, err, err)
+				t.Errorf("expected UserError for denied %v, got %T: %v", tc.name, err, err)
 			}
 		})
 	}
@@ -1482,7 +1473,7 @@ func TestGroupSubscribeStillWorksForNoneUser(t *testing.T) {
 		allowAll{},
 	)
 
-	result, err := h.Handle(ctx, makeGroupRequest("subscribe", "WI"))
+	result, err := h.Handle(ctx, makeGroupRequest(handlers.GroupSubscribeArgs{ShortName: "WI"}))
 	if err != nil {
 		t.Fatalf("subscribe should succeed for any user, got: %v", err)
 	}
@@ -1514,7 +1505,7 @@ func TestGroupAnnounceInspect(t *testing.T) {
 		allowAll{},
 	)
 
-	result, err := h.Handle(ctx, makeGroupRequest("announce", "inspect"))
+	result, err := h.Handle(ctx, makeGroupRequest(handlers.GroupAnnounceInspectArgs{}))
 	if err != nil {
 		t.Fatalf("Handle() failed: %v", err)
 	}
@@ -1581,7 +1572,7 @@ func TestGroupCourseAdd(t *testing.T) {
 	ctx := context.Background()
 	h, client := buildCourseHandler(t, allowAll{})
 
-	result, err := h.Handle(ctx, makeGroupRequest("course", "add", "99", "WI"))
+	result, err := h.Handle(ctx, makeGroupRequest(handlers.GroupChannelAddArgs{ChannelID: 99, ShortName: "WI"}))
 	if err != nil {
 		t.Fatalf("Handle() failed: %v", err)
 	}
@@ -1606,7 +1597,7 @@ func TestGroupCourseRemove(t *testing.T) {
 		t.Fatalf("pre-add channel 99 to group 42: %v", err)
 	}
 
-	result, err := h.Handle(ctx, makeGroupRequest("course", "remove", "99", "WI"))
+	result, err := h.Handle(ctx, makeGroupRequest(handlers.GroupChannelRemoveArgs{ChannelID: 99, ShortName: "WI"}))
 	if err != nil {
 		t.Fatalf("Handle() failed: %v", err)
 	}
@@ -1627,7 +1618,7 @@ func TestGroupCoursePermissionDenied(t *testing.T) {
 	ctx := context.Background()
 	h, _ := buildCourseHandler(t, denyAll{})
 
-	_, err := h.Handle(ctx, makeGroupRequest("course", "add", "99", "WI"))
+	_, err := h.Handle(ctx, makeGroupRequest(handlers.GroupChannelAddArgs{ChannelID: 99, ShortName: "WI"}))
 	if err == nil {
 		t.Fatal("expected error for non-admin user")
 	}
@@ -1638,7 +1629,7 @@ func TestGroupCourseUnknownGroup(t *testing.T) {
 	ctx := context.Background()
 	h, _ := buildCourseHandler(t, allowAll{})
 
-	_, err := h.Handle(ctx, makeGroupRequest("course", "add", "99", "UNKNOWN"))
+	_, err := h.Handle(ctx, makeGroupRequest(handlers.GroupChannelAddArgs{ChannelID: 99, ShortName: "UNKNOWN"}))
 	if err == nil {
 		t.Fatal("expected error for unknown group")
 	}
@@ -1647,9 +1638,8 @@ func TestGroupCourseUnknownGroup(t *testing.T) {
 func TestGroupCourseInvalidChannelID(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	h, _ := buildCourseHandler(t, allowAll{})
-
-	_, err := h.Handle(ctx, makeGroupRequest("course", "add", "notanint", "WI"))
+	parser := command.NewArgParser(nil)
+	_, err := parser.Parse(ctx, handlers.GroupArgSpec, []string{"course", "add", "notanint", "WI"})
 	if err == nil {
 		t.Fatal("expected error for invalid channel_id")
 	}
@@ -1670,7 +1660,7 @@ func TestGroupCourseNotConfigured(t *testing.T) {
 		allowAll{},
 	)
 
-	_, err := h.Handle(ctx, makeGroupRequest("course", "add", "99", "WI"))
+	_, err := h.Handle(ctx, makeGroupRequest(handlers.GroupChannelAddArgs{ChannelID: 99, ShortName: "WI"}))
 	if err == nil {
 		t.Fatal("expected error when channel manager is not configured")
 	}
@@ -1681,7 +1671,10 @@ func TestGroupChannelCreate(t *testing.T) {
 	ctx := context.Background()
 	h, client := buildCourseHandler(t, allowAll{})
 
-	result, err := h.Handle(ctx, makeGroupRequest("channel", "create", "new-channel", "WI"))
+	result, err := h.Handle(
+		ctx,
+		makeGroupRequest(handlers.GroupChannelCreateArgs{ChannelName: "new-channel", ShortName: "WI"}),
+	)
 	if err != nil {
 		t.Fatalf("Handle() failed: %v", err)
 	}
@@ -1702,7 +1695,10 @@ func TestGroupChannelCreateCourseAlias(t *testing.T) {
 	ctx := context.Background()
 	h, client := buildCourseHandler(t, allowAll{})
 
-	result, err := h.Handle(ctx, makeGroupRequest("course", "create", "new-channel", "WI"))
+	result, err := h.Handle(
+		ctx,
+		makeGroupRequest(handlers.GroupChannelCreateArgs{ChannelName: "new-channel", ShortName: "WI"}),
+	)
 	if err != nil {
 		t.Fatalf("Handle() failed via course alias: %v", err)
 	}
@@ -1723,7 +1719,10 @@ func TestGroupChannelCreateUnknownGroup(t *testing.T) {
 	ctx := context.Background()
 	h, _ := buildCourseHandler(t, allowAll{})
 
-	_, err := h.Handle(ctx, makeGroupRequest("channel", "create", "new-channel", "UNKNOWN"))
+	_, err := h.Handle(
+		ctx,
+		makeGroupRequest(handlers.GroupChannelCreateArgs{ChannelName: "new-channel", ShortName: "UNKNOWN"}),
+	)
 	if err == nil {
 		t.Fatal("expected error for unknown group")
 	}
@@ -1734,7 +1733,10 @@ func TestGroupChannelCreatePermissionDenied(t *testing.T) {
 	ctx := context.Background()
 	h, _ := buildCourseHandler(t, denyAll{})
 
-	_, err := h.Handle(ctx, makeGroupRequest("channel", "create", "new-channel", "WI"))
+	_, err := h.Handle(
+		ctx,
+		makeGroupRequest(handlers.GroupChannelCreateArgs{ChannelName: "new-channel", ShortName: "WI"}),
+	)
 	if err == nil {
 		t.Fatal("expected error for non-admin user")
 	}

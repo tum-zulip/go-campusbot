@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strconv"
 	"strings"
 	"time"
 
@@ -133,51 +132,40 @@ func (h *GroupHandler) Metadata() command.Metadata {
 			"group channel <add|remove|create> <channel_id_or_name> <short_name>\n" +
 			"group announce [set-message <message_id>|inspect]",
 		Permission: command.PermOpen,
+		ArgSpec:    GroupArgSpec,
 	}
 }
 
-// Handle dispatches subcommands:
-//
-//	group subscribe <course_short_name>
-//	group unsubscribe <course_short_name>
-//	group unsubscribe -k <course_short_name>
-//	group create <short_name> <emoji_name> (admin only)
-//	group available                       (admin only — user groups visible in Zulip)
-//	group mapping list                    (admin only)
-//	group mapping set <short_name> <zulip_user_group_id> <emoji_name> (admin only — auto-imports the Zulip group if needed)
-//	group mapping disable <name>          (admin only)
-//	group channel add <channel_id> <short_name>    (admin only)
-//	group channel remove <channel_id> <short_name> (admin only)
-//	group channel create <channel_name> <short_name> (admin only)
-//	group course ...                      (alias for group channel ...)
 func (h *GroupHandler) Handle(ctx context.Context, req command.Request) (command.Result, error) {
-	args := req.Invocation.Args
-	if len(args) == 0 {
-		return command.Result{}, command.NewUserError("Usage: `group <subscribe|unsubscribe> [-k] <course_short_name>`")
-	}
-
-	switch args[0] {
-	case "subscribe":
-		return h.handleSubscribe(ctx, req, args[1:])
-	case "unsubscribe":
-		return h.handleUnsubscribe(ctx, req, args[1:])
-	case "create":
-		return h.handleCreate(ctx, req, args[1:])
-	case "available":
+	switch args := req.ParsedArgs.(type) {
+	case GroupSubscribeArgs:
+		return h.handleSubscribe(ctx, req, args)
+	case GroupUnsubscribeArgs:
+		return h.handleUnsubscribe(ctx, req, args)
+	case GroupCreateArgs:
+		return h.handleCreate(ctx, req, args)
+	case GroupAvailableArgs:
 		return h.handleAvailable(ctx, req)
-	case "mapping":
-		return h.handleMapping(ctx, req, args[1:])
-	case "channel", "course":
-		return h.handleChannel(ctx, req, args[1:])
-	case "announce":
-		return h.handleAnnounce(ctx, req, args[1:])
+	case GroupMappingListArgs:
+		return h.handleMappingList(ctx, req)
+	case GroupMappingSetArgs:
+		return h.handleMappingSet(ctx, req, args)
+	case GroupMappingDisableArgs:
+		return h.handleMappingDisable(ctx, req, args)
+	case GroupChannelAddArgs:
+		return h.handleChannelAdd(ctx, req, args)
+	case GroupChannelRemoveArgs:
+		return h.handleChannelRemove(ctx, req, args)
+	case GroupChannelCreateArgs:
+		return h.handleChannelCreate(ctx, req, args)
+	case GroupAnnounceArgs:
+		return h.runAnnounce(ctx, req)
+	case GroupAnnounceSetMessageArgs:
+		return h.handleAnnounceSetMessage(ctx, req, args)
+	case GroupAnnounceInspectArgs:
+		return h.handleAnnounceInspect(ctx, req)
 	default:
-		return command.Result{}, command.NewUserError(
-			fmt.Sprintf(
-				"Unknown subcommand %q. Usage: `group <subscribe|unsubscribe> [-k] <course_short_name>`",
-				args[0],
-			),
-		)
+		return command.Result{}, command.NewUserError("Usage: `group <subscribe|unsubscribe> <course_short_name>`")
 	}
 }
 
@@ -185,16 +173,13 @@ func (h *GroupHandler) Handle(ctx context.Context, req command.Request) (command
 func (h *GroupHandler) handleCreate(
 	ctx context.Context,
 	req command.Request,
-	args []string,
+	args GroupCreateArgs,
 ) (command.Result, error) {
 	if err := h.auth.Check(ctx, req.Actor, command.PermAdmin); err != nil {
 		return command.Result{}, command.NewUserError("permission denied")
 	}
-	if len(args) != 2 { //nolint:mnd // Command requires short name and emoji name.
-		return command.Result{}, command.NewUserError("Usage: `group create <short_name> <emoji_name>`")
-	}
-	shortName := args[0]
-	emojiName := args[1]
+	shortName := args.ShortName
+	emojiName := args.EmojiName
 	if strings.TrimSpace(shortName) == "" || strings.TrimSpace(emojiName) == "" {
 		return command.Result{}, command.NewUserError("Usage: `group create <short_name> <emoji_name>`")
 	}
@@ -290,12 +275,9 @@ func isDuplicateZulipUserGroupError(err error) bool {
 func (h *GroupHandler) handleSubscribe(
 	ctx context.Context,
 	req command.Request,
-	args []string,
+	args GroupSubscribeArgs,
 ) (command.Result, error) {
-	if len(args) != 1 {
-		return command.Result{}, command.NewUserError("Usage: `group subscribe <course_short_name>`")
-	}
-	shortName := args[0]
+	shortName := args.ShortName
 
 	mapping, found, err := h.mappingReader.GetEmojiGroupMappingByShortName(ctx, shortName)
 	if err != nil {
@@ -317,20 +299,10 @@ func (h *GroupHandler) handleSubscribe(
 func (h *GroupHandler) handleUnsubscribe(
 	ctx context.Context,
 	req command.Request,
-	args []string,
+	args GroupUnsubscribeArgs,
 ) (command.Result, error) {
-	keepChannels := false
-	remaining := args
-
-	if len(remaining) >= 1 && remaining[0] == "-k" {
-		keepChannels = true
-		remaining = remaining[1:]
-	}
-
-	if len(remaining) != 1 {
-		return command.Result{}, command.NewUserError("Usage: `group unsubscribe [-k] <course_short_name>`")
-	}
-	shortName := remaining[0]
+	keepChannels := args.KeepChannels
+	shortName := args.ShortName
 
 	mapping, found, err := h.mappingReader.GetEmojiGroupMappingByShortName(ctx, shortName)
 	if err != nil {
@@ -407,30 +379,10 @@ func unknownGroupMessage(ctx context.Context, auth command.Authorizer, req comma
 	)
 }
 
-func (h *GroupHandler) handleMapping(ctx context.Context, req command.Request, args []string) (command.Result, error) {
+func (h *GroupHandler) handleMappingList(ctx context.Context, req command.Request) (command.Result, error) {
 	if err := h.auth.Check(ctx, req.Actor, command.PermAdmin); err != nil {
 		return command.Result{}, command.NewUserError("permission denied")
 	}
-
-	if len(args) == 0 {
-		return command.Result{}, command.NewUserError("Usage: `group mapping <list|set|disable> [args...]`")
-	}
-
-	switch args[0] {
-	case "list":
-		return h.handleMappingList(ctx)
-	case "set":
-		return h.handleMappingSet(ctx, args[1:])
-	case "disable":
-		return h.handleMappingDisable(ctx, req, args[1:])
-	default:
-		return command.Result{}, command.NewUserError(
-			fmt.Sprintf("Unknown mapping subcommand %q. Use: list, set, disable", args[0]),
-		)
-	}
-}
-
-func (h *GroupHandler) handleMappingList(ctx context.Context) (command.Result, error) {
 	mappings, err := h.mappingReader.ListAllEmojiGroupMappings(ctx)
 	if err != nil {
 		return command.Result{}, err
@@ -480,43 +432,25 @@ func (h *GroupHandler) validateEnabledMappings(ctx context.Context) ([]storage.E
 	return invalid, nil
 }
 
-func (h *GroupHandler) handleMappingSet(ctx context.Context, args []string) (command.Result, error) {
-	// Format: group mapping set <short_name> <zulip_user_group_id> <emoji_name>
-	if len(args) != 3 { //nolint:mnd // Command requires short name, group ID, and emoji name.
-		return command.Result{}, command.NewUserError(
-			"Usage: `group mapping set <short_name> <zulip_user_group_id> <emoji_name>`",
-		)
+func (h *GroupHandler) handleMappingSet(
+	ctx context.Context,
+	req command.Request,
+	args GroupMappingSetArgs,
+) (command.Result, error) {
+	if err := h.auth.Check(ctx, req.Actor, command.PermAdmin); err != nil {
+		return command.Result{}, command.NewUserError("permission denied")
 	}
-	shortName := args[0]
-	channelGroupIDStr := args[1]
-	emojiName := args[2]
+	shortName := args.ShortName
+	channelGroupID := args.ZulipGroupID
+	emojiName := args.EmojiName
 
-	channelGroupID, err := strconv.ParseInt(channelGroupIDStr, 10, 64)
-	if err != nil || channelGroupID <= 0 {
+	if channelGroupID <= 0 {
 		return command.Result{}, command.NewUserError("zulip_user_group_id must be a positive integer")
 	}
 
-	exists, err := h.groupChecker.ChannelGroupExists(ctx, channelGroupID)
+	imported, err := h.ensureChannelGroupImported(ctx, channelGroupID)
 	if err != nil {
-		return command.Result{}, fmt.Errorf("verify channel group %d exists: %w", channelGroupID, err)
-	}
-	imported := false
-	if !exists {
-		// Auto-import: only proceed if the Zulip user group is visible to the bot.
-		visible, visibleErr := h.zulipGroupVisible(ctx, channelGroupID)
-		if visibleErr != nil {
-			return command.Result{}, fmt.Errorf("check zulip visibility for group %d: %w", channelGroupID, visibleErr)
-		}
-		if !visible {
-			return command.Result{}, command.NewUserError(fmt.Sprintf(
-				"Channel group %d is not visible in Zulip. Run `group available` to see available groups.",
-				channelGroupID,
-			))
-		}
-		if importErr := h.groupChecker.ImportZulipUserGroup(ctx, channelGroupID); importErr != nil {
-			return command.Result{}, fmt.Errorf("auto-import channel group %d: %w", channelGroupID, importErr)
-		}
-		imported = true
+		return command.Result{}, err
 	}
 
 	mapping := storage.EmojiGroupMapping{
@@ -564,16 +498,40 @@ func (h *GroupHandler) zulipGroupVisible(ctx context.Context, userGroupID int64)
 	return false, nil
 }
 
+func (h *GroupHandler) ensureChannelGroupImported(ctx context.Context, channelGroupID int64) (bool, error) {
+	exists, err := h.groupChecker.ChannelGroupExists(ctx, channelGroupID)
+	if err != nil {
+		return false, fmt.Errorf("verify channel group %d exists: %w", channelGroupID, err)
+	}
+	if exists {
+		return false, nil
+	}
+	// Auto-import: only proceed if the Zulip user group is visible to the bot.
+	visible, err := h.zulipGroupVisible(ctx, channelGroupID)
+	if err != nil {
+		return false, fmt.Errorf("check zulip visibility for group %d: %w", channelGroupID, err)
+	}
+	if !visible {
+		return false, command.NewUserError(fmt.Sprintf(
+			"Channel group %d is not visible in Zulip. Run `group available` to see available groups.",
+			channelGroupID,
+		))
+	}
+	if err := h.groupChecker.ImportZulipUserGroup(ctx, channelGroupID); err != nil {
+		return false, fmt.Errorf("auto-import channel group %d: %w", channelGroupID, err)
+	}
+	return true, nil
+}
+
 func (h *GroupHandler) handleMappingDisable(
 	ctx context.Context,
 	req command.Request,
-	args []string,
+	args GroupMappingDisableArgs,
 ) (command.Result, error) {
-	_ = req
-	if len(args) != 1 {
-		return command.Result{}, command.NewUserError("Usage: `group mapping disable <short_name>`")
+	if err := h.auth.Check(ctx, req.Actor, command.PermAdmin); err != nil {
+		return command.Result{}, command.NewUserError("permission denied")
 	}
-	shortName := args[0]
+	shortName := args.ShortName
 
 	if err := h.mappingWriter.SetEmojiGroupMappingEnabled(ctx, shortName, false); err != nil {
 		return command.Result{}, fmt.Errorf("disable emoji group mapping: %w", err)
@@ -587,28 +545,10 @@ func (h *GroupHandler) handleMappingDisable(
 	}, nil
 }
 
-func (h *GroupHandler) handleAnnounce(ctx context.Context, req command.Request, args []string) (command.Result, error) {
+func (h *GroupHandler) runAnnounce(ctx context.Context, req command.Request) (command.Result, error) {
 	if err := h.auth.Check(ctx, req.Actor, command.PermAdmin); err != nil {
 		return command.Result{}, command.NewUserError("permission denied")
 	}
-
-	if len(args) == 0 {
-		return h.runAnnounce(ctx)
-	}
-
-	switch args[0] {
-	case "set-message":
-		return h.handleAnnounceSetMessage(ctx, args[1:])
-	case "inspect":
-		return h.handleAnnounceInspect(ctx)
-	default:
-		return command.Result{}, command.NewUserError(
-			fmt.Sprintf("Unknown announce subcommand %q. Use: set-message, inspect", args[0]),
-		)
-	}
-}
-
-func (h *GroupHandler) runAnnounce(ctx context.Context) (command.Result, error) {
 	invalid, err := h.validateEnabledMappings(ctx)
 	if err != nil {
 		return command.Result{}, fmt.Errorf("validate emoji mappings: %w", err)
@@ -662,12 +602,16 @@ func (h *GroupHandler) runAnnounce(ctx context.Context) (command.Result, error) 
 	return command.Result{Content: "Announcement updated."}, nil
 }
 
-func (h *GroupHandler) handleAnnounceSetMessage(ctx context.Context, args []string) (command.Result, error) {
-	if len(args) != 1 {
-		return command.Result{}, command.NewUserError("Usage: `group announce set-message <message_id>`")
+func (h *GroupHandler) handleAnnounceSetMessage(
+	ctx context.Context,
+	req command.Request,
+	args GroupAnnounceSetMessageArgs,
+) (command.Result, error) {
+	if err := h.auth.Check(ctx, req.Actor, command.PermAdmin); err != nil {
+		return command.Result{}, command.NewUserError("permission denied")
 	}
-	msgID, err := strconv.ParseInt(args[0], 10, 64)
-	if err != nil || msgID <= 0 {
+	msgID := args.MessageID
+	if msgID <= 0 {
 		return command.Result{}, command.NewUserError("message_id must be a positive integer")
 	}
 
@@ -686,7 +630,10 @@ func (h *GroupHandler) handleAnnounceSetMessage(ctx context.Context, args []stri
 	}, nil
 }
 
-func (h *GroupHandler) handleAnnounceInspect(ctx context.Context) (command.Result, error) {
+func (h *GroupHandler) handleAnnounceInspect(ctx context.Context, req command.Request) (command.Result, error) {
+	if err := h.auth.Check(ctx, req.Actor, command.PermAdmin); err != nil {
+		return command.Result{}, command.NewUserError("permission denied")
+	}
 	state, ok, err := h.stateAccessor.GetAnnouncementState(ctx)
 	if err != nil {
 		return command.Result{}, fmt.Errorf("read announcement state: %w", err)
@@ -724,49 +671,17 @@ func (h *GroupHandler) handleAnnounceInspect(ctx context.Context) (command.Resul
 	return command.Result{Content: strings.TrimSpace(b.String())}, nil
 }
 
-func (h *GroupHandler) handleChannel(ctx context.Context, req command.Request, args []string) (command.Result, error) {
-	if err := h.auth.Check(ctx, req.Actor, command.PermAdmin); err != nil {
-		return command.Result{}, command.NewUserError("permission denied")
-	}
-	if h.channelManager == nil {
-		return command.Result{}, command.NewUserError("channel command not available")
-	}
-	if len(args) == 0 {
-		return command.Result{}, command.NewUserError(
-			"Usage: `group channel <add|remove|create> <channel_id_or_name> <short_name>`",
-		)
-	}
-	switch args[0] {
-	case "add":
-		return h.handleChannelAdd(ctx, args[1:])
-	case "remove":
-		return h.handleChannelRemove(ctx, args[1:])
-	case "create":
-		return h.handleChannelCreate(ctx, args[1:])
-	default:
-		return command.Result{}, command.NewUserError(
-			fmt.Sprintf("Unknown channel subcommand %q. Use: add, remove, create", args[0]),
-		)
-	}
-}
-
 func (h *GroupHandler) handleChannelModify(
 	ctx context.Context,
-	subcommand string,
-	args []string,
+	_ command.Request,
+	channelID int64,
+	shortName string,
 	op func(ctx context.Context, groupID, channelID int64) error,
 	successFmt string,
 ) (command.Result, error) {
-	if len(args) != 2 { //nolint:mnd // Requires channel_id and short_name.
-		return command.Result{}, command.NewUserError(
-			fmt.Sprintf("Usage: `group channel %s <channel_id> <short_name>`", subcommand),
-		)
-	}
-	channelID, err := strconv.ParseInt(args[0], 10, 64)
-	if err != nil || channelID <= 0 {
+	if channelID <= 0 {
 		return command.Result{}, command.NewUserError("channel_id must be a positive integer")
 	}
-	shortName := args[1]
 
 	mapping, found, err := h.mappingReader.GetEmojiGroupMappingByShortName(ctx, shortName)
 	if err != nil {
@@ -777,27 +692,54 @@ func (h *GroupHandler) handleChannelModify(
 	}
 
 	if err := op(ctx, mapping.ChannelGroupID, channelID); err != nil {
-		return command.Result{}, fmt.Errorf("%s channel in group: %w", subcommand, err)
+		return command.Result{}, fmt.Errorf("channel group operation: %w", err)
 	}
 	return command.Result{Content: fmt.Sprintf(successFmt, channelID, mapping.ShortName)}, nil
 }
 
-func (h *GroupHandler) handleChannelAdd(ctx context.Context, args []string) (command.Result, error) {
-	return h.handleChannelModify(ctx, "add", args, h.channelManager.AddChannelToGroup,
-		"Added channel %d to **%s**.")
-}
-
-func (h *GroupHandler) handleChannelRemove(ctx context.Context, args []string) (command.Result, error) {
-	return h.handleChannelModify(ctx, "remove", args, h.channelManager.RemoveChannelFromGroup,
-		"Removed channel %d from **%s**.")
-}
-
-func (h *GroupHandler) handleChannelCreate(ctx context.Context, args []string) (command.Result, error) {
-	if len(args) != 2 { //nolint:mnd // Requires channel_name and short_name.
-		return command.Result{}, command.NewUserError("Usage: `group channel create <channel_name> <short_name>`")
+func (h *GroupHandler) handleChannelAdd(
+	ctx context.Context,
+	req command.Request,
+	args GroupChannelAddArgs,
+) (command.Result, error) {
+	if err := h.auth.Check(ctx, req.Actor, command.PermAdmin); err != nil {
+		return command.Result{}, command.NewUserError("permission denied")
 	}
-	channelName := args[0]
-	shortName := args[1]
+	if h.channelManager == nil {
+		return command.Result{}, command.NewUserError("channel command not available")
+	}
+	return h.handleChannelModify(ctx, req, args.ChannelID, args.ShortName,
+		h.channelManager.AddChannelToGroup, "Added channel %d to **%s**.")
+}
+
+func (h *GroupHandler) handleChannelRemove(
+	ctx context.Context,
+	req command.Request,
+	args GroupChannelRemoveArgs,
+) (command.Result, error) {
+	if err := h.auth.Check(ctx, req.Actor, command.PermAdmin); err != nil {
+		return command.Result{}, command.NewUserError("permission denied")
+	}
+	if h.channelManager == nil {
+		return command.Result{}, command.NewUserError("channel command not available")
+	}
+	return h.handleChannelModify(ctx, req, args.ChannelID, args.ShortName,
+		h.channelManager.RemoveChannelFromGroup, "Removed channel %d from **%s**.")
+}
+
+func (h *GroupHandler) handleChannelCreate(
+	ctx context.Context,
+	req command.Request,
+	args GroupChannelCreateArgs,
+) (command.Result, error) {
+	if err := h.auth.Check(ctx, req.Actor, command.PermAdmin); err != nil {
+		return command.Result{}, command.NewUserError("permission denied")
+	}
+	if h.channelManager == nil {
+		return command.Result{}, command.NewUserError("channel command not available")
+	}
+	channelName := args.ChannelName
+	shortName := args.ShortName
 
 	mapping, found, err := h.mappingReader.GetEmojiGroupMappingByShortName(ctx, shortName)
 	if err != nil {

@@ -112,33 +112,6 @@ UPDATE restart_requests
 SET status = ?, completed_at = ?, completion_message_id = ?, failure = ?
 WHERE id = ?;
 
--- name: ListAuditRecords :many
-SELECT
-  at,
-  actor_user_id,
-  action,
-  target,
-  status,
-  message_id,
-  old_value,
-  new_value,
-  error
-FROM audit_log
-ORDER BY id;
-
--- name: RecordAudit :exec
-INSERT INTO audit_log(
-  at,
-  actor_user_id,
-  action,
-  target,
-  status,
-  message_id,
-  old_value,
-  new_value,
-  error
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
-
 -- emoji_group_mappings
 
 -- name: UpsertEmojiGroupMapping :exec

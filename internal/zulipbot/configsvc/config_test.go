@@ -59,7 +59,7 @@ func TestServiceRejectsUnknownAndInvalidConfig(t *testing.T) {
 	}
 }
 
-func TestServiceMasksSensitiveValuesAndAuditsWrites(t *testing.T) {
+func TestServiceMasksSensitiveValues(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
@@ -89,14 +89,6 @@ func TestServiceMasksSensitiveValuesAndAuditsWrites(t *testing.T) {
 	}
 	if configsvc.Redact(oldValue) != redacted || configsvc.Redact(newValue) != redacted {
 		t.Fatalf("redacted old/new = %q/%q", configsvc.Redact(oldValue), configsvc.Redact(newValue))
-	}
-	records, err := repo.AuditRecords(ctx)
-	if err != nil {
-		t.Fatalf("AuditRecords() failed: %v", err)
-	}
-	last := records[len(records)-1]
-	if last.Action != "config.set" || last.Target != "secret_token" || last.NewValue != redacted {
-		t.Fatalf("audit record = %#v", last)
 	}
 }
 
