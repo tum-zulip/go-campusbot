@@ -9,7 +9,6 @@ import (
 	"github.com/tum-zulip/go-zulip/zulip"
 
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/command"
-	"github.com/tum-zulip/go-campusbot/internal/zulipbot/model"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/storage"
 )
 
@@ -20,7 +19,7 @@ func TestServiceValidatesAndPersistsConfig(t *testing.T) {
 	repo := openConfigTestRepository(t)
 	defer repo.Close()
 	service := NewService(repo, fakeConfigPerm{10: zulip.RoleAdmin})
-	actor := model.Actor{UserID: 10}
+	actor := command.Actor{UserID: 10}
 
 	_, newValue, err := service.Set(ctx, actor, 123, KeyRestartStartupNotification, "yes")
 	if err != nil {
@@ -44,7 +43,7 @@ func TestServiceRejectsUnknownAndInvalidConfig(t *testing.T) {
 	repo := openConfigTestRepository(t)
 	defer repo.Close()
 	service := NewService(repo, fakeConfigPerm{10: zulip.RoleAdmin})
-	actor := model.Actor{UserID: 10}
+	actor := command.Actor{UserID: 10}
 
 	if _, err := service.Get(ctx, actor, "not_a_real_key"); !errors.Is(err, ErrUnknownKey) {
 		t.Fatalf("Get() error = %v, want ErrUnknownKey", err)
@@ -81,7 +80,7 @@ func TestServiceMasksSensitiveValuesAndAuditsWrites(t *testing.T) {
 		},
 	}
 
-	oldValue, newValue, err := service.Set(ctx, model.Actor{UserID: 10}, 500, "secret_token", "super-secret-value")
+	oldValue, newValue, err := service.Set(ctx, command.Actor{UserID: 10}, 500, "secret_token", "super-secret-value")
 	if err != nil {
 		t.Fatalf("Set() sensitive failed: %v", err)
 	}
@@ -107,7 +106,7 @@ func TestServiceProtectsWrites(t *testing.T) {
 	service := NewService(repo, fakeConfigPerm{})
 
 	// Unknown user (member role) cannot write config (requires admin)
-	_, _, err := service.Set(ctx, model.Actor{UserID: 20}, 123, KeyRestartStartupNotification, "true")
+	_, _, err := service.Set(ctx, command.Actor{UserID: 20}, 123, KeyRestartStartupNotification, "true")
 	if !errors.Is(err, command.ErrDenied) {
 		t.Fatalf("regular user Set() error = %v, want ErrDenied", err)
 	}
@@ -132,11 +131,11 @@ func TestServiceProtectsSensitiveConfig(t *testing.T) {
 	}
 
 	// Admin can't read owner-only sensitive config
-	_, err := service.Get(ctx, model.Actor{UserID: 10}, "secret_token")
+	_, err := service.Get(ctx, command.Actor{UserID: 10}, "secret_token")
 	if !errors.Is(err, command.ErrDenied) {
 		t.Fatalf("admin sensitive Get() error = %v, want ErrDenied", err)
 	}
-	_, _, err = service.Set(ctx, model.Actor{UserID: 10}, 123, "secret_token", "value")
+	_, _, err = service.Set(ctx, command.Actor{UserID: 10}, 123, "secret_token", "value")
 	if !errors.Is(err, command.ErrDenied) {
 		t.Fatalf("admin sensitive Set() error = %v, want ErrDenied", err)
 	}
@@ -145,7 +144,7 @@ func TestServiceProtectsSensitiveConfig(t *testing.T) {
 // fakeConfigPerm maps user IDs to Zulip roles; unmapped users get RoleMember.
 type fakeConfigPerm map[int64]zulip.Role
 
-func (f fakeConfigPerm) Check(_ context.Context, actor model.Actor, minRole zulip.Role) error {
+func (f fakeConfigPerm) Check(_ context.Context, actor command.Actor, minRole zulip.Role) error {
 	if minRole == 0 {
 		return nil
 	}

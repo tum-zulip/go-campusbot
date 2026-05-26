@@ -1,4 +1,4 @@
-package eventloop
+package zulipbot_test
 
 import (
 	"context"
@@ -12,8 +12,8 @@ import (
 	z "github.com/tum-zulip/go-zulip/zulip"
 	"github.com/tum-zulip/go-zulip/zulip/events"
 
+	"github.com/tum-zulip/go-campusbot/internal/zulipbot"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/command"
-	"github.com/tum-zulip/go-campusbot/internal/zulipbot/model"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/storage"
 )
 
@@ -35,11 +35,11 @@ func TestLoopProcessesMessageCommandsAndPersistsEventState(t *testing.T) {
 
 	message := mustMessageEvent(t, 2, 101, "help")
 	source := &fakeSource{
-		registerStates: []QueueState{{QueueID: "queue-1", LastEventID: 1}},
+		registerStates: []zulipbot.QueueState{{QueueID: "queue-1", LastEventID: 1}},
 		pollBatches:    [][]events.Event{{message}},
 	}
 	messenger := &recordingMessenger{}
-	loop, err := New(Config{
+	loop, err := zulipbot.NewLoop(zulipbot.LoopConfig{
 		Source:           source,
 		Repo:             repo,
 		Router:           router,
@@ -48,7 +48,7 @@ func TestLoopProcessesMessageCommandsAndPersistsEventState(t *testing.T) {
 		OwnUserID:        999,
 	})
 	if err != nil {
-		t.Fatalf("New() failed: %v", err)
+		t.Fatalf("NewLoop() failed: %v", err)
 	}
 
 	_, err = loop.Run(ctx)
@@ -95,10 +95,10 @@ func TestLoopRecoversFromBadStoredQueue(t *testing.T) {
 	}
 
 	source := &fakeSource{
-		checkErr:       ErrBadEventQueueID,
-		registerStates: []QueueState{{QueueID: "new", LastEventID: 20}},
+		checkErr:       zulipbot.ErrBadEventQueueID,
+		registerStates: []zulipbot.QueueState{{QueueID: "new", LastEventID: 20}},
 	}
-	loop, err := New(Config{
+	loop, err := zulipbot.NewLoop(zulipbot.LoopConfig{
 		Source:           source,
 		Repo:             repo,
 		Router:           router,
@@ -107,7 +107,7 @@ func TestLoopRecoversFromBadStoredQueue(t *testing.T) {
 		OwnUserID:        999,
 	})
 	if err != nil {
-		t.Fatalf("New() failed: %v", err)
+		t.Fatalf("NewLoop() failed: %v", err)
 	}
 	_, err = loop.Run(ctx)
 	if !errors.Is(err, context.Canceled) {
@@ -139,14 +139,14 @@ func TestLoopSkipsDuplicateMessageEvents(t *testing.T) {
 	}
 
 	source := &fakeSource{
-		registerStates: []QueueState{{QueueID: "queue-1", LastEventID: 1}},
+		registerStates: []zulipbot.QueueState{{QueueID: "queue-1", LastEventID: 1}},
 		pollBatches: [][]events.Event{{
 			mustMessageEvent(t, 2, 101, "help"),
 			mustMessageEvent(t, 3, 101, "help"),
 		}},
 	}
 	messenger := &recordingMessenger{}
-	loop, err := New(Config{
+	loop, err := zulipbot.NewLoop(zulipbot.LoopConfig{
 		Source:           source,
 		Repo:             repo,
 		Router:           router,
@@ -155,7 +155,7 @@ func TestLoopSkipsDuplicateMessageEvents(t *testing.T) {
 		OwnUserID:        999,
 	})
 	if err != nil {
-		t.Fatalf("New() failed: %v", err)
+		t.Fatalf("NewLoop() failed: %v", err)
 	}
 
 	_, err = loop.Run(ctx)
@@ -199,7 +199,7 @@ func TestLoopResumesStoredQueueWithoutRegistering(t *testing.T) {
 		t.Fatalf("NewRouter() failed: %v", err)
 	}
 	source := &fakeSource{}
-	loop, err := New(Config{
+	loop, err := zulipbot.NewLoop(zulipbot.LoopConfig{
 		Source:           source,
 		Repo:             repo,
 		Router:           router,
@@ -208,7 +208,7 @@ func TestLoopResumesStoredQueueWithoutRegistering(t *testing.T) {
 		OwnUserID:        999,
 	})
 	if err != nil {
-		t.Fatalf("New() failed: %v", err)
+		t.Fatalf("NewLoop() failed: %v", err)
 	}
 
 	_, err = loop.Run(ctx)
@@ -239,13 +239,13 @@ func TestLoopRecoversFromBadQueueDuringPollAndAudits(t *testing.T) {
 		t.Fatalf("NewRouter() failed: %v", err)
 	}
 	source := &fakeSource{
-		registerStates: []QueueState{
+		registerStates: []zulipbot.QueueState{
 			{QueueID: "old", LastEventID: 10},
 			{QueueID: "new", LastEventID: 20},
 		},
-		pollErrs: []error{ErrBadEventQueueID},
+		pollErrs: []error{zulipbot.ErrBadEventQueueID},
 	}
-	loop, err := New(Config{
+	loop, err := zulipbot.NewLoop(zulipbot.LoopConfig{
 		Source:           source,
 		Repo:             repo,
 		Router:           router,
@@ -254,7 +254,7 @@ func TestLoopRecoversFromBadQueueDuringPollAndAudits(t *testing.T) {
 		OwnUserID:        999,
 	})
 	if err != nil {
-		t.Fatalf("New() failed: %v", err)
+		t.Fatalf("NewLoop() failed: %v", err)
 	}
 
 	_, err = loop.Run(ctx)
@@ -293,10 +293,10 @@ func TestLoopHeartbeatUpdatesOnlyEventState(t *testing.T) {
 	}
 	messenger := &recordingMessenger{}
 	source := &fakeSource{
-		registerStates: []QueueState{{QueueID: "queue-1", LastEventID: 1}},
+		registerStates: []zulipbot.QueueState{{QueueID: "queue-1", LastEventID: 1}},
 		pollBatches:    [][]events.Event{{mustHeartbeatEvent(t, 2)}},
 	}
-	loop, err := New(Config{
+	loop, err := zulipbot.NewLoop(zulipbot.LoopConfig{
 		Source:           source,
 		Repo:             repo,
 		Router:           router,
@@ -305,7 +305,7 @@ func TestLoopHeartbeatUpdatesOnlyEventState(t *testing.T) {
 		OwnUserID:        999,
 	})
 	if err != nil {
-		t.Fatalf("New() failed: %v", err)
+		t.Fatalf("NewLoop() failed: %v", err)
 	}
 
 	_, err = loop.Run(ctx)
@@ -346,10 +346,10 @@ func TestLoopHandlesMalformedMessageEventWithoutAdvancing(t *testing.T) {
 		t.Fatalf("NewRouter() failed: %v", err)
 	}
 	source := &fakeSource{
-		registerStates: []QueueState{{QueueID: "queue-1", LastEventID: 1}},
+		registerStates: []zulipbot.QueueState{{QueueID: "queue-1", LastEventID: 1}},
 		pollBatches:    [][]events.Event{{fakeMalformedEvent{id: 2, eventType: events.EventTypeMessage}}},
 	}
-	loop, err := New(Config{
+	loop, err := zulipbot.NewLoop(zulipbot.LoopConfig{
 		Source:           source,
 		Repo:             repo,
 		Router:           router,
@@ -358,7 +358,7 @@ func TestLoopHandlesMalformedMessageEventWithoutAdvancing(t *testing.T) {
 		OwnUserID:        999,
 	})
 	if err != nil {
-		t.Fatalf("New() failed: %v", err)
+		t.Fatalf("NewLoop() failed: %v", err)
 	}
 
 	_, err = loop.Run(ctx)
@@ -375,29 +375,29 @@ func TestLoopHandlesMalformedMessageEventWithoutAdvancing(t *testing.T) {
 }
 
 type fakeSource struct {
-	registerStates []QueueState
+	registerStates []zulipbot.QueueState
 	registerCalls  int
 	checkErr       error
 	pollBatches    [][]events.Event
 	pollErrs       []error
-	pollStates     []QueueState
+	pollStates     []zulipbot.QueueState
 }
 
-func (source *fakeSource) Register(ctx context.Context, opts RegisterOptions) (QueueState, error) {
+func (source *fakeSource) Register(_ context.Context, _ zulipbot.RegisterOptions) (zulipbot.QueueState, error) {
 	source.registerCalls++
 	if len(source.registerStates) == 0 {
-		return QueueState{QueueID: "default", LastEventID: 0}, nil
+		return zulipbot.QueueState{QueueID: "default", LastEventID: 0}, nil
 	}
 	state := source.registerStates[0]
 	source.registerStates = source.registerStates[1:]
 	return state, nil
 }
 
-func (source *fakeSource) Check(ctx context.Context, state QueueState) error {
+func (source *fakeSource) Check(_ context.Context, _ zulipbot.QueueState) error {
 	return source.checkErr
 }
 
-func (source *fakeSource) Poll(ctx context.Context, state QueueState) ([]events.Event, error) {
+func (source *fakeSource) Poll(_ context.Context, state zulipbot.QueueState) ([]events.Event, error) {
 	source.pollStates = append(source.pollStates, state)
 	if len(source.pollErrs) > 0 {
 		err := source.pollErrs[0]
@@ -423,7 +423,7 @@ type recordingMessenger struct {
 
 func (messenger *recordingMessenger) SendReply(
 	_ context.Context,
-	_ model.ReplyTarget,
+	_ command.ReplyTarget,
 	content string,
 ) (int64, error) {
 	messenger.lastContent = content
@@ -536,11 +536,11 @@ func TestLoopPollTimeoutRetriesWithoutBackoff(t *testing.T) {
 	// and then returns context.Canceled (causing the loop to exit).
 	pollCallCount := 0
 	source := &callbackSource{
-		registerFn: func(ctx context.Context, opts RegisterOptions) (QueueState, error) {
-			return QueueState{QueueID: "q1", LastEventID: 0}, nil
+		registerFn: func(_ context.Context, _ zulipbot.RegisterOptions) (zulipbot.QueueState, error) {
+			return zulipbot.QueueState{QueueID: "q1", LastEventID: 0}, nil
 		},
-		checkFn: func(ctx context.Context, state QueueState) error { return nil },
-		pollFn: func(ctx context.Context, state QueueState) ([]events.Event, error) {
+		checkFn: func(_ context.Context, _ zulipbot.QueueState) error { return nil },
+		pollFn: func(_ context.Context, _ zulipbot.QueueState) ([]events.Event, error) {
 			pollCallCount++
 			if pollCallCount == 1 {
 				// First call: simulate poll timeout (DeadlineExceeded from poll context).
@@ -552,7 +552,7 @@ func TestLoopPollTimeoutRetriesWithoutBackoff(t *testing.T) {
 		deleteFn: func(ctx context.Context, queueID string) error { return nil },
 	}
 
-	loop, err := New(Config{
+	loop, err := zulipbot.NewLoop(zulipbot.LoopConfig{
 		Source:           source,
 		Repo:             repo,
 		Router:           router,
@@ -562,7 +562,7 @@ func TestLoopPollTimeoutRetriesWithoutBackoff(t *testing.T) {
 		PollTimeout:      50 * time.Millisecond,
 	})
 	if err != nil {
-		t.Fatalf("New() failed: %v", err)
+		t.Fatalf("NewLoop() failed: %v", err)
 	}
 
 	_, runErr := loop.Run(ctx)
@@ -586,7 +586,7 @@ func TestLoopPollTimeoutDefaultIs90s(t *testing.T) {
 		t.Fatalf("NewRouter() failed: %v", err)
 	}
 
-	loop, err := New(Config{
+	loop, err := zulipbot.NewLoop(zulipbot.LoopConfig{
 		Source:           &fakeSource{},
 		Repo:             repo,
 		Router:           router,
@@ -596,30 +596,30 @@ func TestLoopPollTimeoutDefaultIs90s(t *testing.T) {
 		// PollTimeout not set; should default to 90s
 	})
 	if err != nil {
-		t.Fatalf("New() failed: %v", err)
+		t.Fatalf("NewLoop() failed: %v", err)
 	}
-	if loop.pollTimeout != 90*time.Second {
-		t.Fatalf("pollTimeout = %v, want 90s", loop.pollTimeout)
+	if loop.PollTimeout() != 90*time.Second {
+		t.Fatalf("pollTimeout = %v, want 90s", loop.PollTimeout())
 	}
 }
 
 // callbackSource is a test Source backed by function callbacks.
 type callbackSource struct {
-	registerFn func(ctx context.Context, opts RegisterOptions) (QueueState, error)
-	checkFn    func(ctx context.Context, state QueueState) error
-	pollFn     func(ctx context.Context, state QueueState) ([]events.Event, error)
+	registerFn func(ctx context.Context, opts zulipbot.RegisterOptions) (zulipbot.QueueState, error)
+	checkFn    func(ctx context.Context, state zulipbot.QueueState) error
+	pollFn     func(ctx context.Context, state zulipbot.QueueState) ([]events.Event, error)
 	deleteFn   func(ctx context.Context, queueID string) error
 }
 
-func (s *callbackSource) Register(ctx context.Context, opts RegisterOptions) (QueueState, error) {
+func (s *callbackSource) Register(ctx context.Context, opts zulipbot.RegisterOptions) (zulipbot.QueueState, error) {
 	return s.registerFn(ctx, opts)
 }
 
-func (s *callbackSource) Check(ctx context.Context, state QueueState) error {
+func (s *callbackSource) Check(ctx context.Context, state zulipbot.QueueState) error {
 	return s.checkFn(ctx, state)
 }
 
-func (s *callbackSource) Poll(ctx context.Context, state QueueState) ([]events.Event, error) {
+func (s *callbackSource) Poll(ctx context.Context, state zulipbot.QueueState) ([]events.Event, error) {
 	return s.pollFn(ctx, state)
 }
 
@@ -630,6 +630,6 @@ func (s *callbackSource) Delete(ctx context.Context, queueID string) error {
 // allowingAuthorizer satisfies command.Authorizer and permits all actions.
 type allowingAuthorizer struct{}
 
-func (allowingAuthorizer) Check(_ context.Context, _ model.Actor, _ z.Role) error {
+func (allowingAuthorizer) Check(_ context.Context, _ command.Actor, _ z.Role) error {
 	return nil
 }

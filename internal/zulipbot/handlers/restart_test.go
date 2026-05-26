@@ -8,7 +8,6 @@ import (
 	"github.com/tum-zulip/go-zulip/zulip"
 
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/command"
-	"github.com/tum-zulip/go-campusbot/internal/zulipbot/model"
 )
 
 func TestRestartHandlerSchedulesOnlyAfterAcknowledgementHook(t *testing.T) {
@@ -18,9 +17,9 @@ func TestRestartHandlerSchedulesOnlyAfterAcknowledgementHook(t *testing.T) {
 	handler := NewRestartHandler(service)
 	result, err := handler.Handle(context.Background(), command.Request{
 		Invocation: command.Invocation{Name: "restart"},
-		Actor:      model.Actor{UserID: 10},
+		Actor:      command.Actor{UserID: 10},
 		MessageID:  55,
-		Target:     model.ReplyTarget{Kind: model.ReplyKindDirect, UserIDs: []int64{10}},
+		Target:     command.ReplyTarget{Kind: command.ReplyKindDirect, UserIDs: []int64{10}},
 	})
 	if err != nil {
 		t.Fatalf("Handle() failed: %v", err)
@@ -45,9 +44,9 @@ type fakeRestartService struct {
 
 func (service *fakeRestartService) ScheduleRestart(
 	_ context.Context,
-	_ model.Actor,
+	_ command.Actor,
 	_ int64,
-	_ model.ReplyTarget,
+	_ command.ReplyTarget,
 ) (int64, bool, error) {
 	service.calls++
 	return 1, true, nil
@@ -62,9 +61,9 @@ func TestRestartHandlerAcknowledgementContentIsPresent(t *testing.T) {
 	handler := NewRestartHandler(service)
 	result, err := handler.Handle(context.Background(), command.Request{
 		Invocation: command.Invocation{Name: "restart"},
-		Actor:      model.Actor{UserID: 10},
+		Actor:      command.Actor{UserID: 10},
 		MessageID:  55,
-		Target:     model.ReplyTarget{Kind: model.ReplyKindDirect, UserIDs: []int64{10}},
+		Target:     command.ReplyTarget{Kind: command.ReplyKindDirect, UserIDs: []int64{10}},
 	})
 	if err != nil {
 		t.Fatalf("Handle() failed: %v", err)
@@ -113,7 +112,7 @@ func TestRestartRouterOwnerCanRun(t *testing.T) {
 
 	result := router.Route(ctx, command.Request{
 		Invocation: command.Invocation{Name: "restart"},
-		Actor:      model.Actor{UserID: 3},
+		Actor:      command.Actor{UserID: 3},
 	})
 	if result.Content == "permission denied" {
 		t.Fatal("owner should be able to run restart")
@@ -145,7 +144,7 @@ func TestRestartRouterAdminCannotRun(t *testing.T) {
 
 	result := router.Route(ctx, command.Request{
 		Invocation: command.Invocation{Name: "restart"},
-		Actor:      model.Actor{UserID: 2},
+		Actor:      command.Actor{UserID: 2},
 	})
 	if result.Content != "permission denied" {
 		t.Fatalf("admin should be denied restart, got: %q", result.Content)
@@ -173,7 +172,7 @@ func TestRestartRouterNoneUserCannotRun(t *testing.T) {
 
 	result := router.Route(ctx, command.Request{
 		Invocation: command.Invocation{Name: "restart"},
-		Actor:      model.Actor{UserID: 1},
+		Actor:      command.Actor{UserID: 1},
 	})
 	if result.Content != "permission denied" {
 		t.Fatalf("member should be denied restart, got: %q", result.Content)
@@ -206,7 +205,7 @@ func TestRestartNotVisibleInHelpForAdmin(t *testing.T) {
 	helpHandler := command.NewHelpHandler(registry, fixedRoleProvider{zulip.RoleAdmin})
 	result, err := helpHandler.Handle(context.Background(), command.Request{
 		Invocation: command.Invocation{Name: "help"},
-		Actor:      model.Actor{UserID: 2},
+		Actor:      command.Actor{UserID: 2},
 	})
 	if err != nil {
 		t.Fatalf("help failed: %v", err)
@@ -229,7 +228,7 @@ func TestRestartNotVisibleInHelpForNoneUser(t *testing.T) {
 	helpHandler := command.NewHelpHandler(registry, fixedRoleProvider{zulip.RoleMember})
 	result, err := helpHandler.Handle(context.Background(), command.Request{
 		Invocation: command.Invocation{Name: "help"},
-		Actor:      model.Actor{UserID: 1},
+		Actor:      command.Actor{UserID: 1},
 	})
 	if err != nil {
 		t.Fatalf("help failed: %v", err)
@@ -242,7 +241,7 @@ func TestRestartNotVisibleInHelpForNoneUser(t *testing.T) {
 // fakeRestartAuth maps user IDs to Zulip roles; unmapped users get RoleMember.
 type fakeRestartAuth map[int64]zulip.Role
 
-func (f fakeRestartAuth) Check(_ context.Context, actor model.Actor, minRole zulip.Role) error {
+func (f fakeRestartAuth) Check(_ context.Context, actor command.Actor, minRole zulip.Role) error {
 	if minRole == 0 {
 		return nil
 	}
@@ -261,6 +260,6 @@ type fixedRoleProvider struct {
 	role zulip.Role
 }
 
-func (p fixedRoleProvider) RoleFor(_ context.Context, _ model.Actor) (zulip.Role, error) {
+func (p fixedRoleProvider) RoleFor(_ context.Context, _ command.Actor) (zulip.Role, error) {
 	return p.role, nil
 }

@@ -12,14 +12,11 @@ type Invocation struct {
 	RawArgs string
 }
 
-// Parser parses a direct-message command invocation.
-// The entire message content is treated as the command — no prefix is required.
-type Parser struct{}
-
 // Parse parses content as a command invocation.
+// The entire message content is treated as the command — no prefix is required.
 // Empty or whitespace-only content returns ErrNotCommand.
 // Content with an invalid first token returns ErrMalformed.
-func (parser Parser) Parse(content string) (Invocation, error) {
+func Parse(content string) (Invocation, error) {
 	trimmed := strings.TrimSpace(content)
 	if trimmed == "" {
 		return Invocation{}, ErrNotCommand

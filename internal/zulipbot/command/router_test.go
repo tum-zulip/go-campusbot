@@ -8,7 +8,6 @@ import (
 	"github.com/tum-zulip/go-zulip/zulip"
 
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/audit"
-	"github.com/tum-zulip/go-campusbot/internal/zulipbot/model"
 )
 
 func TestRouterRejectsUnauthorizedCommandAndAudits(t *testing.T) {
@@ -42,7 +41,7 @@ func TestRouterRejectsUnauthorizedCommandAndAudits(t *testing.T) {
 
 	result := router.Route(context.Background(), Request{
 		Invocation: Invocation{Name: "restart"},
-		Actor:      model.Actor{UserID: 123},
+		Actor:      Actor{UserID: 123},
 		MessageID:  456,
 	})
 	if result.Content != "permission denied" {
@@ -118,13 +117,13 @@ func TestRouterEnforcesRealPermissionRolesForAdminCommand(t *testing.T) {
 	for _, userID := range []int64{1, 2, 999} {
 		result := router.Route(
 			ctx,
-			Request{Invocation: Invocation{Name: "restart"}, Actor: model.Actor{UserID: userID}},
+			Request{Invocation: Invocation{Name: "restart"}, Actor: Actor{UserID: userID}},
 		)
 		if result.Content != "permission denied" {
 			t.Fatalf("user %d content = %q", userID, result.Content)
 		}
 	}
-	result := router.Route(ctx, Request{Invocation: Invocation{Name: "restart"}, Actor: model.Actor{UserID: 3}})
+	result := router.Route(ctx, Request{Invocation: Invocation{Name: "restart"}, Actor: Actor{UserID: 3}})
 	if result.Content != "ok" {
 		t.Fatalf("owner content = %q, want ok", result.Content)
 	}
@@ -136,7 +135,7 @@ func TestRouterEnforcesRealPermissionRolesForAdminCommand(t *testing.T) {
 // fakeAuthorizer maps user IDs to Zulip roles; unmapped users get RoleMember.
 type fakeAuthorizer map[int64]zulip.Role
 
-func (f fakeAuthorizer) Check(_ context.Context, actor model.Actor, minRole zulip.Role) error {
+func (f fakeAuthorizer) Check(_ context.Context, actor Actor, minRole zulip.Role) error {
 	if minRole == 0 {
 		return nil
 	}
@@ -152,13 +151,13 @@ func (f fakeAuthorizer) Check(_ context.Context, actor model.Actor, minRole zuli
 
 type denyingAuthorizer struct{}
 
-func (denyingAuthorizer) Check(_ context.Context, _ model.Actor, _ zulip.Role) error {
+func (denyingAuthorizer) Check(_ context.Context, _ Actor, _ zulip.Role) error {
 	return ErrDenied
 }
 
 type allowingAuthorizer struct{}
 
-func (allowingAuthorizer) Check(_ context.Context, _ model.Actor, _ zulip.Role) error {
+func (allowingAuthorizer) Check(_ context.Context, _ Actor, _ zulip.Role) error {
 	return nil
 }
 

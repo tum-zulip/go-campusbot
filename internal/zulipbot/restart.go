@@ -4,10 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"sync/atomic"
 
-	"github.com/tum-zulip/go-campusbot/internal/zulipbot/model"
+	"github.com/tum-zulip/go-campusbot/internal/zulipbot/command"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/storage"
 )
 
@@ -40,9 +39,9 @@ func (state *restartState) requestRestart() bool {
 
 func (app *App) ScheduleRestart(
 	ctx context.Context,
-	actor model.Actor,
+	actor command.Actor,
 	messageID int64,
-	target model.ReplyTarget,
+	target command.ReplyTarget,
 ) (int64, bool, error) {
 	id, err := app.repo.CreateRestartRequest(ctx, storage.RestartRequest{
 		RequestedByUserID: actor.UserID,
@@ -67,25 +66,8 @@ func (app *App) MarkRestartInProgress(ctx context.Context) error {
 	return app.repo.MarkRestartInProgress(ctx, id)
 }
 
-type replyMessenger interface {
-	SendReply(ctx context.Context, target model.ReplyTarget, content string) (int64, error)
-}
-
-type startupNotifier struct {
-	repo      *storage.Repository
-	messenger replyMessenger
-	logger    *slog.Logger
-}
-
-func newStartupNotifier(repo *storage.Repository, messenger replyMessenger, logger *slog.Logger) *startupNotifier {
-	if logger == nil {
-		logger = slog.Default()
-	}
-	return &startupNotifier{repo: repo, messenger: messenger, logger: logger}
-}
-
-func (notifier *startupNotifier) NotifyRestartComplete(ctx context.Context) error {
-	request, ok, err := notifier.repo.PendingRestartRequest(ctx)
+func (app *App) NotifyRestartComplete(ctx context.Context) error {
+	request, ok, err := app.repo.PendingRestartRequest(ctx)
 	if err != nil {
 		return err
 	}
@@ -93,37 +75,28 @@ func (notifier *startupNotifier) NotifyRestartComplete(ctx context.Context) erro
 		return nil
 	}
 
-	messageID, sendErr := notifier.messenger.SendReply(
+	messageID, sendErr := app.messenger.SendReply(
 		ctx,
 		request.Target,
 		"Restart complete. Event processing is back online.",
 	)
 	if sendErr != nil {
-		if completeErr := notifier.repo.CompleteRestartRequest(ctx, request.ID, 0, sendErr.Error()); completeErr != nil {
-			notifier.logger.WarnContext(
-				ctx,
-				"failed to mark restart notification failure",
-				"restart_request_id",
-				request.ID,
-				"error",
-				completeErr,
-			)
+		if completeErr := app.repo.CompleteRestartRequest(ctx, request.ID, 0, sendErr.Error()); completeErr != nil {
+			app.logger.WarnContext(ctx, "failed to mark restart notification failure",
+				"restart_request_id", request.ID, "error", completeErr)
 		}
 		return fmt.Errorf("send restart completion notification: %w", sendErr)
 	}
-	if completeErr := notifier.repo.CompleteRestartRequest(ctx, request.ID, messageID, ""); completeErr != nil {
-		return completeErr
-	}
-	return nil
+	return app.repo.CompleteRestartRequest(ctx, request.ID, messageID, "")
 }
 
-func (notifier *startupNotifier) MarkRestartComplete(ctx context.Context) error {
-	request, ok, err := notifier.repo.PendingRestartRequest(ctx)
+func (app *App) MarkRestartComplete(ctx context.Context) error {
+	request, ok, err := app.repo.PendingRestartRequest(ctx)
 	if err != nil {
 		return err
 	}
 	if !ok {
 		return nil
 	}
-	return notifier.repo.CompleteRestartRequest(ctx, request.ID, 0, "")
+	return app.repo.CompleteRestartRequest(ctx, request.ID, 0, "")
 }

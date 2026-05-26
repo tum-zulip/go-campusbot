@@ -6,15 +6,14 @@ import (
 	"github.com/tum-zulip/go-zulip/zulip"
 
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/command"
-	"github.com/tum-zulip/go-campusbot/internal/zulipbot/model"
 )
 
 type RestartService interface {
 	ScheduleRestart(
 		ctx context.Context,
-		actor model.Actor,
+		actor command.Actor,
 		messageID int64,
-		target model.ReplyTarget,
+		target command.ReplyTarget,
 	) (int64, bool, error)
 }
 

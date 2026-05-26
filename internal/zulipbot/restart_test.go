@@ -2,10 +2,11 @@ package zulipbot //nolint:testpackage // exercises partial App wiring for restar
 
 import (
 	"context"
+	"log/slog"
 	"path/filepath"
 	"testing"
 
-	"github.com/tum-zulip/go-campusbot/internal/zulipbot/model"
+	"github.com/tum-zulip/go-campusbot/internal/zulipbot/command"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/storage"
 )
 
@@ -24,9 +25,9 @@ func TestScheduleRestartStopsAcceptingCommands(t *testing.T) {
 
 	_, _, err := app.ScheduleRestart(
 		ctx,
-		model.Actor{UserID: 1},
+		command.Actor{UserID: 1},
 		10,
-		model.ReplyTarget{Kind: model.ReplyKindDirect, UserIDs: []int64{1}},
+		command.ReplyTarget{Kind: command.ReplyKindDirect, UserIDs: []int64{1}},
 	)
 	if err != nil {
 		t.Fatalf("ScheduleRestart() failed: %v", err)
@@ -48,9 +49,9 @@ func TestDoubleScheduleRestartIsIdempotent(t *testing.T) {
 	defer repo.Close()
 
 	app := &App{repo: repo, restart: newRestartState()}
-	target := model.ReplyTarget{Kind: model.ReplyKindDirect, UserIDs: []int64{1}}
+	target := command.ReplyTarget{Kind: command.ReplyKindDirect, UserIDs: []int64{1}}
 
-	_, first, err := app.ScheduleRestart(ctx, model.Actor{UserID: 1}, 1, target)
+	_, first, err := app.ScheduleRestart(ctx, command.Actor{UserID: 1}, 1, target)
 	if err != nil {
 		t.Fatalf("first ScheduleRestart() failed: %v", err)
 	}
@@ -58,7 +59,7 @@ func TestDoubleScheduleRestartIsIdempotent(t *testing.T) {
 		t.Fatal("first ScheduleRestart() should return scheduled=true")
 	}
 
-	_, second, err := app.ScheduleRestart(ctx, model.Actor{UserID: 1}, 2, target)
+	_, second, err := app.ScheduleRestart(ctx, command.Actor{UserID: 1}, 2, target)
 	if err != nil {
 		t.Fatalf("second ScheduleRestart() failed: %v", err)
 	}
@@ -67,14 +68,14 @@ func TestDoubleScheduleRestartIsIdempotent(t *testing.T) {
 	}
 }
 
-func TestStartupNotifierCompletesPendingRestart(t *testing.T) {
+func TestNotifyRestartCompleteCompletesPendingRestart(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
 	repo := openRestartTestRepository(t)
 	defer repo.Close()
 
-	target := model.ReplyTarget{Kind: model.ReplyKindDirect, UserIDs: []int64{10}}
+	target := command.ReplyTarget{Kind: command.ReplyKindDirect, UserIDs: []int64{10}}
 	id, err := repo.CreateRestartRequest(
 		ctx,
 		storage.RestartRequest{RequestedByUserID: 10, RequestMessageID: 55, Target: target},
@@ -83,13 +84,13 @@ func TestStartupNotifierCompletesPendingRestart(t *testing.T) {
 		t.Fatalf("CreateRestartRequest() failed: %v", err)
 	}
 
-	messenger := &fakeRestartMessenger{}
-	notifier := newStartupNotifier(repo, messenger, nil)
-	if notifyErr := notifier.NotifyRestartComplete(ctx); notifyErr != nil {
+	fakeMsg := &fakeRestartMessenger{}
+	app := &App{repo: repo, restart: newRestartState(), messenger: fakeMsg, logger: slog.Default()}
+	if notifyErr := app.NotifyRestartComplete(ctx); notifyErr != nil {
 		t.Fatalf("NotifyRestartComplete() failed: %v", notifyErr)
 	}
-	if messenger.sentTo.UserIDs[0] != 10 {
-		t.Fatalf("sent target = %#v", messenger.sentTo)
+	if fakeMsg.sentTo.UserIDs[0] != 10 {
+		t.Fatalf("sent target = %#v", fakeMsg.sentTo)
 	}
 	_, ok, err := repo.PendingRestartRequest(ctx)
 	if err != nil {
@@ -101,12 +102,12 @@ func TestStartupNotifierCompletesPendingRestart(t *testing.T) {
 }
 
 type fakeRestartMessenger struct {
-	sentTo model.ReplyTarget
+	sentTo command.ReplyTarget
 }
 
 func (messenger *fakeRestartMessenger) SendReply(
 	_ context.Context,
-	target model.ReplyTarget,
+	target command.ReplyTarget,
 	_ string,
 ) (int64, error) {
 	messenger.sentTo = target

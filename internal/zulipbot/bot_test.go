@@ -9,7 +9,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"strconv"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -17,108 +16,16 @@ import (
 )
 
 const (
-	expectedOwnUserCalls = int64(1)
-	ownUserPath          = "/api/v1/users/me"
-	sendMessagePath      = "/api/v1/messages"
-	testChannelContent   = "Hello Zulip community"
-	testChannelID        = int64(456)
-	testChannelTopic     = "introductions"
-	testMessageID        = int64(789)
-	testUserEmail        = "bot@example.com"
-	testUserID           = int64(123)
-	testTimeout          = time.Second
+	ownUserPath        = "/api/v1/users/me"
+	sendMessagePath    = "/api/v1/messages"
+	testChannelContent = "Hello Zulip community"
+	testChannelID      = int64(456)
+	testChannelTopic   = "introductions"
+	testMessageID      = int64(789)
+	testUserEmail      = "bot@example.com"
+	testUserID         = int64(123)
+	testTimeout        = time.Second
 )
-
-func TestProviderInitializesZulipClientOnce(t *testing.T) {
-	t.Parallel()
-
-	var ownUserCalls atomic.Int64
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != ownUserPath {
-			http.NotFound(w, r)
-			return
-		}
-		ownUserCalls.Add(1)
-		writeOwnUserResponse(t, w)
-	}))
-	t.Cleanup(server.Close)
-
-	rcPath := writeZulipRC(t, server.URL)
-	provider := zulipbot.NewProvider(zulipbot.Config{
-		RCPath: rcPath,
-		Logger: newTestLogger(),
-	})
-
-	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
-	defer cancel()
-
-	firstBot, err := provider.Bot(ctx)
-	if err != nil {
-		t.Fatalf("first Bot() failed: %v", err)
-	}
-	if !provider.Initialized() {
-		t.Fatal("provider should be initialized after first successful Bot()")
-	}
-
-	if err := os.Remove(rcPath); err != nil {
-		t.Fatalf("remove zuliprc after first initialization: %v", err)
-	}
-
-	secondBot, err := provider.Bot(ctx)
-	if err != nil {
-		t.Fatalf("second Bot() failed: %v", err)
-	}
-	if firstBot != secondBot {
-		t.Fatal("provider returned different bot instances")
-	}
-	if calls := ownUserCalls.Load(); calls != expectedOwnUserCalls {
-		t.Fatalf("GetOwnUser was called %d times, want %d", calls, expectedOwnUserCalls)
-	}
-}
-
-func TestProviderRetriesAfterFailedInitialization(t *testing.T) {
-	t.Parallel()
-
-	var ownUserCalls atomic.Int64
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != ownUserPath {
-			http.NotFound(w, r)
-			return
-		}
-		ownUserCalls.Add(1)
-		writeOwnUserResponse(t, w)
-	}))
-	t.Cleanup(server.Close)
-
-	rcPath := t.TempDir() + "/zuliprc"
-	provider := zulipbot.NewProvider(zulipbot.Config{
-		RCPath: rcPath,
-		Logger: newTestLogger(),
-	})
-
-	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
-	defer cancel()
-
-	if _, err := provider.Bot(ctx); err == nil {
-		t.Fatal("Bot() succeeded with missing zuliprc")
-	}
-	if provider.Initialized() {
-		t.Fatal("provider should not cache a failed initialization")
-	}
-
-	writeZulipRCAt(t, rcPath, server.URL)
-
-	bot, err := provider.Bot(ctx)
-	if err != nil {
-		t.Fatalf("Bot() after writing zuliprc failed: %v", err)
-	}
-	if bot.OwnUserID() != testUserID {
-		t.Fatalf("OwnUserID() = %d, want %d", bot.OwnUserID(), testUserID)
-	}
-	if calls := ownUserCalls.Load(); calls != expectedOwnUserCalls {
-		t.Fatalf("GetOwnUser was called %d times, want %d", calls, expectedOwnUserCalls)
-	}
-}
 
 func TestBotSendChannelMessage(t *testing.T) {
 	t.Parallel()
@@ -140,17 +47,16 @@ func TestBotSendChannelMessage(t *testing.T) {
 	t.Cleanup(server.Close)
 
 	rcPath := writeZulipRC(t, server.URL)
-	provider := zulipbot.NewProvider(zulipbot.Config{
-		RCPath: rcPath,
-		Logger: newTestLogger(),
-	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
 
-	bot, err := provider.Bot(ctx)
+	bot, err := zulipbot.New(ctx, zulipbot.RuntimeConfig{
+		RCPath: rcPath,
+		Logger: newTestLogger(),
+	})
 	if err != nil {
-		t.Fatalf("Bot() failed: %v", err)
+		t.Fatalf("New() failed: %v", err)
 	}
 
 	messageID, err := bot.SendChannelMessage(ctx, testChannelID, testChannelTopic, testChannelContent)

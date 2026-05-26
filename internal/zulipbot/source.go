@@ -1,4 +1,4 @@
-package eventloop
+package zulipbot
 
 import (
 	"bytes"

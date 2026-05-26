@@ -11,7 +11,6 @@ import (
 
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/command"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/configsvc"
-	"github.com/tum-zulip/go-campusbot/internal/zulipbot/model"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/storage"
 )
 
@@ -23,7 +22,7 @@ func TestConfigHandlerAdminCanListGetAndSet(t *testing.T) {
 	defer repo.Close()
 	service := configsvc.NewService(repo, fakeConfigAuth{10: zulip.RoleAdmin})
 	handler := NewConfigHandler(service)
-	actor := model.Actor{UserID: 10}
+	actor := command.Actor{UserID: 10}
 
 	setResult, err := handler.Handle(ctx, command.Request{
 		Invocation: command.Invocation{
@@ -74,7 +73,7 @@ func TestConfigHandlerReportsSafeUserErrors(t *testing.T) {
 
 	_, err := handler.Handle(ctx, command.Request{
 		Invocation: command.Invocation{Name: "config", Args: []string{"get", "does_not_exist"}},
-		Actor:      model.Actor{UserID: 10},
+		Actor:      command.Actor{UserID: 10},
 	})
 	var userErr command.UserError
 	if !errors.As(err, &userErr) || userErr.Message != "Unknown configuration key." {
@@ -86,7 +85,7 @@ func TestConfigHandlerReportsSafeUserErrors(t *testing.T) {
 			Name: "config",
 			Args: []string{"set", configsvc.KeyRestartStartupNotification, "maybe"},
 		},
-		Actor: model.Actor{UserID: 10},
+		Actor: command.Actor{UserID: 10},
 	})
 	if !errors.As(err, &userErr) || !strings.Contains(userErr.Message, "Invalid value") {
 		t.Fatalf("Handle(set invalid) error = %v", err)
@@ -104,7 +103,7 @@ func TestConfigHandlerFailsClosedWhenPermissionsUnavailable(t *testing.T) {
 
 	_, err := handler.Handle(ctx, command.Request{
 		Invocation: command.Invocation{Name: "config", Args: []string{"list"}},
-		Actor:      model.Actor{UserID: 10},
+		Actor:      command.Actor{UserID: 10},
 	})
 	var userErr command.UserError
 	if !errors.As(err, &userErr) ||
@@ -116,7 +115,7 @@ func TestConfigHandlerFailsClosedWhenPermissionsUnavailable(t *testing.T) {
 // fakeConfigAuth maps user IDs to Zulip roles; unmapped users get RoleMember.
 type fakeConfigAuth map[int64]zulip.Role
 
-func (f fakeConfigAuth) Check(_ context.Context, actor model.Actor, minRole zulip.Role) error {
+func (f fakeConfigAuth) Check(_ context.Context, actor command.Actor, minRole zulip.Role) error {
 	if minRole == 0 {
 		return nil
 	}
@@ -132,7 +131,7 @@ func (f fakeConfigAuth) Check(_ context.Context, actor model.Actor, minRole zuli
 
 type failingPermission struct{}
 
-func (failingPermission) Check(_ context.Context, _ model.Actor, _ zulip.Role) error {
+func (failingPermission) Check(_ context.Context, _ command.Actor, _ zulip.Role) error {
 	return command.ErrPermissionUnavailable
 }
 

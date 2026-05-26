@@ -4,12 +4,19 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 
 	"github.com/tum-zulip/go-zulip/zulip"
 	zulipclient "github.com/tum-zulip/go-zulip/zulip/client"
+
+	"github.com/tum-zulip/go-campusbot/internal/zulipbot/command"
 )
 
 const (
+	DefaultClientName = "go-campusbot"
+	DefaultRCPath     = "zuliprc"
+
 	errContentRequired = "content must not be empty"
 	errContextRequired = "context must not be nil"
 )
@@ -19,12 +26,19 @@ type Bot struct {
 	ownUser zulip.User
 }
 
-func New(ctx context.Context, cfg Config) (*Bot, error) {
+func New(ctx context.Context, cfg RuntimeConfig) (*Bot, error) {
 	if ctx == nil {
 		return nil, errors.New(errContextRequired)
 	}
-
-	cfg = cfg.withDefaults()
+	if cfg.RCPath == "" {
+		cfg.RCPath = DefaultRCPath
+	}
+	if cfg.ClientName == "" {
+		cfg.ClientName = DefaultClientName
+	}
+	if cfg.Logger == nil {
+		cfg.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	}
 
 	rc, err := zulip.NewZulipRCFromFile(cfg.RCPath)
 	if err != nil {
@@ -38,17 +52,6 @@ func New(ctx context.Context, cfg Config) (*Bot, error) {
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create Zulip client: %w", err)
-	}
-
-	return NewFromClient(ctx, apiClient)
-}
-
-func NewFromClient(ctx context.Context, apiClient zulipclient.Client) (*Bot, error) {
-	if ctx == nil {
-		return nil, errors.New(errContextRequired)
-	}
-	if apiClient == nil {
-		return nil, errors.New("zulip client must not be nil")
 	}
 
 	ownUserResp, _, err := apiClient.GetOwnUser(ctx).Execute()
@@ -154,6 +157,52 @@ func (bot *Bot) SendDirectMessage(ctx context.Context, userIDs []int64, content 
 	}
 
 	return resp.ID, nil
+}
+
+// SendReply dispatches a reply to the given target, satisfying the Messenger interface.
+func (bot *Bot) SendReply(ctx context.Context, target command.ReplyTarget, content string) (int64, error) {
+	if err := target.Validate(); err != nil {
+		return 0, err
+	}
+	switch target.Kind {
+	case command.ReplyKindChannel:
+		return bot.SendChannelMessage(ctx, target.ChannelID, target.Topic, content)
+	case command.ReplyKindDirect:
+		return bot.SendDirectMessage(ctx, target.UserIDs, content)
+	default:
+		return 0, errors.New("unsupported reply target kind")
+	}
+}
+
+// Check implements command.Authorizer.
+func (bot *Bot) Check(ctx context.Context, actor command.Actor, minRole zulip.Role) error {
+	if minRole == 0 {
+		return nil
+	}
+	actorRole, err := bot.fetchRole(ctx, actor.UserID)
+	if err != nil {
+		return fmt.Errorf("%w: %w", command.ErrPermissionUnavailable, err)
+	}
+	if actorRole <= minRole {
+		return nil
+	}
+	return fmt.Errorf("%w", command.ErrDenied)
+}
+
+// RoleFor implements command.RoleProvider.
+func (bot *Bot) RoleFor(ctx context.Context, actor command.Actor) (zulip.Role, error) {
+	return bot.fetchRole(ctx, actor.UserID)
+}
+
+func (bot *Bot) fetchRole(ctx context.Context, userID int64) (zulip.Role, error) {
+	resp, _, err := bot.client.GetUser(ctx, userID).Execute()
+	if err != nil {
+		return 0, fmt.Errorf("get Zulip user %d: %w", userID, err)
+	}
+	if resp == nil {
+		return 0, fmt.Errorf("get Zulip user %d: empty response", userID)
+	}
+	return resp.User.Role, nil
 }
 
 func (bot *Bot) CreateChannel(

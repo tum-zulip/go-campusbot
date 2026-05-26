@@ -8,7 +8,7 @@ import (
 func TestParserParsesDirectMessageCommand(t *testing.T) {
 	t.Parallel()
 
-	invocation, err := Parser{}.Parse(`config set command_prefix "!bot"`)
+	invocation, err := Parse(`config set command_prefix "!bot"`)
 	if err != nil {
 		t.Fatalf("Parse() failed: %v", err)
 	}
@@ -29,7 +29,7 @@ func TestParserParsesDirectMessageCommand(t *testing.T) {
 func TestParserHandlesLeadingAndTrailingWhitespace(t *testing.T) {
 	t.Parallel()
 
-	invocation, err := Parser{}.Parse("  restart  ")
+	invocation, err := Parse("  restart  ")
 	if err != nil {
 		t.Fatalf("Parse() failed: %v", err)
 	}
@@ -52,7 +52,7 @@ func TestParserIgnoresEmptyAndWhitespaceOnlyMessages(t *testing.T) {
 	for _, input := range tests {
 		t.Run(input, func(t *testing.T) {
 			t.Parallel()
-			_, err := Parser{}.Parse(input)
+			_, err := Parse(input)
 			if !errors.Is(err, ErrNotCommand) {
 				t.Fatalf("Parse(%q) error = %v, want ErrNotCommand", input, err)
 			}
@@ -75,7 +75,7 @@ func TestParserRejectsMalformedCommands(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			_, err := Parser{}.Parse(tt.input)
+			_, err := Parse(tt.input)
 			if !errors.Is(err, ErrMalformed) {
 				t.Fatalf("Parse(%q) error = %v, want ErrMalformed", tt.input, err)
 			}
@@ -100,7 +100,7 @@ func TestParserParsesMultiWordCommands(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
 			t.Parallel()
-			invocation, err := Parser{}.Parse(tt.input)
+			invocation, err := Parse(tt.input)
 			if err != nil {
 				t.Fatalf("Parse(%q) failed: %v", tt.input, err)
 			}
@@ -123,7 +123,7 @@ func TestParserUnknownCommandNameIsStillParsed(t *testing.T) {
 	t.Parallel()
 
 	// Unknown commands (e.g., 'hello') are parsed successfully; the router handles them.
-	invocation, err := Parser{}.Parse("hello world")
+	invocation, err := Parse("hello world")
 	if err != nil {
 		t.Fatalf("Parse() failed: %v", err)
 	}

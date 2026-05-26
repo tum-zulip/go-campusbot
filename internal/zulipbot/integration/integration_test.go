@@ -21,7 +21,6 @@ import (
 	"time"
 
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot"
-	"github.com/tum-zulip/go-campusbot/internal/zulipbot/eventloop"
 )
 
 func requireZulipRC(t *testing.T) string {
@@ -71,14 +70,14 @@ func TestIntegration_EventQueueRegisterAndCheck(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	bot, err := zulipbot.New(ctx, zulipbot.Config{RCPath: rcPath})
+	bot, err := zulipbot.New(ctx, zulipbot.RuntimeConfig{RCPath: rcPath})
 	if err != nil {
 		t.Fatalf("New bot failed: %v", err)
 	}
 
-	source := eventloop.NewZulipSource(bot.Client())
+	source := zulipbot.NewZulipSource(bot.Client())
 
-	state, err := source.Register(ctx, eventloop.RegisterOptions{})
+	state, err := source.Register(ctx, zulipbot.RegisterOptions{})
 	if err != nil {
 		t.Fatalf("Register failed: %v", err)
 	}

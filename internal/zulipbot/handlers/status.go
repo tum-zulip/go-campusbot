@@ -8,7 +8,6 @@ import (
 	"github.com/tum-zulip/go-zulip/zulip"
 
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/command"
-	"github.com/tum-zulip/go-campusbot/internal/zulipbot/model"
 )
 
 // StatusProvider is the interface used by StatusHandler.
@@ -27,7 +26,7 @@ type StatusProvider interface {
 
 // AdminChecker checks whether an actor has at least the given Zulip role.
 type AdminChecker interface {
-	Check(ctx context.Context, actor model.Actor, minRole zulip.Role) error
+	Check(ctx context.Context, actor command.Actor, minRole zulip.Role) error
 }
 
 // StatusHandler handles the 'status' command.

@@ -6,8 +6,6 @@ import (
 	"sort"
 
 	"github.com/tum-zulip/go-zulip/zulip"
-
-	"github.com/tum-zulip/go-campusbot/internal/zulipbot/model"
 )
 
 // Permission levels for command authorization, mapped directly to Zulip organizational roles.
@@ -29,9 +27,9 @@ type Metadata struct {
 
 type Request struct {
 	Invocation Invocation
-	Actor      model.Actor
+	Actor      Actor
 	MessageID  int64
-	Target     model.ReplyTarget
+	Target     ReplyTarget
 }
 
 type Result struct {

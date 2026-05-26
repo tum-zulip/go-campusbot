@@ -1,4 +1,4 @@
-package eventloop
+package zulipbot
 
 import (
 	"context"
@@ -12,7 +12,6 @@ import (
 
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/audit"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/command"
-	"github.com/tum-zulip/go-campusbot/internal/zulipbot/model"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/storage"
 )
 
@@ -23,8 +22,9 @@ const (
 	defaultMaxBackoff         = 30 * time.Second
 )
 
+// Messenger dispatches a reply to a target.
 type Messenger interface {
-	SendReply(ctx context.Context, target model.ReplyTarget, content string) (int64, error)
+	SendReply(ctx context.Context, target command.ReplyTarget, content string) (int64, error)
 }
 
 type Loop struct {
@@ -40,7 +40,7 @@ type Loop struct {
 	pollTimeout      time.Duration
 }
 
-type Config struct {
+type LoopConfig struct {
 	Source           Source
 	Repo             *storage.Repository
 	Router           *command.Router
@@ -51,7 +51,7 @@ type Config struct {
 	PollTimeout      time.Duration
 }
 
-func New(cfg Config) (*Loop, error) {
+func NewLoop(cfg LoopConfig) (*Loop, error) {
 	if cfg.Source == nil {
 		return nil, errors.New("event source must not be nil")
 	}
@@ -85,6 +85,10 @@ func New(cfg Config) (*Loop, error) {
 		maxBackoff:       defaultMaxBackoff,
 		pollTimeout:      cfg.PollTimeout,
 	}, nil
+}
+
+func (loop *Loop) PollTimeout() time.Duration {
+	return loop.pollTimeout
 }
 
 //nolint:gocognit,funlen // long-poll loop with queue recovery, backoff, and restart exit
@@ -284,12 +288,12 @@ func (loop *Loop) handleMessage(ctx context.Context, event events.MessageEvent) 
 		return nil
 	}
 
-	invocation, err := command.Parser{}.Parse(msg.Content)
+	invocation, err := command.Parse(msg.Content)
 	if errors.Is(err, command.ErrNotCommand) {
 		return nil
 	}
 
-	target, targetErr := ReplyTargetFromMessage(msg, loop.ownUserID)
+	target, targetErr := replyTargetFromMessage(msg, loop.ownUserID)
 	if targetErr != nil {
 		return targetErr
 	}
@@ -307,7 +311,7 @@ func (loop *Loop) handleMessage(ctx context.Context, event events.MessageEvent) 
 
 	result := loop.router.Route(ctx, command.Request{
 		Invocation: invocation,
-		Actor: model.Actor{
+		Actor: command.Actor{
 			UserID:   msg.SenderID,
 			Email:    msg.SenderEmail,
 			FullName: msg.SenderFullName,
@@ -329,7 +333,7 @@ func (loop *Loop) handleMessage(ctx context.Context, event events.MessageEvent) 
 	return nil
 }
 
-func (loop *Loop) send(ctx context.Context, target model.ReplyTarget, content string) error {
+func (loop *Loop) send(ctx context.Context, target command.ReplyTarget, content string) error {
 	messageID, err := loop.messenger.SendReply(ctx, target, content)
 	if err != nil {
 		return err
@@ -338,32 +342,32 @@ func (loop *Loop) send(ctx context.Context, target model.ReplyTarget, content st
 	return nil
 }
 
-func ReplyTargetFromMessage(msg z.Message, ownUserID int64) (model.ReplyTarget, error) {
+func replyTargetFromMessage(msg z.Message, ownUserID int64) (command.ReplyTarget, error) {
 	messageType := msg.Type
 	if messageType.IsChannelMessage() || msg.ChannelID != nil {
 		if msg.ChannelID == nil {
-			return model.ReplyTarget{}, errors.New("channel message has no channel ID")
+			return command.ReplyTarget{}, errors.New("channel message has no channel ID")
 		}
-		target := model.ReplyTarget{
-			Kind:      model.ReplyKindChannel,
+		target := command.ReplyTarget{
+			Kind:      command.ReplyKindChannel,
 			ChannelID: *msg.ChannelID,
 			Topic:     msg.Subject,
 		}
 		if err := target.Validate(); err != nil {
-			return model.ReplyTarget{}, err
+			return command.ReplyTarget{}, err
 		}
 		return target, nil
 	}
 
 	if messageType.IsDirectMessage() {
 		userIDs := directReplyUserIDs(msg, ownUserID)
-		target := model.ReplyTarget{Kind: model.ReplyKindDirect, UserIDs: userIDs}
+		target := command.ReplyTarget{Kind: command.ReplyKindDirect, UserIDs: userIDs}
 		if err := target.Validate(); err != nil {
-			return model.ReplyTarget{}, err
+			return command.ReplyTarget{}, err
 		}
 		return target, nil
 	}
-	return model.ReplyTarget{}, fmt.Errorf("unsupported Zulip message type %q", msg.Type)
+	return command.ReplyTarget{}, fmt.Errorf("unsupported Zulip message type %q", msg.Type)
 }
 
 func directReplyUserIDs(msg z.Message, ownUserID int64) []int64 {

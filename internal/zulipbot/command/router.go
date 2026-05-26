@@ -9,11 +9,10 @@ import (
 	"github.com/tum-zulip/go-zulip/zulip"
 
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/audit"
-	"github.com/tum-zulip/go-campusbot/internal/zulipbot/model"
 )
 
 type Authorizer interface {
-	Check(ctx context.Context, actor model.Actor, minRole zulip.Role) error
+	Check(ctx context.Context, actor Actor, minRole zulip.Role) error
 }
 
 type Auditor interface {

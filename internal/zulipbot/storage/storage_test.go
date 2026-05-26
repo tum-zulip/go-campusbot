@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tum-zulip/go-campusbot/internal/zulipbot/model"
+	"github.com/tum-zulip/go-campusbot/internal/zulipbot/command"
 	storagedb "github.com/tum-zulip/go-campusbot/internal/zulipbot/storage/db"
 )
 
@@ -67,7 +67,7 @@ func TestRepositoryTracksRestartRequests(t *testing.T) {
 	repo := openTestRepository(t)
 	defer repo.Close()
 
-	target := model.ReplyTarget{Kind: model.ReplyKindDirect, UserIDs: []int64{10, 11}}
+	target := command.ReplyTarget{Kind: command.ReplyKindDirect, UserIDs: []int64{10, 11}}
 	id, err := repo.CreateRestartRequest(ctx, RestartRequest{
 		RequestedByUserID: 10,
 		RequestMessageID:  200,

@@ -7,8 +7,6 @@ import (
 	"testing"
 
 	"github.com/tum-zulip/go-zulip/zulip"
-
-	"github.com/tum-zulip/go-campusbot/internal/zulipbot/model"
 )
 
 // staticRoleProvider implements RoleProvider with a fixed role (or error).
@@ -17,7 +15,7 @@ type staticRoleProvider struct {
 	err  error
 }
 
-func (p staticRoleProvider) RoleFor(_ context.Context, _ model.Actor) (zulip.Role, error) {
+func (p staticRoleProvider) RoleFor(_ context.Context, _ Actor) (zulip.Role, error) {
 	return p.role, p.err
 }
 
@@ -76,7 +74,7 @@ func buildHelpTestRegistry(t *testing.T) *Registry {
 }
 
 // runHelp calls HelpHandler.Handle with the given actor and optional args.
-func runHelp(t *testing.T, h *HelpHandler, actor model.Actor, args ...string) (string, error) {
+func runHelp(t *testing.T, h *HelpHandler, actor Actor, args ...string) (string, error) {
 	t.Helper()
 	result, err := h.Handle(context.Background(), Request{
 		Invocation: Invocation{Name: "help", Args: args},
@@ -93,7 +91,7 @@ func TestHelpNoneUserSeesOnlyPublicCommands(t *testing.T) {
 	registry := buildHelpTestRegistry(t)
 	h := NewHelpHandler(registry, staticRoleProvider{role: zulip.RoleMember})
 
-	out, err := runHelp(t, h, model.Actor{UserID: 1})
+	out, err := runHelp(t, h, Actor{UserID: 1})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -118,7 +116,7 @@ func TestHelpAdminSeesAdminCommandsNotOwnerOnly(t *testing.T) {
 	registry := buildHelpTestRegistry(t)
 	h := NewHelpHandler(registry, staticRoleProvider{role: zulip.RoleAdmin})
 
-	out, err := runHelp(t, h, model.Actor{UserID: 2})
+	out, err := runHelp(t, h, Actor{UserID: 2})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -148,7 +146,7 @@ func TestHelpOwnerSeesAllCommandsAndOwnerUsage(t *testing.T) {
 	registry := buildHelpTestRegistry(t)
 	h := NewHelpHandler(registry, staticRoleProvider{role: zulip.RoleOwner})
 
-	out, err := runHelp(t, h, model.Actor{UserID: 3})
+	out, err := runHelp(t, h, Actor{UserID: 3})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -179,7 +177,7 @@ func TestHelpPermissionLookupFailureShowsOnlyPublicCommands(t *testing.T) {
 	registry := buildHelpTestRegistry(t)
 	h := NewHelpHandler(registry, staticRoleProvider{err: errors.New("db connection lost")})
 
-	out, err := runHelp(t, h, model.Actor{UserID: 99})
+	out, err := runHelp(t, h, Actor{UserID: 99})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -204,7 +202,7 @@ func TestHelpNilRoleProviderShowsOnlyPublicCommands(t *testing.T) {
 	registry := buildHelpTestRegistry(t)
 	h := NewHelpHandler(registry, nil)
 
-	out, err := runHelp(t, h, model.Actor{UserID: 1})
+	out, err := runHelp(t, h, Actor{UserID: 1})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -226,7 +224,7 @@ func TestHelpNoneUserUnknownCommandDoesNotLeakRestrictedName(t *testing.T) {
 	h := NewHelpHandler(registry, staticRoleProvider{role: zulip.RoleMember})
 
 	// "restart" exists but member user cannot see it — must get "Unknown command".
-	_, err := runHelp(t, h, model.Actor{UserID: 1}, "restart")
+	_, err := runHelp(t, h, Actor{UserID: 1}, "restart")
 	if err == nil {
 		t.Fatal("expected error for restricted command lookup by member user")
 	}
@@ -250,7 +248,7 @@ func TestHelpAdminUnknownCommandDoesNotLeakOwnerOnly(t *testing.T) {
 	h := NewHelpHandler(registry, staticRoleProvider{role: zulip.RoleAdmin})
 
 	// "restart" is owner-only — admin must get "Unknown command", not its details.
-	_, err := runHelp(t, h, model.Actor{UserID: 2}, "restart")
+	_, err := runHelp(t, h, Actor{UserID: 2}, "restart")
 	if err == nil {
 		t.Fatal("expected error for owner-only command lookup by admin")
 	}
@@ -269,7 +267,7 @@ func TestHelpOwnerCanLookUpRestartDetails(t *testing.T) {
 	registry := buildHelpTestRegistry(t)
 	h := NewHelpHandler(registry, staticRoleProvider{role: zulip.RoleOwner})
 
-	out, err := runHelp(t, h, model.Actor{UserID: 3}, "restart")
+	out, err := runHelp(t, h, Actor{UserID: 3}, "restart")
 	if err != nil {
 		t.Fatalf("owner should be able to look up restart, got error: %v", err)
 	}
@@ -284,7 +282,7 @@ func TestHelpAdminCanLookUpRoleDetails(t *testing.T) {
 	registry := buildHelpTestRegistry(t)
 	h := NewHelpHandler(registry, staticRoleProvider{role: zulip.RoleAdmin})
 
-	out, err := runHelp(t, h, model.Actor{UserID: 2}, "role")
+	out, err := runHelp(t, h, Actor{UserID: 2}, "role")
 	if err != nil {
 		t.Fatalf("admin should be able to look up role details, got error: %v", err)
 	}

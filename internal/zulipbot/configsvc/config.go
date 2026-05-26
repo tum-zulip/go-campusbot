@@ -11,7 +11,6 @@ import (
 	"github.com/tum-zulip/go-zulip/zulip"
 
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/command"
-	"github.com/tum-zulip/go-campusbot/internal/zulipbot/model"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/storage"
 )
 
@@ -40,13 +39,13 @@ type Value struct {
 type Service struct {
 	repo       *storage.Repository
 	permission interface {
-		Check(ctx context.Context, actor model.Actor, minRole zulip.Role) error
+		Check(ctx context.Context, actor command.Actor, minRole zulip.Role) error
 	}
 	definitions map[string]Definition
 }
 
 func NewService(repo *storage.Repository, permission interface {
-	Check(ctx context.Context, actor model.Actor, minRole zulip.Role) error
+	Check(ctx context.Context, actor command.Actor, minRole zulip.Role) error
 },
 ) *Service {
 	return &Service{
@@ -87,7 +86,7 @@ func (service *Service) Bool(ctx context.Context, key string) (bool, error) {
 	return parsed, nil
 }
 
-func (service *Service) Get(ctx context.Context, actor model.Actor, key string) (Value, error) {
+func (service *Service) Get(ctx context.Context, actor command.Actor, key string) (Value, error) {
 	value, err := service.GetRaw(ctx, key)
 	if err != nil {
 		return Value{}, err
@@ -117,7 +116,7 @@ func (service *Service) GetRaw(ctx context.Context, key string) (Value, error) {
 	return Value{Definition: def, Value: normalized}, nil
 }
 
-func (service *Service) List(ctx context.Context, actor model.Actor) ([]Value, error) {
+func (service *Service) List(ctx context.Context, actor command.Actor) ([]Value, error) {
 	keys := make([]string, 0, len(service.definitions))
 	for key := range service.definitions {
 		keys = append(keys, key)
@@ -140,7 +139,7 @@ func (service *Service) List(ctx context.Context, actor model.Actor) ([]Value, e
 
 func (service *Service) Set(
 	ctx context.Context,
-	actor model.Actor,
+	actor command.Actor,
 	messageID int64,
 	key string,
 	value string,

@@ -8,13 +8,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/tum-zulip/go-zulip/zulip"
-
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/command"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/configsvc"
-	"github.com/tum-zulip/go-campusbot/internal/zulipbot/eventloop"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/handlers"
-	"github.com/tum-zulip/go-campusbot/internal/zulipbot/model"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/storage"
 )
 
@@ -29,15 +25,15 @@ type RuntimeConfig struct {
 }
 
 type App struct {
-	bot             *Bot
-	repo            *storage.Repository
-	config          *configsvc.Service
-	restart         *restartState
-	loop            *eventloop.Loop
-	startupNotifier *startupNotifier
-	logger          *slog.Logger
-	closed          atomic.Bool
-	startedAt       time.Time
+	bot       *Bot
+	repo      *storage.Repository
+	config    *configsvc.Service
+	restart   *restartState
+	loop      *Loop
+	messenger Messenger
+	logger    *slog.Logger
+	closed    atomic.Bool
+	startedAt time.Time
 }
 
 func NewApp(ctx context.Context, cfg RuntimeConfig) (*App, error) {
@@ -59,11 +55,7 @@ func NewApp(ctx context.Context, cfg RuntimeConfig) (*App, error) {
 		}
 	}()
 
-	bot, err := New(ctx, Config{
-		RCPath:     cfg.RCPath,
-		ClientName: cfg.ClientName,
-		Logger:     cfg.Logger,
-	})
+	bot, err := New(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -79,8 +71,7 @@ func NewApp(ctx context.Context, cfg RuntimeConfig) (*App, error) {
 	}
 
 	restart := newRestartState()
-	auth := &zulipAuthorizer{bot: bot}
-	configService := configsvc.NewService(repo, auth)
+	configService := configsvc.NewService(repo, bot)
 
 	startedAt := time.Now().UTC()
 
@@ -89,18 +80,17 @@ func NewApp(ctx context.Context, cfg RuntimeConfig) (*App, error) {
 		repo:      repo,
 		config:    configService,
 		restart:   restart,
+		messenger: bot,
 		logger:    cfg.Logger,
 		startedAt: startedAt,
 	}
 
-	statusProvider := &appStatusProvider{app: app}
-
 	registry := command.NewRegistry()
 	for _, h := range []command.Handler{
-		command.NewHelpHandler(registry, auth),
+		command.NewHelpHandler(registry, bot),
 		handlers.NewConfigHandler(configService),
 		handlers.NewRestartHandler(app),
-		handlers.NewStatusHandler(statusProvider, auth),
+		handlers.NewStatusHandler(app, bot),
 	} {
 		if err = registry.Register(h); err != nil {
 			return nil, err
@@ -109,7 +99,7 @@ func NewApp(ctx context.Context, cfg RuntimeConfig) (*App, error) {
 
 	router, err := command.NewRouter(command.RouterConfig{
 		Registry:  registry,
-		Auth:      auth,
+		Auth:      bot,
 		Auditor:   repo,
 		Accepting: restart.Accepting,
 		Logger:    cfg.Logger,
@@ -118,12 +108,11 @@ func NewApp(ctx context.Context, cfg RuntimeConfig) (*App, error) {
 		return nil, err
 	}
 
-	messenger := NewMessenger(bot)
-	loop, err := eventloop.New(eventloop.Config{
-		Source:           eventloop.NewZulipSource(bot.Client()),
+	loop, err := NewLoop(LoopConfig{
+		Source:           NewZulipSource(bot.Client()),
 		Repo:             repo,
 		Router:           router,
-		Messenger:        messenger,
+		Messenger:        bot,
 		RestartRequested: restart.RestartRequested,
 		OwnUserID:        bot.OwnUserID(),
 		Logger:           cfg.Logger,
@@ -134,7 +123,6 @@ func NewApp(ctx context.Context, cfg RuntimeConfig) (*App, error) {
 	}
 
 	app.loop = loop
-	app.startupNotifier = newStartupNotifier(repo, messenger, cfg.Logger)
 
 	cleanup = false
 	return app, nil
@@ -146,10 +134,10 @@ func (app *App) Run(ctx context.Context) (bool, error) {
 		return false, fmt.Errorf("load restart notification config: %w", err)
 	}
 	if notify {
-		if notifyErr := app.startupNotifier.NotifyRestartComplete(ctx); notifyErr != nil {
+		if notifyErr := app.NotifyRestartComplete(ctx); notifyErr != nil {
 			app.logger.WarnContext(ctx, "restart completion notification failed", "error", notifyErr)
 		}
-	} else if markErr := app.startupNotifier.MarkRestartComplete(ctx); markErr != nil {
+	} else if markErr := app.MarkRestartComplete(ctx); markErr != nil {
 		app.logger.WarnContext(ctx, "failed to mark restart complete", "error", markErr)
 	}
 
@@ -181,17 +169,14 @@ func (app *App) Bot() *Bot {
 	return app.bot
 }
 
-// appStatusProvider implements handlers.StatusProvider using app internals.
-type appStatusProvider struct {
-	app *App
+// UptimeSeconds implements handlers.StatusProvider.
+func (app *App) UptimeSeconds() int64 {
+	return int64(time.Since(app.startedAt).Truncate(time.Second).Seconds())
 }
 
-func (p *appStatusProvider) UptimeSeconds() int64 {
-	return int64(time.Since(p.app.startedAt).Truncate(time.Second).Seconds())
-}
-
-func (p *appStatusProvider) QueueStatus(ctx context.Context) (string, int64, bool, error) {
-	state, ok, err := p.app.repo.EventQueueState(ctx)
+// QueueStatus implements handlers.StatusProvider.
+func (app *App) QueueStatus(ctx context.Context) (string, int64, bool, error) {
+	state, ok, err := app.repo.EventQueueState(ctx)
 	if err != nil {
 		return "", 0, false, err
 	}
@@ -201,56 +186,23 @@ func (p *appStatusProvider) QueueStatus(ctx context.Context) (string, int64, boo
 	return state.QueueID, state.LastEventID, true, nil
 }
 
-func (p *appStatusProvider) DBReachable(ctx context.Context) error {
-	return p.app.repo.Ping(ctx)
+// DBReachable implements handlers.StatusProvider.
+func (app *App) DBReachable(ctx context.Context) error {
+	return app.repo.Ping(ctx)
 }
 
-func (p *appStatusProvider) RestartPending(ctx context.Context) (bool, error) {
-	_, ok, err := p.app.repo.PendingRestartRequest(ctx)
+// RestartPending implements handlers.StatusProvider.
+func (app *App) RestartPending(ctx context.Context) (bool, error) {
+	_, ok, err := app.repo.PendingRestartRequest(ctx)
 	return ok, err
 }
 
-func (p *appStatusProvider) Accepting() bool {
-	return p.app.restart.Accepting()
+// Accepting implements handlers.StatusProvider.
+func (app *App) Accepting() bool {
+	return app.restart.Accepting()
 }
 
-// zulipAuthorizer implements command.Authorizer and command.RoleProvider
-// by querying the Zulip API for user roles directly.
-type zulipAuthorizer struct {
-	bot *Bot
-}
-
-func (z *zulipAuthorizer) Check(ctx context.Context, actor model.Actor, minRole zulip.Role) error {
-	if minRole == 0 {
-		return nil
-	}
-	actorRole, err := z.fetchRole(ctx, actor.UserID)
-	if err != nil {
-		return fmt.Errorf("%w: %w", command.ErrPermissionUnavailable, err)
-	}
-	if actorRole <= minRole {
-		return nil
-	}
-	return fmt.Errorf("%w", command.ErrDenied)
-}
-
-func (z *zulipAuthorizer) RoleFor(ctx context.Context, actor model.Actor) (zulip.Role, error) {
-	return z.fetchRole(ctx, actor.UserID)
-}
-
-func (z *zulipAuthorizer) fetchRole(ctx context.Context, userID int64) (zulip.Role, error) {
-	resp, _, err := z.bot.Client().GetUser(ctx, userID).Execute()
-	if err != nil {
-		return 0, fmt.Errorf("get Zulip user %d: %w", userID, err)
-	}
-	if resp == nil {
-		return 0, fmt.Errorf("get Zulip user %d: empty response", userID)
-	}
-	return resp.User.Role, nil
-}
-
-// Ensure appStatusProvider satisfies the interface at compile time.
-var _ handlers.StatusProvider = (*appStatusProvider)(nil)
-
-// Ensure App implements handlers.RestartService.
-var _ handlers.RestartService = (*App)(nil)
+var (
+	_ handlers.StatusProvider = (*App)(nil)
+	_ handlers.RestartService = (*App)(nil)
+)

@@ -1,4 +1,4 @@
-package eventloop
+package zulipbot_test
 
 import (
 	"context"
@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/tum-zulip/go-campusbot/internal/zulipbot"
 	z "github.com/tum-zulip/go-zulip/zulip"
 	zulipclient "github.com/tum-zulip/go-zulip/zulip/client"
 )
@@ -45,7 +46,7 @@ func TestZulipSourceRegisterSendsBroadQueueCapabilities(t *testing.T) {
 		}
 		if !capabilities["notification_settings_null"] {
 			w.WriteHeader(http.StatusBadRequest)
-			writeJSON(
+			writeSourceTestJSON(
 				t,
 				w,
 				`{"result":"error","code":"BAD_REQUEST","msg":"client_capabilities[\"notification_settings_null\"] field is missing: Field required"}`,
@@ -53,7 +54,7 @@ func TestZulipSourceRegisterSendsBroadQueueCapabilities(t *testing.T) {
 			return
 		}
 
-		writeJSON(t, w, `{"result":"success","queue_id":"queue-1","last_event_id":42}`)
+		writeSourceTestJSON(t, w, `{"result":"success","queue_id":"queue-1","last_event_id":42}`)
 	}))
 	t.Cleanup(server.Close)
 
@@ -65,9 +66,9 @@ func TestZulipSourceRegisterSendsBroadQueueCapabilities(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewClient() failed: %v", err)
 	}
-	source := NewZulipSource(client)
+	source := zulipbot.NewZulipSource(client)
 
-	state, err := source.Register(context.Background(), RegisterOptions{})
+	state, err := source.Register(context.Background(), zulipbot.RegisterOptions{})
 	if err != nil {
 		t.Fatalf("Register() failed: %v", err)
 	}
@@ -147,10 +148,10 @@ func TestZulipSourceRegisterToleratesUnknownResponseFields(t *testing.T) {
 			t.Parallel()
 
 			source := newRegisterTestSource(t, func(w http.ResponseWriter, r *http.Request) {
-				writeJSON(t, w, tc.body)
+				writeSourceTestJSON(t, w, tc.body)
 			})
 
-			state, err := source.Register(context.Background(), RegisterOptions{})
+			state, err := source.Register(context.Background(), zulipbot.RegisterOptions{})
 			if err != nil {
 				t.Fatalf("Register() failed: %v", err)
 			}
@@ -171,10 +172,10 @@ func TestZulipSourceRegisterSurfacesBadRequestErrors(t *testing.T) {
 
 	source := newRegisterTestSource(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
-		writeJSON(t, w, `{"result":"error","code":"BAD_REQUEST","msg":"bad register request"}`)
+		writeSourceTestJSON(t, w, `{"result":"error","code":"BAD_REQUEST","msg":"bad register request"}`)
 	})
 
-	_, err := source.Register(context.Background(), RegisterOptions{})
+	_, err := source.Register(context.Background(), zulipbot.RegisterOptions{})
 	if err == nil {
 		t.Fatal("Register() succeeded, want BAD_REQUEST error")
 	}
@@ -183,7 +184,10 @@ func TestZulipSourceRegisterSurfacesBadRequestErrors(t *testing.T) {
 	}
 }
 
-func newRegisterTestSource(t *testing.T, handleRegister func(http.ResponseWriter, *http.Request)) *ZulipSource {
+func newRegisterTestSource(
+	t *testing.T,
+	handleRegister func(http.ResponseWriter, *http.Request),
+) *zulipbot.ZulipSource {
 	t.Helper()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -208,10 +212,10 @@ func newRegisterTestSource(t *testing.T, handleRegister func(http.ResponseWriter
 	if err != nil {
 		t.Fatalf("NewClient() failed: %v", err)
 	}
-	return NewZulipSource(client)
+	return zulipbot.NewZulipSource(client)
 }
 
-func writeJSON(t *testing.T, w http.ResponseWriter, body string) {
+func writeSourceTestJSON(t *testing.T, w http.ResponseWriter, body string) {
 	t.Helper()
 
 	w.Header().Set("Content-Type", "application/json")

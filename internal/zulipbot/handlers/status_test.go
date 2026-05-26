@@ -8,7 +8,6 @@ import (
 	"github.com/tum-zulip/go-zulip/zulip"
 
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/command"
-	"github.com/tum-zulip/go-campusbot/internal/zulipbot/model"
 )
 
 type fakeStatusProvider struct {
@@ -41,7 +40,7 @@ type fakeAdminChecker struct {
 	allowUserID int64
 }
 
-func (c *fakeAdminChecker) Check(_ context.Context, actor model.Actor, _ zulip.Role) error {
+func (c *fakeAdminChecker) Check(_ context.Context, actor command.Actor, _ zulip.Role) error {
 	if actor.UserID == c.allowUserID {
 		return nil
 	}
@@ -56,7 +55,7 @@ func TestStatusHandlerPublicOutputForNonAdmin(t *testing.T) {
 
 	result, err := handler.Handle(context.Background(), command.Request{
 		Invocation: command.Invocation{Name: "status"},
-		Actor:      model.Actor{UserID: 1},
+		Actor:      command.Actor{UserID: 1},
 	})
 	if err != nil {
 		t.Fatalf("Handle() failed: %v", err)
@@ -83,7 +82,7 @@ func TestStatusHandlerAdminSeesDetailedOutput(t *testing.T) {
 
 	result, err := handler.Handle(context.Background(), command.Request{
 		Invocation: command.Invocation{Name: "status"},
-		Actor:      model.Actor{UserID: 10},
+		Actor:      command.Actor{UserID: 10},
 	})
 	if err != nil {
 		t.Fatalf("Handle() failed: %v", err)

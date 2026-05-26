@@ -6,15 +6,13 @@ import (
 	"strings"
 
 	"github.com/tum-zulip/go-zulip/zulip"
-
-	"github.com/tum-zulip/go-campusbot/internal/zulipbot/model"
 )
 
 // RoleProvider resolves the Zulip organizational role for an actor.
 // It is used by HelpHandler to filter visible commands by the actor's role.
 // If role resolution fails, HelpHandler falls back to showing only public commands.
 type RoleProvider interface {
-	RoleFor(ctx context.Context, actor model.Actor) (zulip.Role, error)
+	RoleFor(ctx context.Context, actor Actor) (zulip.Role, error)
 }
 
 type HelpHandler struct {
@@ -59,7 +57,7 @@ func (handler *HelpHandler) Handle(ctx context.Context, req Request) (Result, er
 
 // actorRole resolves the actor's Zulip role, falling back to RoleMember on any error.
 // This ensures that a lookup failure never leaks admin/owner commands in help output.
-func (handler *HelpHandler) actorRole(ctx context.Context, actor model.Actor) zulip.Role {
+func (handler *HelpHandler) actorRole(ctx context.Context, actor Actor) zulip.Role {
 	if handler.roles == nil {
 		return zulip.RoleMember
 	}

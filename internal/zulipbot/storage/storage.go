@@ -13,7 +13,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/audit"
-	"github.com/tum-zulip/go-campusbot/internal/zulipbot/model"
+	"github.com/tum-zulip/go-campusbot/internal/zulipbot/command"
 	storagedb "github.com/tum-zulip/go-campusbot/internal/zulipbot/storage/db"
 )
 
@@ -51,7 +51,7 @@ type RestartRequest struct {
 	ID                int64
 	RequestedByUserID int64
 	RequestMessageID  int64
-	Target            model.ReplyTarget
+	Target            command.ReplyTarget
 	RequestedAt       time.Time
 }
 
@@ -463,8 +463,8 @@ func restartRequestFromRow(row storagedb.GetPendingRestartRequestRow) (RestartRe
 		RequestedByUserID: row.RequestedByUserID,
 		RequestMessageID:  row.RequestMessageID,
 		RequestedAt:       requestedAt,
-		Target: model.ReplyTarget{
-			Kind:    model.ReplyKind(row.ResponseKind),
+		Target: command.ReplyTarget{
+			Kind:    command.ReplyKind(row.ResponseKind),
 			Topic:   nullStringValue(row.Topic),
 			UserIDs: userIDs,
 		},
