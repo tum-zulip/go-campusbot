@@ -1,3 +1,5 @@
+github.com/mattn/go-sqlite3 v1.14.44 h1:3VSe+xafpbzsLbdr2AWlAZk9yRHiBhTBakioXaCKTF8=
+github.com/mattn/go-sqlite3 v1.14.44/go.mod h1:pjEuOr8IwzLJP2MfGeTb0A35jauH+C2kbHKBr7yXKVQ=
 github.com/tum-zulip/go-zulip v0.0.0-20251028102634-265e2c9e1a45 h1:4lu+tArZGaQQtskYXJMPjf03klqHTBbwcxFsmKMCb0k=
 github.com/tum-zulip/go-zulip v0.0.0-20251028102634-265e2c9e1a45/go.mod h1:Vb8PqPa8ejnkIg2ZOnkzKmdfvHTd8dZ9fT+o5Cdiahs=
 gopkg.in/ini.v1 v1.67.0 h1:Dgnx+6+nfE+IfzjUEISNeydPJh9AXNNsWbGP9KzCsOA=
