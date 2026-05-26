@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"os"
 	"sync"
 	"testing"
@@ -17,7 +19,7 @@ import (
 	"github.com/tum-zulip/go-zulip/zulip/api/channels"
 )
 
-func newTestClient(t *testing.T, base zulipmock.Client) Client {
+func newTestDatabase(t *testing.T) *sql.DB {
 	t.Helper()
 
 	database, err := sql.Open("sqlite3", ":memory:")
@@ -38,7 +40,24 @@ func newTestClient(t *testing.T, base zulipmock.Client) Client {
 	if _, err = database.ExecContext(context.Background(), string(schema)); err != nil {
 		t.Fatalf("apply channelgroup schema: %v", err)
 	}
-	return NewClient(base, database)
+	return database
+}
+
+func newTestClient(t *testing.T, base zulipmock.Client) Client {
+	t.Helper()
+
+	database := newTestDatabase(t)
+	return NewClient(base, database, WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))))
+}
+
+func newInitializedTestClient(t *testing.T, ctx context.Context, base zulipmock.Client, database *sql.DB) Client {
+	t.Helper()
+
+	client, err := NewInitializedClient(ctx, base, database, WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))))
+	if err != nil {
+		t.Fatalf("NewInitializedClient error = %v", err)
+	}
+	return client
 }
 
 func TestCreateChannelGroupWithMockClient(t *testing.T) {
@@ -70,6 +89,106 @@ func TestCreateChannelGroupWithMockClient(t *testing.T) {
 	}
 	if got, want := subscribers.SubscriberIDs, []int64{10, 20}; !equalInt64s(got, want) {
 		t.Fatalf("subscribers = %v, want %v", got, want)
+	}
+}
+
+func TestCreateChannelGroupCreatesRestrictiveUserGroup(t *testing.T) {
+	ctx := context.Background()
+	base := zulipmock.NewClient()
+	client := newTestClient(t, base)
+
+	created, _, err := client.CreateChannelGroup(ctx).
+		Name("restricted group").
+		InitialSubscribers(zulip.UserIDsAsPrincipals(10)).
+		Execute()
+	if err != nil {
+		t.Fatalf("CreateChannelGroup error = %v", err)
+	}
+
+	groups, _, err := base.GetUserGroups(ctx).Execute()
+	if err != nil {
+		t.Fatalf("GetUserGroups error = %v", err)
+	}
+	if len(groups.UserGroups) != 1 {
+		t.Fatalf("created user groups = %d, want 1", len(groups.UserGroups))
+	}
+
+	group := groups.UserGroups[0]
+	if group.ID != created.ChannelGroupID {
+		t.Fatalf("user group ID = %d, want %d", group.ID, created.ChannelGroupID)
+	}
+	assertAdminGroupSettingValue(t, "CanAddMembersGroup", group.CanAddMembersGroup)
+	assertAdminGroupSettingValue(t, "CanJoinGroup", group.CanJoinGroup)
+	assertAdminGroupSettingValue(t, "CanLeaveGroup", group.CanLeaveGroup)
+	assertAdminGroupSettingValue(t, "CanManageGroup", group.CanManageGroup)
+	assertAdminGroupSettingValue(t, "CanMentionGroup", group.CanMentionGroup)
+	assertAdminGroupSettingValue(t, "CanRemoveMembersGroup", group.CanRemoveMembersGroup)
+}
+
+func TestInitializeChannelGroupsRemovesChannelsMissingFromBotSubscriptions(t *testing.T) {
+	ctx := context.Background()
+	base := zulipmock.NewClient()
+	database := newTestDatabase(t)
+	client := NewClient(base, database, WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))))
+	channelIDs := createMockBotSubscribedChannels(t, ctx, base, 2)
+
+	created, _, err := client.CreateChannelGroup(ctx).
+		Name("stale channel").
+		ChannelIDs(channelIDs).
+		InitialSubscribers(zulip.UserIDsAsPrincipals(101)).
+		Execute()
+	if err != nil {
+		t.Fatalf("CreateChannelGroup error = %v", err)
+	}
+
+	_, _, err = base.Unsubscribe(ctx).
+		Subscriptions([]string{mockChannelName(2)}).
+		Execute()
+	if err != nil {
+		t.Fatalf("unsubscribe bot from stale channel: %v", err)
+	}
+
+	base.FailNext(zulipmock.OperationUnsubscribe, errors.New("initialization must not unsubscribe users"))
+	client = newInitializedTestClient(t, ctx, base, database)
+
+	group, _, err := client.GetChannelGroup(ctx, created.ChannelGroupID).Execute()
+	if err != nil {
+		t.Fatalf("GetChannelGroup error = %v", err)
+	}
+	if got, want := group.ChannelGroup.ChannelIDs, []int64{channelIDs[0]}; !equalInt64s(got, want) {
+		t.Fatalf("channel IDs = %v, want %v", got, want)
+	}
+	if got, want := channelSubscribers(t, ctx, base, channelIDs[1]), []int64{101}; !equalInt64s(got, want) {
+		t.Fatalf("stale channel subscribers = %v, want %v", got, want)
+	}
+}
+
+func TestInitializeChannelGroupsRemovesGroupWhenBackingUserGroupMissing(t *testing.T) {
+	ctx := context.Background()
+	base := zulipmock.NewClient()
+	database := newTestDatabase(t)
+	client := NewClient(base, database, WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))))
+	channelIDs := createMockBotSubscribedChannels(t, ctx, base, 1)
+
+	created, _, err := client.CreateChannelGroup(ctx).
+		Name("missing user group").
+		ChannelIDs(channelIDs).
+		InitialSubscribers(zulip.UserIDsAsPrincipals(101)).
+		Execute()
+	if err != nil {
+		t.Fatalf("CreateChannelGroup error = %v", err)
+	}
+
+	base.DeleteUserGroupForTest(created.ChannelGroupID)
+	base.FailNext(zulipmock.OperationUnsubscribe, errors.New("initialization must not unsubscribe users"))
+	client = newInitializedTestClient(t, ctx, base, database)
+
+	_, _, err = client.GetChannelGroup(ctx, created.ChannelGroupID).Execute()
+	if err == nil {
+		t.Fatalf("GetChannelGroup error = nil, want missing channel group")
+	}
+	if got, want := channelSubscribers(t, ctx, base, channelIDs[0]), []int64{0, 101}; !equalInt64s(got, want) {
+		t.Fatalf("channel subscribers = %v, want %v", got, want)
 	}
 }
 
@@ -213,10 +332,8 @@ func TestConcurrentSubscribeAndDeleteChannelDoesNotLeaveSubscriberOnRemovedChann
 	defer cancel()
 	serialization := base.SerializeRequestSteps(
 		zulipmock.ChannelRequest(zulipmock.OperationGetChannelByID, channelIDs[0]),
-		zulipmock.ChannelRequest(zulipmock.OperationGetChannelByID, channelIDs[1]),
 		zulipmock.OperationRequest(zulipmock.OperationGetUserGroupMembers),
 		zulipmock.ChannelRequest(zulipmock.OperationGetChannelByID, channelIDs[1]),
-		zulipmock.SubscriptionRequest(zulipmock.OperationUnsubscribe, []string{mockChannelName(2)}, []int64{101}),
 		zulipmock.SubscriptionRequest(
 			zulipmock.OperationSubscribe,
 			[]string{mockChannelName(1), mockChannelName(2)},
@@ -248,7 +365,7 @@ func TestConcurrentSubscribeAndDeleteChannelDoesNotLeaveSubscriberOnRemovedChann
 	if got, want := group.ChannelGroup.ChannelIDs, []int64{channelIDs[0]}; !equalInt64s(got, want) {
 		t.Fatalf("channel IDs = %v, want %v", got, want)
 	}
-	if got, want := channelSubscribers(t, ctx, base, channelIDs[1]), []int64{mockBootstrapUserID}; !equalInt64s(
+	if got, want := channelSubscribers(t, ctx, base, channelIDs[1]), []int64{101, 202, mockBootstrapUserID}; !equalInt64s(
 		got,
 		want,
 	) {
@@ -390,8 +507,6 @@ func TestConcurrentAddAndDeleteChannelsKeepIndependentChanges(t *testing.T) {
 	serialization := base.SerializeRequestSteps(
 		zulipmock.OperationRequest(zulipmock.OperationGetUserGroupMembers),
 		zulipmock.OperationRequest(zulipmock.OperationGetUserGroupMembers),
-		zulipmock.ChannelRequest(zulipmock.OperationGetChannelByID, channelIDs[0]),
-		zulipmock.SubscriptionRequest(zulipmock.OperationUnsubscribe, []string{mockChannelName(1)}, []int64{101}),
 		zulipmock.ChannelRequest(zulipmock.OperationGetChannelByID, channelIDs[2]),
 		zulipmock.SubscriptionRequest(zulipmock.OperationSubscribe, []string{mockChannelName(3)}, []int64{101}),
 	)
@@ -419,7 +534,7 @@ func TestConcurrentAddAndDeleteChannelsKeepIndependentChanges(t *testing.T) {
 	if got, want := group.ChannelGroup.ChannelIDs, []int64{channelIDs[1], channelIDs[2]}; !equalInt64s(got, want) {
 		t.Fatalf("channel IDs = %v, want %v", got, want)
 	}
-	if got, want := channelSubscribers(t, ctx, base, channelIDs[0]), []int64{mockBootstrapUserID}; !equalInt64s(
+	if got, want := channelSubscribers(t, ctx, base, channelIDs[0]), []int64{101, mockBootstrapUserID}; !equalInt64s(
 		got,
 		want,
 	) {
@@ -635,27 +750,24 @@ func TestConcurrentUnsubscribeAndDeleteSameChannelLeavesNoSubscribers(t *testing
 		deleteOrigin = "UpdateChannelGroupChannels"
 	)
 	serialization := base.SerializeRequestSteps(
-		zulipmock.OperationRequest(zulipmock.OperationGetUserGroupMembers).From(deleteOrigin),
 		zulipmock.ChannelRequest(zulipmock.OperationGetChannelByID, channelIDs[0]).From(unsubOrigin),
+		zulipmock.OperationRequest(zulipmock.OperationGetUserGroupMembers).From(deleteOrigin),
 		zulipmock.SubscriptionRequest(zulipmock.OperationUnsubscribe, []string{mockChannelName(1)}, []int64{202}).
 			From(unsubOrigin),
 		zulipmock.OperationRequest(zulipmock.OperationUpdateUserGroupMembers).From(unsubOrigin),
-		zulipmock.ChannelRequest(zulipmock.OperationGetChannelByID, channelIDs[0]).From(deleteOrigin),
-		zulipmock.SubscriptionRequest(zulipmock.OperationUnsubscribe, []string{mockChannelName(1)}, []int64{101, 202}).
-			From(deleteOrigin),
 	)
 	defer base.ClearRequestSerialization()
 
 	runSerializedPair(t, ctx, serialization,
 		func() error {
-			_, _, err := client.UpdateChannelGroupChannels(ctx, created.ChannelGroupID).
-				Delete([]int64{channelIDs[0]}).
+			_, _, err = client.UnsubscribeFromChannelGroup(ctx, created.ChannelGroupID).
+				Principals(zulip.UserIDsAsPrincipals(202)).
 				Execute()
 			return err
 		},
 		func() error {
-			_, _, err := client.UnsubscribeFromChannelGroup(ctx, created.ChannelGroupID).
-				Principals(zulip.UserIDsAsPrincipals(202)).
+			_, _, err = client.UpdateChannelGroupChannels(ctx, created.ChannelGroupID).
+				Delete([]int64{channelIDs[0]}).
 				Execute()
 			return err
 		},
@@ -675,7 +787,7 @@ func TestConcurrentUnsubscribeAndDeleteSameChannelLeavesNoSubscribers(t *testing
 	if got, want := subscribers.SubscriberIDs, []int64{101}; !equalInt64s(got, want) {
 		t.Fatalf("subscribers = %v, want %v", got, want)
 	}
-	if got, want := channelSubscribers(t, ctx, base, channelIDs[0]), []int64{mockBootstrapUserID}; !equalInt64s(
+	if got, want := channelSubscribers(t, ctx, base, channelIDs[0]), []int64{101, mockBootstrapUserID}; !equalInt64s(
 		got,
 		want,
 	) {
@@ -766,9 +878,6 @@ func TestConcurrentUnsubscribeAndDeleteDifferentChannelLeavesRemainingChannelsIn
 			[]int64{202},
 		),
 		zulipmock.OperationRequest(zulipmock.OperationUpdateUserGroupMembers),
-		zulipmock.OperationRequest(zulipmock.OperationGetUserGroupMembers),
-		zulipmock.ChannelRequest(zulipmock.OperationGetChannelByID, channelIDs[1]),
-		zulipmock.SubscriptionRequest(zulipmock.OperationUnsubscribe, []string{mockChannelName(2)}, []int64{101}),
 	)
 	defer base.ClearRequestSerialization()
 
@@ -807,7 +916,7 @@ func TestConcurrentUnsubscribeAndDeleteDifferentChannelLeavesRemainingChannelsIn
 	) {
 		t.Fatalf("remaining channel subscribers = %v, want %v", got, want)
 	}
-	if got, want := channelSubscribers(t, ctx, base, channelIDs[1]), []int64{mockBootstrapUserID}; !equalInt64s(
+	if got, want := channelSubscribers(t, ctx, base, channelIDs[1]), []int64{101, mockBootstrapUserID}; !equalInt64s(
 		got,
 		want,
 	) {
@@ -922,6 +1031,23 @@ func createMockChannels(t *testing.T, ctx context.Context, client zulipmock.Clie
 	return ids
 }
 
+func createMockBotSubscribedChannels(t *testing.T, ctx context.Context, client zulipmock.Client, count int) []int64 {
+	t.Helper()
+
+	ids := make([]int64, 0, count)
+	for i := range count {
+		name := mockChannelName(i + 1)
+		_, _, err := client.Subscribe(ctx).
+			Subscriptions([]channels.SubscriptionRequest{{Name: name}}).
+			Execute()
+		if err != nil {
+			t.Fatalf("create mock bot-subscribed channel %q: %v", name, err)
+		}
+		ids = append(ids, int64(i+1))
+	}
+	return ids
+}
+
 func channelSubscribers(t *testing.T, ctx context.Context, client zulipmock.Client, channelID int64) []int64 {
 	t.Helper()
 
@@ -942,4 +1068,14 @@ func equalInt64s(a, b []int64) bool {
 		}
 	}
 	return true
+}
+
+func assertAdminGroupSettingValue(t *testing.T, name string, got zulip.GroupSettingValue) {
+	t.Helper()
+	if got.GroupID == nil {
+		t.Fatalf("%s.GroupID = nil, want %d", name, zulipAdministratorsSystemGroupID)
+	}
+	if *got.GroupID != zulipAdministratorsSystemGroupID {
+		t.Fatalf("%s.GroupID = %d, want %d", name, *got.GroupID, zulipAdministratorsSystemGroupID)
+	}
 }

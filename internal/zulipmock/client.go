@@ -39,6 +39,7 @@ const (
 	OperationDeactivateUserGroup    Operation = "DeactivateUserGroup"
 	OperationGetChannelByID         Operation = "GetChannelByID"
 	OperationGetSubscribers         Operation = "GetSubscribers"
+	OperationGetSubscriptions       Operation = "GetSubscriptions"
 	OperationGetIsUserGroupMember   Operation = "GetIsUserGroupMember"
 	OperationGetUserGroupMembers    Operation = "GetUserGroupMembers"
 	OperationGetUserGroups          Operation = "GetUserGroups"
@@ -170,6 +171,14 @@ func (c Client) FailNext(op Operation, err error) {
 		err = fmt.Errorf("%s failed", op)
 	}
 	state.failures[op] = append(state.failures[op], err)
+}
+
+func (c Client) DeleteUserGroupForTest(userGroupID int64) {
+	state := c.ensureState()
+	state.mu.Lock()
+	defer state.mu.Unlock()
+
+	delete(state.userGroups, userGroupID)
 }
 
 func (s *state) failLocked(op Operation) error {
@@ -423,6 +432,15 @@ func requestPrincipalsPtr[T any](request T, name string) *zulip.Principals {
 	return (*zulip.Principals)(unsafe.Pointer(field.Pointer()))
 }
 
+func requestGroupSettingValuePtr[T any](request T, name string) *zulip.GroupSettingValue {
+	v := reflect.ValueOf(request)
+	field := v.FieldByName(name)
+	if field.IsNil() {
+		return nil
+	}
+	return (*zulip.GroupSettingValue)(unsafe.Pointer(field.Pointer()))
+}
+
 func requestSubscriptionsPtr(request channels.SubscribeRequest) *[]channels.SubscriptionRequest {
 	v := reflect.ValueOf(request)
 	field := v.FieldByName("subscriptions")
@@ -618,15 +636,29 @@ func (c Client) CreateUserGroupExecute(r users.CreateUserGroupRequest) (*users.C
 	id := state.nextUserGroupID
 	state.nextUserGroupID++
 	state.userGroups[id] = userGroupState{group: zulip.UserGroup{
-		ID:                id,
-		Name:              name,
-		Description:       description,
-		Members:           members,
-		DirectSubgroupIDs: subgroups,
+		ID:                    id,
+		Name:                  name,
+		Description:           description,
+		Members:               members,
+		DirectSubgroupIDs:     subgroups,
+		CanAddMembersGroup:    requestGroupSettingValue(r, "canAddMembersGroup"),
+		CanJoinGroup:          requestGroupSettingValue(r, "canJoinGroup"),
+		CanLeaveGroup:         requestGroupSettingValue(r, "canLeaveGroup"),
+		CanManageGroup:        requestGroupSettingValue(r, "canManageGroup"),
+		CanMentionGroup:       requestGroupSettingValue(r, "canMentionGroup"),
+		CanRemoveMembersGroup: requestGroupSettingValue(r, "canRemoveMembersGroup"),
 	}}
 
 	return &users.CreateUserGroupResponse{Response: successResponse(), GroupID: id}, nil, nil
 }
+
+func requestGroupSettingValue(r users.CreateUserGroupRequest, name string) zulip.GroupSettingValue {
+	if value := requestGroupSettingValuePtr(r, name); value != nil {
+		return *value
+	}
+	return zulip.GroupSettingValue{}
+}
+
 func (Client) DeactivateCustomEmoji(_arg0 context.Context, _arg1 string) serverandorganizations.DeactivateCustomEmojiRequest {
 	return withAPIService(serverandorganizations.DeactivateCustomEmojiRequest{}, Client{})
 }
@@ -999,11 +1031,34 @@ func (Client) GetSubscriptionStatus(_arg0 context.Context, _arg1 int64, _arg2 in
 func (Client) GetSubscriptionStatusExecute(_arg0 channels.GetSubscriptionStatusRequest) (*channels.GetSubscriptionStatusResponse, *http.Response, error) {
 	return nil, nil, nil
 }
-func (Client) GetSubscriptions(_arg0 context.Context) channels.GetSubscriptionsRequest {
-	return withAPIService(channels.GetSubscriptionsRequest{}, Client{})
+func (c Client) GetSubscriptions(ctx context.Context) channels.GetSubscriptionsRequest {
+	return withContext(withAPIService(channels.GetSubscriptionsRequest{}, c), ctx)
 }
-func (Client) GetSubscriptionsExecute(_arg0 channels.GetSubscriptionsRequest) (*channels.GetSubscriptionsResponse, *http.Response, error) {
-	return nil, nil, nil
+func (c Client) GetSubscriptionsExecute(r channels.GetSubscriptionsRequest) (*channels.GetSubscriptionsResponse, *http.Response, error) {
+	state := c.ensureState()
+	if err := state.waitForTurn(requestContext(r), OperationGetSubscriptions, ""); err != nil {
+		return nil, nil, err
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if err := state.failLocked(OperationGetSubscriptions); err != nil {
+		return nil, nil, err
+	}
+
+	subscriptions := make([]zulip.Subscription, 0, len(state.channels))
+	for _, channel := range state.channels {
+		if !channel.subscribers[0] {
+			continue
+		}
+		subscriptions = append(subscriptions, zulip.Subscription{Channel: channel.channel})
+	}
+	sort.Slice(subscriptions, func(i, j int) bool {
+		return subscriptions[i].ChannelID < subscriptions[j].ChannelID
+	})
+	return &channels.GetSubscriptionsResponse{
+		Response:      successResponse(),
+		Subscriptions: subscriptions,
+	}, nil, nil
 }
 func (Client) GetUser(_arg0 context.Context, _arg1 int64) users.GetUserRequest {
 	return withAPIService(users.GetUserRequest{}, Client{})

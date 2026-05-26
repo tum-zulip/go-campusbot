@@ -348,6 +348,10 @@ linters:
         text: 'should not use dot imports'
         linters:
           - revive
+      - path: '_test\.go'
+        text: 'context-as-argument: context\.Context should be the first parameter of a function'
+        linters:
+          - revive
       # Ignore w.Write errors in test HTTP handlers - test helpers don't need error checks
       - path: '_test\.go'
         text: 'Error return value of `w\.Write` is not checked'

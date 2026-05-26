@@ -11,6 +11,10 @@ SELECT *
 FROM channel_groups
 WHERE id = ?;
 
+-- name: DeleteChannelGroup :exec
+DELETE FROM channel_groups
+WHERE id = ?;
+
 -- name: ListChannelGroups :many
 SELECT *
 FROM channel_groups

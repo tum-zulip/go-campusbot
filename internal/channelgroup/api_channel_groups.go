@@ -12,6 +12,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"log/slog"
 	"net/http"
 	"sort"
 	"strconv"
@@ -47,10 +48,40 @@ type channelGroupClient struct {
 	APIChannelGroups
 }
 
+type ClientOption func(*channelGroups)
+
+// WithLogger configures structured logging for channel-group operations.
+func WithLogger(logger *slog.Logger) ClientOption {
+	return func(s *channelGroups) {
+		if logger != nil {
+			s.logger = logger
+		}
+	}
+}
+
 // NewClient wraps an existing upstream client.Client with channel-group
 // endpoints backed by database. The wrapper does not own either lifecycle.
-func NewClient(base client.Client, database *sql.DB) Client {
-	service := newChannelGroups(base, database)
+func NewClient(base client.Client, database *sql.DB, opts ...ClientOption) Client {
+	service := newChannelGroups(base, database, opts...)
+	return newClientWithService(base, service)
+}
+
+// NewInitializedClient wraps an upstream client and reconciles persisted
+// channel-group metadata against Zulip state before returning it.
+func NewInitializedClient(
+	ctx context.Context,
+	base client.Client,
+	database *sql.DB,
+	opts ...ClientOption,
+) (Client, error) {
+	service := newChannelGroups(base, database, opts...)
+	if err := service.InitializeChannelGroups(ctx); err != nil {
+		return nil, err
+	}
+	return newClientWithService(base, service), nil
+}
+
+func newClientWithService(base client.Client, service APIChannelGroups) Client {
 	return &channelGroupClient{
 		Client:           base,
 		APIChannelGroups: service,
@@ -60,16 +91,75 @@ func NewClient(base client.Client, database *sql.DB) Client {
 type channelGroups struct {
 	base    client.Client
 	queries *channelgroupdb.Queries
+	logger  *slog.Logger
 }
 
-func newChannelGroups(base client.Client, database *sql.DB) *channelGroups {
-	return &channelGroups{
+func newChannelGroups(base client.Client, database *sql.DB, opts ...ClientOption) *channelGroups {
+	service := &channelGroups{
 		base:    base,
 		queries: channelgroupdb.New(database),
+		logger:  slog.Default(),
 	}
+	for _, opt := range opts {
+		opt(service)
+	}
+	return service
 }
 
 var _ APIChannelGroups = (*channelGroups)(nil)
+
+const zulipAdministratorsSystemGroupID int64 = 2
+
+func (s *channelGroups) InitializeChannelGroups(ctx context.Context) error {
+	groups, err := s.getGroups(ctx)
+	if err != nil {
+		return err
+	}
+	if len(groups) == 0 {
+		return nil
+	}
+
+	userGroups, err := s.userGroupsByID(ctx)
+	if err != nil {
+		return err
+	}
+	subscribedChannelIDs, err := s.subscribedChannelIDs(ctx)
+	if err != nil {
+		return err
+	}
+
+	for _, group := range groups {
+		userGroup, ok := userGroups[group.ID]
+		if !ok || userGroup.Deactivated {
+			if err = s.queries.DeleteChannelGroup(ctx, group.ID); err != nil {
+				return err
+			}
+			s.logger.InfoContext(ctx, "removed channel group with missing or deactivated user group",
+				"channel_group_id", group.ID,
+				"user_group_exists", ok,
+			)
+			continue
+		}
+
+		for _, channelID := range group.ChannelIDs {
+			if _, ok = subscribedChannelIDs[channelID]; ok {
+				continue
+			}
+			if err = s.queries.RemoveChannelGroupChannel(ctx, channelgroupdb.RemoveChannelGroupChannelParams{
+				ChannelGroupID: group.ID,
+				ChannelID:      channelID,
+			}); err != nil {
+				return err
+			}
+			s.logger.InfoContext(ctx, "removed stale channel from channel group",
+				"channel_group_id", group.ID,
+				"channel_id", channelID,
+			)
+		}
+	}
+
+	return nil
+}
 
 func (s *channelGroups) CreateChannelGroup(ctx context.Context) CreateChannelGroupRequest {
 	return CreateChannelGroupRequest{ctx: ctx, apiService: s}
@@ -100,6 +190,12 @@ func (s *channelGroups) CreateChannelGroupExecute(
 		Name(group.Name).
 		Description("").
 		Members(initialMembers).
+		CanAddMembersGroup(administratorsOnlyGroupSetting()).
+		CanJoinGroup(administratorsOnlyGroupSetting()).
+		CanLeaveGroup(administratorsOnlyGroupSetting()).
+		CanManageGroup(administratorsOnlyGroupSetting()).
+		CanMentionGroup(administratorsOnlyGroupSetting()).
+		CanRemoveMembersGroup(administratorsOnlyGroupSetting()).
 		Execute()
 	if err != nil {
 		return nil, nil, err
@@ -125,6 +221,13 @@ func (s *channelGroups) CreateChannelGroupExecute(
 		}
 	}
 
+	s.logger.InfoContext(r.ctx, "created channel group",
+		"channel_group_id", dbGroupID,
+		"user_group_id", group.ID,
+		"name", group.Name,
+		"channel_count", len(group.ChannelIDs),
+		"subscriber_count", len(initialMembers),
+	)
 	return &CreateChannelGroupResponse{
 		Response:       successResponse(),
 		ChannelGroupID: dbGroupID,
@@ -251,17 +354,9 @@ func (s *channelGroups) UpdateChannelGroupChannelsExecute(
 			return nil, nil, err
 		}
 	}
-	if len(deleted) > 0 && len(members) > 0 {
-		if err = s.unsubscribeUsersFromChannels(r.ctx, deleted, members); err != nil {
-			return nil, nil, err
-		}
-	}
 
 	finalState, err := s.updateGroupChannels(r.ctx, r.channelGroupID, r.addChannelIDs, r.deleteChannelIDs)
 	if err != nil {
-		return nil, nil, err
-	}
-	if err = s.cleanupDeletedChannels(r.ctx, deleted, members, finalState.ChannelIDs); err != nil {
 		return nil, nil, err
 	}
 	if err = s.cleanupAddedChannels(r.ctx, added, members, group.ID, finalState.ChannelIDs); err != nil {
@@ -271,6 +366,14 @@ func (s *channelGroups) UpdateChannelGroupChannelsExecute(
 		return nil, nil, err
 	}
 
+	s.logger.InfoContext(r.ctx, "updated channel group channels",
+		"channel_group_id", r.channelGroupID,
+		"user_group_id", group.ID,
+		"added_channel_ids", added,
+		"deleted_channel_ids", deleted,
+		"channel_count", len(finalState.ChannelIDs),
+		"subscriber_count", len(members),
+	)
 	return ptrResponse(successResponse()), nil, nil
 }
 
@@ -362,16 +465,6 @@ func (s *channelGroups) SubscribeToChannelGroupExecute(
 		_ = s.unsubscribeUsersFromChannels(r.ctx, group.ChannelIDs, userIDs)
 		return nil, nil, err
 	}
-	finalState, err := s.getGroup(r.ctx, r.channelGroupID)
-	if err != nil {
-		return nil, nil, err
-	}
-	staleChannels := removeInt64s(group.ChannelIDs, finalState.ChannelIDs)
-	if len(staleChannels) > 0 {
-		if err = s.unsubscribeUsersFromChannels(r.ctx, staleChannels, userIDs); err != nil {
-			return nil, nil, err
-		}
-	}
 	if err = s.reconcileChannelGroup(r.ctx, r.channelGroupID); err != nil {
 		return nil, nil, err
 	}
@@ -379,13 +472,13 @@ func (s *channelGroups) SubscribeToChannelGroupExecute(
 	if err != nil {
 		return nil, nil, err
 	}
-	staleChannels = removeInt64s(group.ChannelIDs, latestState.ChannelIDs)
-	if len(staleChannels) > 0 {
-		if err = s.unsubscribeUsersFromChannels(r.ctx, staleChannels, userIDs); err != nil {
-			return nil, nil, err
-		}
-	}
 
+	s.logger.InfoContext(r.ctx, "subscribed users to channel group",
+		"channel_group_id", r.channelGroupID,
+		"user_group_id", group.ID,
+		"user_ids", userIDs,
+		"channel_count", len(latestState.ChannelIDs),
+	)
 	return &SubscribeToChannelGroupResponse{
 		Response: successResponse(),
 	}, nil, nil
@@ -431,11 +524,22 @@ func (s *channelGroups) UnsubscribeFromChannelGroupExecute(
 	}
 	addedWhileUnsubscribing := removeInt64s(finalState.ChannelIDs, group.ChannelIDs)
 	if len(addedWhileUnsubscribing) > 0 {
+		s.logger.DebugContext(r.ctx, "removing unsubscribed users from channels added concurrently",
+			"channel_group_id", r.channelGroupID,
+			"channel_ids", addedWhileUnsubscribing,
+			"user_ids", userIDs,
+		)
 		if err = s.unsubscribeUsersFromChannels(r.ctx, addedWhileUnsubscribing, userIDs); err != nil {
 			return nil, nil, err
 		}
 	}
 
+	s.logger.InfoContext(r.ctx, "unsubscribed users from channel group",
+		"channel_group_id", r.channelGroupID,
+		"user_group_id", group.ID,
+		"user_ids", userIDs,
+		"channel_count", len(finalState.ChannelIDs),
+	)
 	return &UnsubscribeFromChannelGroupResponse{
 		Response: successResponse(),
 	}, nil, nil
@@ -506,19 +610,6 @@ func (s *channelGroups) updateGroupChannels(
 	return s.getGroup(ctx, channelGroupID)
 }
 
-func (s *channelGroups) cleanupDeletedChannels(
-	ctx context.Context,
-	deletedChannelIDs []int64,
-	userIDs []int64,
-	currentChannelIDs []int64,
-) error {
-	channelsToClean := removeInt64s(uniqueInt64s(deletedChannelIDs), currentChannelIDs)
-	if len(channelsToClean) == 0 || len(userIDs) == 0 {
-		return nil
-	}
-	return s.unsubscribeUsersFromChannels(ctx, channelsToClean, userIDs)
-}
-
 func (s *channelGroups) cleanupAddedChannels(
 	ctx context.Context,
 	addedChannelIDs []int64,
@@ -538,6 +629,10 @@ func (s *channelGroups) cleanupAddedChannels(
 	if len(staleUserIDs) == 0 {
 		return nil
 	}
+	s.logger.DebugContext(ctx, "cleaning channels added during channel group membership change",
+		"channel_ids", channelsToClean,
+		"user_ids", staleUserIDs,
+	)
 	return s.unsubscribeUsersFromChannels(ctx, channelsToClean, staleUserIDs)
 }
 
@@ -556,6 +651,12 @@ func (s *channelGroups) reconcileChannelGroup(ctx context.Context, channelGroupI
 	if len(members) == 0 {
 		return nil
 	}
+	s.logger.DebugContext(ctx, "reconciling channel group subscriptions",
+		"channel_group_id", channelGroupID,
+		"user_group_id", group.ID,
+		"channel_count", len(group.ChannelIDs),
+		"subscriber_count", len(members),
+	)
 	return s.subscribeUsersToChannels(ctx, group.ChannelIDs, members)
 }
 
@@ -638,6 +739,30 @@ func (s *channelGroups) userGroupMembers(ctx context.Context, userGroupID int64)
 	return uniqueInt64s(resp.Members), nil
 }
 
+func (s *channelGroups) userGroupsByID(ctx context.Context) (map[int64]zulip.UserGroup, error) {
+	resp, _, err := s.base.GetUserGroups(ctx).IncludeDeactivatedGroups(false).Execute()
+	if err != nil {
+		return nil, err
+	}
+	groups := make(map[int64]zulip.UserGroup, len(resp.UserGroups))
+	for _, group := range resp.UserGroups {
+		groups[group.ID] = group
+	}
+	return groups, nil
+}
+
+func (s *channelGroups) subscribedChannelIDs(ctx context.Context) (map[int64]struct{}, error) {
+	resp, _, err := s.base.GetSubscriptions(ctx).Execute()
+	if err != nil {
+		return nil, err
+	}
+	channelIDs := make(map[int64]struct{}, len(resp.Subscriptions))
+	for _, subscription := range resp.Subscriptions {
+		channelIDs[subscription.ChannelID] = struct{}{}
+	}
+	return channelIDs, nil
+}
+
 func (s *channelGroups) withUserGroupName(ctx context.Context, group ChannelGroup) (ChannelGroup, error) {
 	groups, err := s.withUserGroupNames(ctx, []ChannelGroup{group})
 	if err != nil {
@@ -680,6 +805,11 @@ func channelGroupFromDB(id int64, channelIDs []int64) ChannelGroup {
 
 func successResponse() zulip.Response {
 	return zulip.Response{Result: zulip.ResponseSuccess}
+}
+
+func administratorsOnlyGroupSetting() zulip.GroupSettingValue {
+	groupID := zulipAdministratorsSystemGroupID
+	return zulip.GroupSettingValue{GroupID: &groupID}
 }
 
 func ptrResponse(r zulip.Response) *zulip.Response {
@@ -775,6 +905,11 @@ func containsInt64(values []int64, needle int64) bool {
 // service. Method shape (Builder / Execute split, context on the
 // constructor) matches the upstream go-zulip conventions.
 type APIChannelGroups interface {
+	// InitializeChannelGroups reconciles persisted channel groups against
+	// Zulip state at startup. It removes stale metadata only; it does not
+	// unsubscribe users from channels.
+	InitializeChannelGroups(ctx context.Context) error
+
 	// CreateChannelGroup creates a new channel group, optionally
 	// pre-populated with channels and initial subscribers.
 	CreateChannelGroup(ctx context.Context) CreateChannelGroupRequest
