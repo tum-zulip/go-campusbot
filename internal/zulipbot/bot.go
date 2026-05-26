@@ -198,15 +198,12 @@ func NewBot(
 		return nil, err
 	}
 	if err := bot.registry.Register(handlers.NewGroupHandler(
-		groupService,
-		groupService,
-		repo,
+		channelGroupClient,
 		repo,
 		announcementManager,
-		repo,
 		groupConfigReader,
 		bot,
-	).WithChannelManager(groupService)); err != nil {
+	)); err != nil {
 		return nil, err
 	}
 

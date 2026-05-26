@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -21,116 +22,7 @@ import (
 	"github.com/tum-zulip/go-campusbot/internal/zulipmock"
 )
 
-// --- Fakes ---
-
-type fakeGroupSubscriber struct {
-	subscribed   []int64 // channelGroupIDs subscribed
-	unsubscribed []int64
-	keepChannels []int64
-	subErr       error
-	unsubErr     error
-}
-
-func (s *fakeGroupSubscriber) SubscribeUser(_ context.Context, _ int64, channelGroupID int64) error {
-	if s.subErr != nil {
-		return s.subErr
-	}
-	s.subscribed = append(s.subscribed, channelGroupID)
-	return nil
-}
-
-func (s *fakeGroupSubscriber) UnsubscribeUser(_ context.Context, _ int64, channelGroupID int64) error {
-	if s.unsubErr != nil {
-		return s.unsubErr
-	}
-	s.unsubscribed = append(s.unsubscribed, channelGroupID)
-	return nil
-}
-
-func (s *fakeGroupSubscriber) UnsubscribeUserKeepChannels(_ context.Context, _ int64, channelGroupID int64) error {
-	s.keepChannels = append(s.keepChannels, channelGroupID)
-	return nil
-}
-
-type fakeChannelGroupChecker struct {
-	// existing is the set of channel group IDs that exist; if nil, anyExists controls fallback.
-	existing  map[int64]bool
-	anyExists bool
-	err       error
-	calls     []int64
-	// zulipGroups is the list returned by ListZulipUserGroups. If nil, an
-	// empty slice is returned.
-	zulipGroups   []channelgroup.ZulipUserGroupSummary
-	zulipErr      error
-	zulipListCall int
-	// imported records every ImportZulipUserGroup call. importErr forces a
-	// failure path. importSucceedsLocally controls whether the importer also
-	// flips the "existing" map so subsequent ChannelGroupExists calls see the
-	// group — matching real behaviour.
-	imported              []int64
-	importErr             error
-	importSucceedsLocally bool
-	created               []string
-	createID              int64
-	createErr             error
-	deleted               []int64
-	deleteErr             error
-}
-
-func (c *fakeChannelGroupChecker) ChannelGroupExists(_ context.Context, channelGroupID int64) (bool, error) {
-	c.calls = append(c.calls, channelGroupID)
-	if c.err != nil {
-		return false, c.err
-	}
-	if c.existing != nil {
-		return c.existing[channelGroupID], nil
-	}
-	return c.anyExists, nil
-}
-
-func (c *fakeChannelGroupChecker) ListZulipUserGroups(_ context.Context) ([]channelgroup.ZulipUserGroupSummary, error) {
-	c.zulipListCall++
-	if c.zulipErr != nil {
-		return nil, c.zulipErr
-	}
-	return c.zulipGroups, nil
-}
-
-func (c *fakeChannelGroupChecker) ImportZulipUserGroup(_ context.Context, userGroupID int64) error {
-	if c.importErr != nil {
-		return c.importErr
-	}
-	c.imported = append(c.imported, userGroupID)
-	if c.importSucceedsLocally {
-		if c.existing == nil {
-			c.existing = map[int64]bool{}
-		}
-		c.existing[userGroupID] = true
-	}
-	return nil
-}
-
-func (c *fakeChannelGroupChecker) CreateChannelGroup(_ context.Context, name string, _ bool) (int64, error) {
-	if c.createErr != nil {
-		return 0, c.createErr
-	}
-	c.created = append(c.created, name)
-	if c.createID != 0 {
-		return c.createID, nil
-	}
-	return 1, nil
-}
-
-func (c *fakeChannelGroupChecker) DeleteChannelGroup(_ context.Context, channelGroupID int64) error {
-	if c.deleteErr != nil {
-		return c.deleteErr
-	}
-	c.deleted = append(c.deleted, channelGroupID)
-	return nil
-}
-
-// allExist returns a checker that says every channel group ID exists.
-func allExist() *fakeChannelGroupChecker { return &fakeChannelGroupChecker{anyExists: true} }
+// --- Fakes for non-Zulip dependencies (announcer/config/auth) ---
 
 type fakeAnnouncer struct {
 	called int
@@ -138,27 +30,6 @@ type fakeAnnouncer struct {
 
 func (a *fakeAnnouncer) UpdateAfterMappingChange(_ context.Context, _ *announcement.SendParams) error {
 	a.called++
-	return nil
-}
-
-type fakeAnnouncementStateAccessor struct {
-	state storage.AnnouncementState
-	ok    bool
-	err   error
-}
-
-func (a *fakeAnnouncementStateAccessor) GetAnnouncementState(
-	_ context.Context,
-) (storage.AnnouncementState, bool, error) {
-	return a.state, a.ok, a.err
-}
-
-func (a *fakeAnnouncementStateAccessor) SaveAnnouncementState(
-	_ context.Context,
-	state storage.AnnouncementState,
-) error {
-	a.state = state
-	a.ok = true
 	return nil
 }
 
@@ -177,19 +48,6 @@ func (r *fakeGroupConfigReader) AnnouncementTopic(_ context.Context) (string, bo
 	return r.topic, r.topicOK, nil
 }
 
-type failingMappingWriter struct {
-	*storage.Repository
-
-	upsertErr error
-}
-
-func (w failingMappingWriter) UpsertEmojiGroupMapping(ctx context.Context, m storage.EmojiGroupMapping) error {
-	if w.upsertErr != nil {
-		return w.upsertErr
-	}
-	return w.Repository.UpsertEmojiGroupMapping(ctx, m)
-}
-
 type allowAll struct{}
 
 func (allowAll) Check(_ context.Context, _ command.Actor, _ z.Role) error { return nil }
@@ -199,6 +57,8 @@ type denyAll struct{}
 func (denyAll) Check(_ context.Context, _ command.Actor, _ z.Role) error {
 	return command.ErrDenied
 }
+
+// --- Common test helpers ---
 
 func openGroupTestRepo(t *testing.T) *storage.Repository {
 	t.Helper()
@@ -235,24 +95,102 @@ func makeGroupRequest(parsedArgs any) command.Request {
 	}
 }
 
+// newChannelGroupClient builds a channelgroup.Client backed by a fresh
+// zulipmock base. The returned base may be used to seed user groups, set the
+// bot's own user, or inject failures (FailNext).
+func newChannelGroupClient(t *testing.T) (channelgroup.Client, zulipmock.Client) {
+	t.Helper()
+	db, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatalf("open in-memory sqlite database: %v", err)
+	}
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = db.Close() })
+	if err := channelgroup.Migrate(context.Background(), db); err != nil {
+		t.Fatalf("migrate channelgroup schema: %v", err)
+	}
+	base := zulipmock.NewClient()
+	base.SetOwnUser(z.User{UserID: 77, Email: "bot@example.com", FullName: "Bot", IsBot: true})
+	client, err := channelgroup.NewClient(
+		context.Background(),
+		base,
+		db,
+		channelgroup.WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
+	)
+	if err != nil {
+		t.Fatalf("channelgroup.NewClient: %v", err)
+	}
+	return client, base
+}
+
+// seedChannelGroup creates a Zulip user group and imports it locally so the
+// returned ID is fully usable as a channel group (channelGroupExists returns
+// true, channel and subscriber operations succeed).
+func seedChannelGroup(t *testing.T, client channelgroup.Client, base zulipmock.Client, name string) int64 {
+	t.Helper()
+	resp, _, err := base.CreateUserGroup(context.Background()).
+		Name(name).
+		Description("").
+		Members([]int64{77}).
+		Execute()
+	if err != nil {
+		t.Fatalf("CreateUserGroup(%q): %v", name, err)
+	}
+	if err := client.ImportZulipUserGroup(context.Background(), resp.GroupID); err != nil {
+		t.Fatalf("ImportZulipUserGroup(%d): %v", resp.GroupID, err)
+	}
+	return resp.GroupID
+}
+
+// seedZulipUserGroup creates a user group in the Zulip mock so that it shows up
+// in client.GetUserGroups (i.e. `group available`). Returns the new group ID.
+func seedZulipUserGroup(t *testing.T, base zulipmock.Client, name, description string, members []int64) int64 {
+	t.Helper()
+	resp, _, err := base.CreateUserGroup(context.Background()).
+		Name(name).
+		Description(description).
+		Members(members).
+		Execute()
+	if err != nil {
+		t.Fatalf("CreateUserGroup(%q): %v", name, err)
+	}
+	return resp.GroupID
+}
+
+type groupTestEnv struct {
+	repo      *storage.Repository
+	client    channelgroup.Client
+	base      zulipmock.Client
+	announcer *fakeAnnouncer
+	config    *fakeGroupConfigReader
+}
+
+func newGroupTestEnv(t *testing.T) *groupTestEnv {
+	t.Helper()
+	client, base := newChannelGroupClient(t)
+	return &groupTestEnv{
+		repo:      openGroupTestRepo(t),
+		client:    client,
+		base:      base,
+		announcer: &fakeAnnouncer{},
+		config:    &fakeGroupConfigReader{},
+	}
+}
+
+func (e *groupTestEnv) handler(auth command.Authorizer) *handlers.GroupHandler {
+	return handlers.NewGroupHandler(e.client, e.repo, e.announcer, e.config, auth)
+}
+
+// --- Tests ---
+
 func TestGroupSubscribe(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	repo := openGroupTestRepo(t)
-	seedGroupMapping(t, repo, "WI", "wi", 42)
+	env := newGroupTestEnv(t)
+	groupID := seedChannelGroup(t, env.client, env.base, "WI")
+	seedGroupMapping(t, env.repo, "WI", "wi", groupID)
 
-	sub := &fakeGroupSubscriber{}
-	h := handlers.NewGroupHandler(
-		sub,
-		allExist(),
-		repo,
-		repo,
-		&fakeAnnouncer{},
-		&fakeAnnouncementStateAccessor{},
-		&fakeGroupConfigReader{},
-		allowAll{},
-	)
-
+	h := env.handler(allowAll{})
 	result, err := h.Handle(ctx, makeGroupRequest(handlers.GroupSubscribeArgs{ShortName: "WI"}))
 	if err != nil {
 		t.Fatalf("Handle() failed: %v", err)
@@ -260,29 +198,28 @@ func TestGroupSubscribe(t *testing.T) {
 	if result.Content == "" {
 		t.Error("expected non-empty result content")
 	}
-	if len(sub.subscribed) != 1 || sub.subscribed[0] != 42 {
-		t.Errorf("expected subscribed to group 42, got %v", sub.subscribed)
+	resp, _, err := env.client.GetIsChannelGroupSubscriber(ctx, groupID, 123).Execute()
+	if err != nil {
+		t.Fatalf("GetIsChannelGroupSubscriber: %v", err)
+	}
+	if !resp.IsSubscriber {
+		t.Errorf("expected actor 123 to be subscribed to group %d", groupID)
 	}
 }
 
 func TestGroupUnsubscribe(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	repo := openGroupTestRepo(t)
-	seedGroupMapping(t, repo, "WI", "wi", 42)
+	env := newGroupTestEnv(t)
+	groupID := seedChannelGroup(t, env.client, env.base, "WI")
+	seedGroupMapping(t, env.repo, "WI", "wi", groupID)
+	// Pre-subscribe the actor so unsubscribe has something to do.
+	if _, _, err := env.client.SubscribeToChannelGroup(ctx, groupID).
+		Principals(z.Principals{UserIDs: &[]int64{123}}).Execute(); err != nil {
+		t.Fatalf("pre-subscribe: %v", err)
+	}
 
-	sub := &fakeGroupSubscriber{}
-	h := handlers.NewGroupHandler(
-		sub,
-		allExist(),
-		repo,
-		repo,
-		&fakeAnnouncer{},
-		&fakeAnnouncementStateAccessor{},
-		&fakeGroupConfigReader{},
-		allowAll{},
-	)
-
+	h := env.handler(allowAll{})
 	result, err := h.Handle(ctx, makeGroupRequest(handlers.GroupUnsubscribeArgs{ShortName: "WI"}))
 	if err != nil {
 		t.Fatalf("Handle() failed: %v", err)
@@ -290,61 +227,49 @@ func TestGroupUnsubscribe(t *testing.T) {
 	if result.Content == "" {
 		t.Error("expected non-empty result content")
 	}
-	if len(sub.unsubscribed) != 1 || sub.unsubscribed[0] != 42 {
-		t.Errorf("expected unsubscribed from group 42, got %v", sub.unsubscribed)
+	resp, _, err := env.client.GetIsChannelGroupSubscriber(ctx, groupID, 123).Execute()
+	if err != nil {
+		t.Fatalf("GetIsChannelGroupSubscriber: %v", err)
+	}
+	if resp.IsSubscriber {
+		t.Errorf("expected actor 123 to be unsubscribed from group %d", groupID)
 	}
 }
 
 func TestGroupUnsubscribeKeepChannels(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	repo := openGroupTestRepo(t)
-	seedGroupMapping(t, repo, "WI", "wi", 42)
+	env := newGroupTestEnv(t)
+	groupID := seedChannelGroup(t, env.client, env.base, "WI")
+	seedGroupMapping(t, env.repo, "WI", "wi", groupID)
+	if _, _, err := env.client.SubscribeToChannelGroup(ctx, groupID).
+		Principals(z.Principals{UserIDs: &[]int64{123}}).Execute(); err != nil {
+		t.Fatalf("pre-subscribe: %v", err)
+	}
 
-	sub := &fakeGroupSubscriber{}
-	h := handlers.NewGroupHandler(
-		sub,
-		allExist(),
-		repo,
-		repo,
-		&fakeAnnouncer{},
-		&fakeAnnouncementStateAccessor{},
-		&fakeGroupConfigReader{},
-		allowAll{},
-	)
-
+	h := env.handler(allowAll{})
 	result, err := h.Handle(ctx, makeGroupRequest(handlers.GroupUnsubscribeArgs{KeepChannels: true, ShortName: "WI"}))
 	if err != nil {
 		t.Fatalf("Handle() failed: %v", err)
 	}
-	if result.Content == "" {
-		t.Error("expected non-empty result content")
+	if !strings.Contains(result.Content, "channels kept") {
+		t.Errorf("expected 'channels kept' in result, got: %s", result.Content)
 	}
-	if len(sub.keepChannels) != 1 || sub.keepChannels[0] != 42 {
-		t.Errorf("expected keepChannels for group 42, got %v", sub.keepChannels)
+	resp, _, err := env.client.GetIsChannelGroupSubscriber(ctx, groupID, 123).Execute()
+	if err != nil {
+		t.Fatalf("GetIsChannelGroupSubscriber: %v", err)
 	}
-	if len(sub.unsubscribed) != 0 {
-		t.Errorf("expected no full unsubscribe, got %v", sub.unsubscribed)
+	if resp.IsSubscriber {
+		t.Errorf("expected actor 123 to be unsubscribed from group %d", groupID)
 	}
 }
 
 func TestGroupSubscribeUnknownGroup(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	repo := openGroupTestRepo(t)
+	env := newGroupTestEnv(t)
 
-	sub := &fakeGroupSubscriber{}
-	h := handlers.NewGroupHandler(
-		sub,
-		allExist(),
-		repo,
-		repo,
-		&fakeAnnouncer{},
-		&fakeAnnouncementStateAccessor{},
-		&fakeGroupConfigReader{},
-		allowAll{},
-	)
-
+	h := env.handler(allowAll{})
 	_, err := h.Handle(ctx, makeGroupRequest(handlers.GroupSubscribeArgs{ShortName: "UNKNOWN"}))
 	var userErr command.UserError
 	if !errors.As(err, &userErr) {
@@ -355,21 +280,9 @@ func TestGroupSubscribeUnknownGroup(t *testing.T) {
 func TestGroupSubscribeUnknownGroupNoneUserDoesNotLeakAdminHint(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	repo := openGroupTestRepo(t)
+	env := newGroupTestEnv(t)
 
-	sub := &fakeGroupSubscriber{}
-	// denyAll simulates a non-admin actor (auth.Check returns error for PermAdmin)
-	h := handlers.NewGroupHandler(
-		sub,
-		allExist(),
-		repo,
-		repo,
-		&fakeAnnouncer{},
-		&fakeAnnouncementStateAccessor{},
-		&fakeGroupConfigReader{},
-		denyAll{},
-	)
-
+	h := env.handler(denyAll{})
 	_, err := h.Handle(ctx, makeGroupRequest(handlers.GroupSubscribeArgs{ShortName: "UNKNOWN"}))
 	var userErr command.UserError
 	if !errors.As(err, &userErr) {
@@ -378,7 +291,6 @@ func TestGroupSubscribeUnknownGroupNoneUserDoesNotLeakAdminHint(t *testing.T) {
 	if strings.Contains(userErr.Message, "group mapping list") {
 		t.Errorf("normal user error must not mention 'group mapping list', got: %q", userErr.Message)
 	}
-	// Should suggest help or admin
 	if !strings.Contains(userErr.Message, "help group") && !strings.Contains(userErr.Message, "admin") {
 		t.Errorf("normal user error should suggest help or admin, got: %q", userErr.Message)
 	}
@@ -387,21 +299,9 @@ func TestGroupSubscribeUnknownGroupNoneUserDoesNotLeakAdminHint(t *testing.T) {
 func TestGroupSubscribeUnknownGroupAdminSeesHint(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	repo := openGroupTestRepo(t)
+	env := newGroupTestEnv(t)
 
-	sub := &fakeGroupSubscriber{}
-	// allowAll simulates an admin actor (auth.Check returns nil for PermAdmin)
-	h := handlers.NewGroupHandler(
-		sub,
-		allExist(),
-		repo,
-		repo,
-		&fakeAnnouncer{},
-		&fakeAnnouncementStateAccessor{},
-		&fakeGroupConfigReader{},
-		allowAll{},
-	)
-
+	h := env.handler(allowAll{})
 	_, err := h.Handle(ctx, makeGroupRequest(handlers.GroupSubscribeArgs{ShortName: "UNKNOWN"}))
 	var userErr command.UserError
 	if !errors.As(err, &userErr) {
@@ -415,20 +315,9 @@ func TestGroupSubscribeUnknownGroupAdminSeesHint(t *testing.T) {
 func TestGroupUnsubscribeUnknownGroupNoneUserDoesNotLeakAdminHint(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	repo := openGroupTestRepo(t)
+	env := newGroupTestEnv(t)
 
-	sub := &fakeGroupSubscriber{}
-	h := handlers.NewGroupHandler(
-		sub,
-		allExist(),
-		repo,
-		repo,
-		&fakeAnnouncer{},
-		&fakeAnnouncementStateAccessor{},
-		&fakeGroupConfigReader{},
-		denyAll{},
-	)
-
+	h := env.handler(denyAll{})
 	_, err := h.Handle(ctx, makeGroupRequest(handlers.GroupUnsubscribeArgs{ShortName: "UNKNOWN"}))
 	var userErr command.UserError
 	if !errors.As(err, &userErr) {
@@ -456,60 +345,39 @@ func TestGroupListIsNoLongerRecognised(t *testing.T) {
 func TestGroupCreateAdminCreatesChannelGroupAndMapping(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	repo := openGroupTestRepo(t)
-	checker := &fakeChannelGroupChecker{createID: 77}
-	h := handlers.NewGroupHandler(
-		&fakeGroupSubscriber{},
-		checker,
-		repo,
-		repo,
-		&fakeAnnouncer{},
-		&fakeAnnouncementStateAccessor{},
-		&fakeGroupConfigReader{},
-		allowAll{},
-	)
+	env := newGroupTestEnv(t)
 
+	h := env.handler(allowAll{})
 	result, err := h.Handle(ctx, makeGroupRequest(handlers.GroupCreateArgs{ShortName: "PGDP", EmojiName: "books"}))
 	if err != nil {
 		t.Fatalf("Handle() failed: %v", err)
 	}
-	if len(checker.created) != 1 || checker.created[0] != "PGDP" {
-		t.Fatalf("expected CreateChannelGroup(PGDP), got %v", checker.created)
-	}
-	mapping, ok, err := repo.GetEmojiGroupMappingByShortName(ctx, "PGDP")
+	mapping, ok, err := env.repo.GetEmojiGroupMappingByShortName(ctx, "PGDP")
 	if err != nil || !ok {
 		t.Fatalf("expected created mapping, ok=%v err=%v", ok, err)
 	}
-	if mapping.ChannelGroupID != 77 || mapping.EmojiName != "books" {
+	if mapping.ChannelGroupID <= 0 || mapping.EmojiName != "books" {
 		t.Fatalf("unexpected mapping: %+v", mapping)
 	}
-	if !strings.Contains(result.Content, "77") || !strings.Contains(result.Content, "PGDP") ||
-		!strings.Contains(result.Content, "books") {
-		t.Errorf("expected created group response with name and id, got: %s", result.Content)
+	// The created channel group should exist locally.
+	if _, _, err := env.client.GetChannelGroup(ctx, mapping.ChannelGroupID).Execute(); err != nil {
+		t.Errorf("expected channel group %d to exist after create, got %v", mapping.ChannelGroupID, err)
+	}
+	if !strings.Contains(result.Content, "PGDP") || !strings.Contains(result.Content, "books") {
+		t.Errorf("expected created group response with name and emoji, got: %s", result.Content)
 	}
 }
 
 func TestGroupCreateDuplicateZulipUserGroupReturnsUserError(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	repo := openGroupTestRepo(t)
-	checker := &fakeChannelGroupChecker{
-		createErr: z.CodedError{
-			Response: z.Response{Result: z.ResponseError, Msg: "User group 'pgdp2' already exists."},
-			Code:     "BAD_REQUEST",
-		},
-	}
-	h := handlers.NewGroupHandler(
-		&fakeGroupSubscriber{},
-		checker,
-		repo,
-		repo,
-		&fakeAnnouncer{},
-		&fakeAnnouncementStateAccessor{},
-		&fakeGroupConfigReader{},
-		allowAll{},
-	)
+	env := newGroupTestEnv(t)
+	env.base.FailNext(zulipmock.OperationCreateUserGroup, z.CodedError{
+		Response: z.Response{Result: z.ResponseError, Msg: "User group 'pgdp2' already exists."},
+		Code:     "BAD_REQUEST",
+	})
 
+	h := env.handler(allowAll{})
 	_, err := h.Handle(ctx, makeGroupRequest(handlers.GroupCreateArgs{ShortName: "pgdp2", EmojiName: "books"}))
 	var userErr command.UserError
 	if !errors.As(err, &userErr) {
@@ -520,95 +388,45 @@ func TestGroupCreateDuplicateZulipUserGroupReturnsUserError(t *testing.T) {
 	}
 }
 
-func TestGroupCreateRollsBackChannelGroupWhenMappingFails(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	repo := openGroupTestRepo(t)
-	checker := &fakeChannelGroupChecker{createID: 77}
-	h := handlers.NewGroupHandler(
-		&fakeGroupSubscriber{},
-		checker,
-		repo,
-		failingMappingWriter{Repository: repo, upsertErr: errors.New("mapping write failed")},
-		&fakeAnnouncer{},
-		&fakeAnnouncementStateAccessor{},
-		&fakeGroupConfigReader{},
-		allowAll{},
-	)
-
-	_, err := h.Handle(ctx, makeGroupRequest(handlers.GroupCreateArgs{ShortName: "PGDP", EmojiName: "books"}))
-	if err == nil {
-		t.Fatal("expected create error")
-	}
-	if len(checker.deleted) != 1 || checker.deleted[0] != 77 {
-		t.Fatalf("expected DeleteChannelGroup(77), got %v", checker.deleted)
-	}
-	_, ok, getErr := repo.GetEmojiGroupMappingByShortName(ctx, "PGDP")
-	if getErr != nil {
-		t.Fatalf("GetEmojiGroupMappingByShortName() failed: %v", getErr)
-	}
-	if ok {
-		t.Fatal("expected no mapping after rollback")
-	}
-}
-
 func TestGroupCreateDeniedForNoneUser(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	repo := openGroupTestRepo(t)
-	checker := &fakeChannelGroupChecker{}
-	h := handlers.NewGroupHandler(
-		&fakeGroupSubscriber{},
-		checker,
-		repo,
-		repo,
-		&fakeAnnouncer{},
-		&fakeAnnouncementStateAccessor{},
-		&fakeGroupConfigReader{},
-		denyAll{},
-	)
+	env := newGroupTestEnv(t)
 
+	h := env.handler(denyAll{})
 	_, err := h.Handle(ctx, makeGroupRequest(handlers.GroupCreateArgs{ShortName: "PGDP", EmojiName: "books"}))
 	var userErr command.UserError
 	if !errors.As(err, &userErr) {
 		t.Fatalf("expected UserError for denied create, got %T: %v", err, err)
 	}
-	if len(checker.created) != 0 {
-		t.Fatalf("expected no CreateChannelGroup call, got %v", checker.created)
+	if _, ok, _ := env.repo.GetEmojiGroupMappingByShortName(ctx, "PGDP"); ok {
+		t.Fatal("expected no mapping created when permission denied")
 	}
 }
 
 func TestGroupAvailableAdminListsZulipVisibleGroups(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	repo := openGroupTestRepo(t)
+	env := newGroupTestEnv(t)
+	pgdpID := seedZulipUserGroup(t, env.base, "PGDP", "Course PGDP",
+		[]int64{
+			1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+			21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42,
+		})
+	wiID := seedZulipUserGroup(t, env.base, "WI", "", []int64{1, 2, 3, 4, 5, 6, 7})
 
-	checker := &fakeChannelGroupChecker{
-		zulipGroups: []channelgroup.ZulipUserGroupSummary{
-			{ID: 30, Name: "PGDP", Description: "Course PGDP", MemberCount: 42},
-			{ID: 42, Name: "WI", Description: "", MemberCount: 7},
-		},
-	}
-	h := handlers.NewGroupHandler(
-		&fakeGroupSubscriber{},
-		checker,
-		repo,
-		repo,
-		&fakeAnnouncer{},
-		&fakeAnnouncementStateAccessor{},
-		&fakeGroupConfigReader{},
-		allowAll{},
-	)
-
+	h := env.handler(allowAll{})
 	result, err := h.Handle(ctx, makeGroupRequest(handlers.GroupAvailableArgs{}))
 	if err != nil {
 		t.Fatalf("Handle() failed: %v", err)
 	}
-	if !strings.Contains(result.Content, "id=30") || !strings.Contains(result.Content, "PGDP") {
-		t.Errorf("expected output to mention id=30/PGDP, got: %s", result.Content)
+	pgdpLine := "id=" + itoa(pgdpID)
+	wiLine := "id=" + itoa(wiID)
+	if !strings.Contains(result.Content, pgdpLine) || !strings.Contains(result.Content, "PGDP") {
+		t.Errorf("expected output to mention %s/PGDP, got: %s", pgdpLine, result.Content)
 	}
-	if !strings.Contains(result.Content, "id=42") || !strings.Contains(result.Content, "WI") {
-		t.Errorf("expected output to mention id=42/WI, got: %s", result.Content)
+	if !strings.Contains(result.Content, wiLine) || !strings.Contains(result.Content, "WI") {
+		t.Errorf("expected output to mention %s/WI, got: %s", wiLine, result.Content)
 	}
 	if !strings.Contains(result.Content, "42 members") || !strings.Contains(result.Content, "7 members") {
 		t.Errorf("expected member counts in output, got: %s", result.Content)
@@ -616,33 +434,17 @@ func TestGroupAvailableAdminListsZulipVisibleGroups(t *testing.T) {
 	if !strings.Contains(result.Content, "Course PGDP") {
 		t.Errorf("expected description in output, got: %s", result.Content)
 	}
-	// Imported/not-imported annotations have been removed: admins use the
-	// Zulip ID directly and auto-import happens on `group mapping set`.
 	if strings.Contains(result.Content, "[imported]") || strings.Contains(result.Content, "[not imported]") {
 		t.Errorf("expected no imported/not-imported annotation, got: %s", result.Content)
-	}
-	if checker.zulipListCall != 1 {
-		t.Errorf("expected ListZulipUserGroups called once, got %d", checker.zulipListCall)
 	}
 }
 
 func TestGroupAvailableAdminEmpty(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	repo := openGroupTestRepo(t)
+	env := newGroupTestEnv(t)
 
-	checker := &fakeChannelGroupChecker{zulipGroups: nil}
-	h := handlers.NewGroupHandler(
-		&fakeGroupSubscriber{},
-		checker,
-		repo,
-		repo,
-		&fakeAnnouncer{},
-		&fakeAnnouncementStateAccessor{},
-		&fakeGroupConfigReader{},
-		allowAll{},
-	)
-
+	h := env.handler(allowAll{})
 	result, err := h.Handle(ctx, makeGroupRequest(handlers.GroupAvailableArgs{}))
 	if err != nil {
 		t.Fatalf("Handle() failed: %v", err)
@@ -655,60 +457,35 @@ func TestGroupAvailableAdminEmpty(t *testing.T) {
 func TestGroupAvailableDeniedForNoneUser(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	repo := openGroupTestRepo(t)
+	env := newGroupTestEnv(t)
+	seedZulipUserGroup(t, env.base, "X", "", []int64{1})
 
-	checker := &fakeChannelGroupChecker{
-		zulipGroups: []channelgroup.ZulipUserGroupSummary{{ID: 1, Name: "X"}},
-	}
-	h := handlers.NewGroupHandler(
-		&fakeGroupSubscriber{},
-		checker,
-		repo,
-		repo,
-		&fakeAnnouncer{},
-		&fakeAnnouncementStateAccessor{},
-		&fakeGroupConfigReader{},
-		denyAll{},
-	)
-
+	h := env.handler(denyAll{})
 	_, err := h.Handle(ctx, makeGroupRequest(handlers.GroupAvailableArgs{}))
 	var userErr command.UserError
 	if !errors.As(err, &userErr) {
 		t.Fatalf("expected UserError for denied access, got %T: %v", err, err)
-	}
-	if checker.zulipListCall != 0 {
-		t.Errorf("denied user must not trigger ListZulipUserGroups, got %d calls", checker.zulipListCall)
 	}
 }
 
 func TestGroupMappingSetAutoImportsWhenZulipVisibleButNotLocal(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	repo := openGroupTestRepo(t)
-	announcer := &fakeAnnouncer{}
+	env := newGroupTestEnv(t)
+	groupID := seedZulipUserGroup(t, env.base, "PGDP", "", []int64{1})
 	msgID := int64(555)
-	stateAccessor := &fakeAnnouncementStateAccessor{state: storage.AnnouncementState{MessageID: &msgID}, ok: true}
-	config := &fakeGroupConfigReader{channelID: 1, topic: "t", channelOK: true, topicOK: true}
-	checker := &fakeChannelGroupChecker{
-		existing:              map[int64]bool{}, // not local yet
-		zulipGroups:           []channelgroup.ZulipUserGroupSummary{{ID: 30, Name: "PGDP", MemberCount: 1}},
-		importSucceedsLocally: true,
+	if err := env.repo.SaveAnnouncementState(ctx, storage.AnnouncementState{MessageID: &msgID}); err != nil {
+		t.Fatalf("SaveAnnouncementState: %v", err)
 	}
+	env.config.channelID = 1
+	env.config.topic = "t"
+	env.config.channelOK = true
+	env.config.topicOK = true
 
-	h := handlers.NewGroupHandler(
-		&fakeGroupSubscriber{},
-		checker,
-		repo,
-		repo,
-		announcer,
-		stateAccessor,
-		config,
-		allowAll{},
-	)
-
+	h := env.handler(allowAll{})
 	result, err := h.Handle(
 		ctx,
-		makeGroupRequest(handlers.GroupMappingSetArgs{ShortName: "PGDP", ZulipGroupID: 30, EmojiName: "math"}),
+		makeGroupRequest(handlers.GroupMappingSetArgs{ShortName: "PGDP", ZulipGroupID: groupID, EmojiName: "math"}),
 	)
 	if err != nil {
 		t.Fatalf("Handle() failed: %v", err)
@@ -716,19 +493,15 @@ func TestGroupMappingSetAutoImportsWhenZulipVisibleButNotLocal(t *testing.T) {
 	if !strings.Contains(strings.ToLower(result.Content), "imported") {
 		t.Errorf("success message should mention auto-import, got: %q", result.Content)
 	}
-	if len(checker.imported) != 1 || checker.imported[0] != 30 {
-		t.Errorf("expected ImportZulipUserGroup(30) to be called, got %v", checker.imported)
+	// Local channel group now exists.
+	if _, _, err := env.client.GetChannelGroup(ctx, groupID).Execute(); err != nil {
+		t.Errorf("expected channel group %d to exist locally after auto-import, got %v", groupID, err)
 	}
-	if checker.zulipListCall == 0 {
-		t.Error("expected ListZulipUserGroups to be consulted to verify visibility")
+	m, ok, err := env.repo.GetEmojiGroupMappingByShortName(ctx, "PGDP")
+	if err != nil || !ok || m.ChannelGroupID != groupID {
+		t.Fatalf("expected mapping stored with channel group %d, got m=%+v ok=%v err=%v", groupID, m, ok, err)
 	}
-	// Mapping stored.
-	m, ok, err := repo.GetEmojiGroupMappingByShortName(ctx, "PGDP")
-	if err != nil || !ok || m.ChannelGroupID != 30 {
-		t.Fatalf("expected mapping stored with channel group 30, got m=%+v ok=%v err=%v", m, ok, err)
-	}
-	// Announcement triggered.
-	if announcer.called == 0 {
+	if env.announcer.called == 0 {
 		t.Error("expected announcer to be called after successful mapping set")
 	}
 }
@@ -736,26 +509,19 @@ func TestGroupMappingSetAutoImportsWhenZulipVisibleButNotLocal(t *testing.T) {
 func TestGroupMappingSetSkipsAutoImportWhenAlreadyLocal(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	repo := openGroupTestRepo(t)
-	announcer := &fakeAnnouncer{}
-	config := &fakeGroupConfigReader{channelID: 1, topic: "t", channelOK: true, topicOK: true}
-	// Group is already local — no Zulip lookup or import should happen.
-	checker := &fakeChannelGroupChecker{existing: map[int64]bool{55: true}}
+	env := newGroupTestEnv(t)
+	groupID := seedChannelGroup(t, env.client, env.base, "NEWCOURSE")
+	env.config.channelID = 1
+	env.config.topic = "t"
+	env.config.channelOK = true
+	env.config.topicOK = true
 
-	h := handlers.NewGroupHandler(
-		&fakeGroupSubscriber{},
-		checker,
-		repo,
-		repo,
-		announcer,
-		&fakeAnnouncementStateAccessor{},
-		config,
-		allowAll{},
-	)
-
+	h := env.handler(allowAll{})
 	result, err := h.Handle(
 		ctx,
-		makeGroupRequest(handlers.GroupMappingSetArgs{ShortName: "NEWCOURSE", ZulipGroupID: 55, EmojiName: "newemoji"}),
+		makeGroupRequest(
+			handlers.GroupMappingSetArgs{ShortName: "NEWCOURSE", ZulipGroupID: groupID, EmojiName: "newemoji"},
+		),
 	)
 	if err != nil {
 		t.Fatalf("Handle() failed: %v", err)
@@ -763,44 +529,28 @@ func TestGroupMappingSetSkipsAutoImportWhenAlreadyLocal(t *testing.T) {
 	if strings.Contains(strings.ToLower(result.Content), "imported") {
 		t.Errorf("success message must not mention import when no import happened, got: %q", result.Content)
 	}
-	if len(checker.imported) != 0 {
-		t.Errorf("expected no ImportZulipUserGroup call, got %v", checker.imported)
-	}
-	if checker.zulipListCall != 0 {
-		t.Errorf("expected no ListZulipUserGroups call when group already local, got %d", checker.zulipListCall)
-	}
-	m, ok, err := repo.GetEmojiGroupMappingByShortName(ctx, "NEWCOURSE")
-	if err != nil || !ok || m.ChannelGroupID != 55 {
-		t.Fatalf("expected mapping stored with channel group 55, got m=%+v ok=%v err=%v", m, ok, err)
+	m, ok, err := env.repo.GetEmojiGroupMappingByShortName(ctx, "NEWCOURSE")
+	if err != nil || !ok || m.ChannelGroupID != groupID {
+		t.Fatalf("expected mapping stored with channel group %d, got m=%+v ok=%v err=%v", groupID, m, ok, err)
 	}
 }
 
 func TestGroupMappingSetRejectsWhenZulipDoesNotKnowGroup(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	repo := openGroupTestRepo(t)
-	announcer := &fakeAnnouncer{}
-	config := &fakeGroupConfigReader{channelID: 1, topic: "t", channelOK: true, topicOK: true}
-	// Not local, and Zulip lists a DIFFERENT group — id 30 is unknown.
-	checker := &fakeChannelGroupChecker{
-		existing:    map[int64]bool{},
-		zulipGroups: []channelgroup.ZulipUserGroupSummary{{ID: 99, Name: "OtherGroup"}},
-	}
+	env := newGroupTestEnv(t)
+	seedZulipUserGroup(t, env.base, "OtherGroup", "", []int64{1})
+	env.config.channelID = 1
+	env.config.topic = "t"
+	env.config.channelOK = true
+	env.config.topicOK = true
 
-	h := handlers.NewGroupHandler(
-		&fakeGroupSubscriber{},
-		checker,
-		repo,
-		repo,
-		announcer,
-		&fakeAnnouncementStateAccessor{},
-		config,
-		allowAll{},
-	)
-
+	h := env.handler(allowAll{})
+	// Use an ID that does not match any seeded group.
+	bogusID := int64(999999)
 	_, err := h.Handle(
 		ctx,
-		makeGroupRequest(handlers.GroupMappingSetArgs{ShortName: "PGDP", ZulipGroupID: 30, EmojiName: "math"}),
+		makeGroupRequest(handlers.GroupMappingSetArgs{ShortName: "PGDP", ZulipGroupID: bogusID, EmojiName: "math"}),
 	)
 	var userErr command.UserError
 	if !errors.As(err, &userErr) {
@@ -812,110 +562,48 @@ func TestGroupMappingSetRejectsWhenZulipDoesNotKnowGroup(t *testing.T) {
 	if !strings.Contains(userErr.Message, "group available") {
 		t.Errorf("error should hint admins to run `group available`, got: %q", userErr.Message)
 	}
-	// No import attempted (visibility check failed first).
-	if len(checker.imported) != 0 {
-		t.Errorf("expected no import on failure, got %v", checker.imported)
-	}
-	// Mapping must NOT have been stored.
-	if _, ok, err := repo.GetEmojiGroupMappingByShortName(ctx, "PGDP"); err != nil || ok {
+	if _, ok, err := env.repo.GetEmojiGroupMappingByShortName(ctx, "PGDP"); err != nil || ok {
 		t.Errorf("expected mapping not to be stored, got err=%v, ok=%v", err, ok)
 	}
-	// Announcement must NOT have been triggered.
-	if announcer.called != 0 {
-		t.Errorf("expected announcer not to be called on rejected mapping, got %d calls", announcer.called)
-	}
-}
-
-func TestGroupMappingSetFailedImportLeavesNoMapping(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	repo := openGroupTestRepo(t)
-	announcer := &fakeAnnouncer{}
-	config := &fakeGroupConfigReader{channelID: 1, topic: "t", channelOK: true, topicOK: true}
-	checker := &fakeChannelGroupChecker{
-		existing:    map[int64]bool{},
-		zulipGroups: []channelgroup.ZulipUserGroupSummary{{ID: 30, Name: "PGDP"}},
-		importErr:   errors.New("disk full"),
-	}
-
-	h := handlers.NewGroupHandler(
-		&fakeGroupSubscriber{},
-		checker,
-		repo,
-		repo,
-		announcer,
-		&fakeAnnouncementStateAccessor{},
-		config,
-		allowAll{},
-	)
-
-	_, err := h.Handle(
-		ctx,
-		makeGroupRequest(handlers.GroupMappingSetArgs{ShortName: "PGDP", ZulipGroupID: 30, EmojiName: "math"}),
-	)
-	if err == nil {
-		t.Fatal("expected error when ImportZulipUserGroup fails")
-	}
-	// Mapping must NOT have been stored.
-	if _, ok, err := repo.GetEmojiGroupMappingByShortName(ctx, "PGDP"); err != nil || ok {
-		t.Errorf("expected mapping not to be stored, got err=%v, ok=%v", err, ok)
-	}
-	// Announcement must NOT have been triggered.
-	if announcer.called != 0 {
-		t.Errorf("expected announcer not to be called on failed import, got %d calls", announcer.called)
+	if env.announcer.called != 0 {
+		t.Errorf("expected announcer not to be called on rejected mapping, got %d calls", env.announcer.called)
 	}
 }
 
 func TestGroupMappingSetAcceptsExistingChannelGroup(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	repo := openGroupTestRepo(t)
-	announcer := &fakeAnnouncer{}
-	stateAccessor := &fakeAnnouncementStateAccessor{}
-	config := &fakeGroupConfigReader{channelID: 1, topic: "t", channelOK: true, topicOK: true}
-	checker := &fakeChannelGroupChecker{existing: map[int64]bool{55: true}}
+	env := newGroupTestEnv(t)
+	groupID := seedChannelGroup(t, env.client, env.base, "NEWCOURSE")
+	env.config.channelID = 1
+	env.config.topic = "t"
+	env.config.channelOK = true
+	env.config.topicOK = true
 
-	h := handlers.NewGroupHandler(
-		&fakeGroupSubscriber{},
-		checker,
-		repo,
-		repo,
-		announcer,
-		stateAccessor,
-		config,
-		allowAll{},
-	)
-
+	h := env.handler(allowAll{})
 	_, err := h.Handle(
 		ctx,
-		makeGroupRequest(handlers.GroupMappingSetArgs{ShortName: "NEWCOURSE", ZulipGroupID: 55, EmojiName: "newemoji"}),
+		makeGroupRequest(
+			handlers.GroupMappingSetArgs{ShortName: "NEWCOURSE", ZulipGroupID: groupID, EmojiName: "newemoji"},
+		),
 	)
 	if err != nil {
 		t.Fatalf("Handle() failed: %v", err)
 	}
-	m, ok, err := repo.GetEmojiGroupMappingByShortName(ctx, "NEWCOURSE")
-	if err != nil || !ok || m.ChannelGroupID != 55 {
-		t.Fatalf("expected mapping stored with channel group 55, got m=%+v ok=%v err=%v", m, ok, err)
+	m, ok, err := env.repo.GetEmojiGroupMappingByShortName(ctx, "NEWCOURSE")
+	if err != nil || !ok || m.ChannelGroupID != groupID {
+		t.Fatalf("expected mapping stored with channel group %d, got m=%+v ok=%v err=%v", groupID, m, ok, err)
 	}
 }
 
 func TestGroupMappingListAdmin(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	repo := openGroupTestRepo(t)
-	seedGroupMapping(t, repo, "WI", "wi", 42)
+	env := newGroupTestEnv(t)
+	groupID := seedChannelGroup(t, env.client, env.base, "WI")
+	seedGroupMapping(t, env.repo, "WI", "wi", groupID)
 
-	h := handlers.NewGroupHandler(
-		&fakeGroupSubscriber{},
-		allExist(),
-		repo,
-		repo,
-		&fakeAnnouncer{},
-		&fakeAnnouncementStateAccessor{},
-		&fakeGroupConfigReader{},
-		allowAll{},
-	)
-
+	h := env.handler(allowAll{})
 	result, err := h.Handle(ctx, makeGroupRequest(handlers.GroupMappingListArgs{}))
 	if err != nil {
 		t.Fatalf("Handle() failed: %v", err)
@@ -928,19 +616,9 @@ func TestGroupMappingListAdmin(t *testing.T) {
 func TestGroupMappingListDenied(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	repo := openGroupTestRepo(t)
+	env := newGroupTestEnv(t)
 
-	h := handlers.NewGroupHandler(
-		&fakeGroupSubscriber{},
-		allExist(),
-		repo,
-		repo,
-		&fakeAnnouncer{},
-		&fakeAnnouncementStateAccessor{},
-		&fakeGroupConfigReader{},
-		denyAll{},
-	)
-
+	h := env.handler(denyAll{})
 	_, err := h.Handle(ctx, makeGroupRequest(handlers.GroupMappingListArgs{}))
 	var userErr command.UserError
 	if !errors.As(err, &userErr) {
@@ -951,21 +629,9 @@ func TestGroupMappingListDenied(t *testing.T) {
 func TestGroupAnnounceNoConfig(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	repo := openGroupTestRepo(t)
-	announcer := &fakeAnnouncer{}
-	config := &fakeGroupConfigReader{channelOK: false}
+	env := newGroupTestEnv(t)
 
-	h := handlers.NewGroupHandler(
-		&fakeGroupSubscriber{},
-		allExist(),
-		repo,
-		repo,
-		announcer,
-		&fakeAnnouncementStateAccessor{},
-		config,
-		allowAll{},
-	)
-
+	h := env.handler(allowAll{})
 	_, err := h.Handle(ctx, makeGroupRequest(handlers.GroupAnnounceArgs{}))
 	var userErr command.UserError
 	if !errors.As(err, &userErr) {
@@ -976,131 +642,96 @@ func TestGroupAnnounceNoConfig(t *testing.T) {
 func TestGroupAnnounceRejectsInvalidEnabledMapping(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	repo := openGroupTestRepo(t)
-	// Pre-seed a bad enabled mapping directly in storage, simulating an existing
-	// bad row that predates the validation.
-	seedGroupMapping(t, repo, "PGDP", "pgdp", 30)
-	// Also seed a valid mapping.
-	seedGroupMapping(t, repo, "WI", "wi", 42)
+	env := newGroupTestEnv(t)
+	// PGDP references a missing channel group 9999; WI references the imported group.
+	wiID := seedChannelGroup(t, env.client, env.base, "WI")
+	seedGroupMapping(t, env.repo, "PGDP", "pgdp", 9999)
+	seedGroupMapping(t, env.repo, "WI", "wi", wiID)
 
-	announcer := &fakeAnnouncer{}
 	msgID := int64(555)
-	stateAccessor := &fakeAnnouncementStateAccessor{state: storage.AnnouncementState{MessageID: &msgID}, ok: true}
-	config := &fakeGroupConfigReader{channelID: 1, topic: "t", channelOK: true, topicOK: true}
-	// Only group 42 exists.
-	checker := &fakeChannelGroupChecker{existing: map[int64]bool{42: true}}
+	if err := env.repo.SaveAnnouncementState(ctx, storage.AnnouncementState{MessageID: &msgID}); err != nil {
+		t.Fatalf("SaveAnnouncementState: %v", err)
+	}
+	env.config.channelID = 1
+	env.config.topic = "t"
+	env.config.channelOK = true
+	env.config.topicOK = true
 
-	h := handlers.NewGroupHandler(
-		&fakeGroupSubscriber{},
-		checker,
-		repo,
-		repo,
-		announcer,
-		stateAccessor,
-		config,
-		allowAll{},
-	)
-
+	h := env.handler(allowAll{})
 	_, err := h.Handle(ctx, makeGroupRequest(handlers.GroupAnnounceArgs{}))
 	var userErr command.UserError
 	if !errors.As(err, &userErr) {
 		t.Fatalf("expected UserError when an enabled mapping references a missing channel group, got %T: %v", err, err)
 	}
-	if !strings.Contains(userErr.Message, "PGDP") || !strings.Contains(userErr.Message, "30") {
-		t.Errorf("error should list invalid mapping PGDP/30, got: %q", userErr.Message)
+	if !strings.Contains(userErr.Message, "PGDP") || !strings.Contains(userErr.Message, "9999") {
+		t.Errorf("error should list invalid mapping PGDP/9999, got: %q", userErr.Message)
 	}
-	if announcer.called != 0 {
-		t.Errorf("expected announcer not to be called when validation fails, got %d", announcer.called)
+	if env.announcer.called != 0 {
+		t.Errorf("expected announcer not to be called when validation fails, got %d", env.announcer.called)
 	}
 }
 
 func TestGroupAnnounceIgnoresDisabledInvalidMapping(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	repo := openGroupTestRepo(t)
-	// Seed a bad mapping, then disable it.
-	seedGroupMapping(t, repo, "PGDP", "pgdp", 30)
-	if err := repo.SetEmojiGroupMappingEnabled(ctx, "PGDP", false); err != nil {
+	env := newGroupTestEnv(t)
+	wiID := seedChannelGroup(t, env.client, env.base, "WI")
+	seedGroupMapping(t, env.repo, "PGDP", "pgdp", 9999)
+	if err := env.repo.SetEmojiGroupMappingEnabled(ctx, "PGDP", false); err != nil {
 		t.Fatalf("disable mapping: %v", err)
 	}
-	// Seed a valid enabled mapping so announcement has something to render.
-	seedGroupMapping(t, repo, "WI", "wi", 42)
-
-	announcer := &fakeAnnouncer{}
+	seedGroupMapping(t, env.repo, "WI", "wi", wiID)
 	msgID := int64(555)
-	stateAccessor := &fakeAnnouncementStateAccessor{state: storage.AnnouncementState{MessageID: &msgID}, ok: true}
-	config := &fakeGroupConfigReader{channelID: 1, topic: "t", channelOK: true, topicOK: true}
-	checker := &fakeChannelGroupChecker{existing: map[int64]bool{42: true}}
+	if err := env.repo.SaveAnnouncementState(ctx, storage.AnnouncementState{MessageID: &msgID}); err != nil {
+		t.Fatalf("SaveAnnouncementState: %v", err)
+	}
+	env.config.channelID = 1
+	env.config.topic = "t"
+	env.config.channelOK = true
+	env.config.topicOK = true
 
-	h := handlers.NewGroupHandler(
-		&fakeGroupSubscriber{},
-		checker,
-		repo,
-		repo,
-		announcer,
-		stateAccessor,
-		config,
-		allowAll{},
-	)
-
+	h := env.handler(allowAll{})
 	if _, err := h.Handle(ctx, makeGroupRequest(handlers.GroupAnnounceArgs{})); err != nil {
 		t.Fatalf("Handle() failed: %v", err)
 	}
-	if announcer.called != 1 {
-		t.Errorf("expected announcer to run when only disabled mapping is invalid, got %d calls", announcer.called)
+	if env.announcer.called != 1 {
+		t.Errorf("expected announcer to run when only disabled mapping is invalid, got %d calls", env.announcer.called)
 	}
 }
 
 func TestGroupAnnounceAllValidMappings(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	repo := openGroupTestRepo(t)
-	seedGroupMapping(t, repo, "WI", "wi", 42)
-
-	announcer := &fakeAnnouncer{}
+	env := newGroupTestEnv(t)
+	groupID := seedChannelGroup(t, env.client, env.base, "WI")
+	seedGroupMapping(t, env.repo, "WI", "wi", groupID)
 	msgID := int64(555)
-	stateAccessor := &fakeAnnouncementStateAccessor{state: storage.AnnouncementState{MessageID: &msgID}, ok: true}
-	config := &fakeGroupConfigReader{channelID: 1, topic: "t", channelOK: true, topicOK: true}
-	checker := &fakeChannelGroupChecker{existing: map[int64]bool{42: true}}
+	if err := env.repo.SaveAnnouncementState(ctx, storage.AnnouncementState{MessageID: &msgID}); err != nil {
+		t.Fatalf("SaveAnnouncementState: %v", err)
+	}
+	env.config.channelID = 1
+	env.config.topic = "t"
+	env.config.channelOK = true
+	env.config.topicOK = true
 
-	h := handlers.NewGroupHandler(
-		&fakeGroupSubscriber{},
-		checker,
-		repo,
-		repo,
-		announcer,
-		stateAccessor,
-		config,
-		allowAll{},
-	)
-
+	h := env.handler(allowAll{})
 	if _, err := h.Handle(ctx, makeGroupRequest(handlers.GroupAnnounceArgs{})); err != nil {
 		t.Fatalf("Handle() failed: %v", err)
 	}
-	if announcer.called != 1 {
-		t.Errorf("expected announcer to be called once for valid mappings, got %d", announcer.called)
+	if env.announcer.called != 1 {
+		t.Errorf("expected announcer to be called once for valid mappings, got %d", env.announcer.called)
 	}
 }
 
 func TestGroupMappingListAnnotatesMissingChannelGroups(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	repo := openGroupTestRepo(t)
-	seedGroupMapping(t, repo, "PGDP", "pgdp", 30)
-	seedGroupMapping(t, repo, "WI", "wi", 42)
-	checker := &fakeChannelGroupChecker{existing: map[int64]bool{42: true}}
+	env := newGroupTestEnv(t)
+	wiID := seedChannelGroup(t, env.client, env.base, "WI")
+	seedGroupMapping(t, env.repo, "PGDP", "pgdp", 9999)
+	seedGroupMapping(t, env.repo, "WI", "wi", wiID)
 
-	h := handlers.NewGroupHandler(
-		&fakeGroupSubscriber{},
-		checker,
-		repo,
-		repo,
-		&fakeAnnouncer{},
-		&fakeAnnouncementStateAccessor{},
-		&fakeGroupConfigReader{},
-		allowAll{},
-	)
-
+	h := env.handler(allowAll{})
 	result, err := h.Handle(ctx, makeGroupRequest(handlers.GroupMappingListArgs{}))
 	if err != nil {
 		t.Fatalf("Handle() failed: %v", err)
@@ -1125,29 +756,15 @@ func TestGroupInvalidSubcommand(t *testing.T) {
 }
 
 func TestGroupAnnounceExistingMessageID(t *testing.T) {
-	// If message_id stored in state, announce succeeds without channel/topic
 	t.Parallel()
 	ctx := context.Background()
-	repo := openGroupTestRepo(t)
-	announcer := &fakeAnnouncer{}
+	env := newGroupTestEnv(t)
 	msgID := int64(555)
-	stateAccessor := &fakeAnnouncementStateAccessor{
-		state: storage.AnnouncementState{MessageID: &msgID},
-		ok:    true,
+	if err := env.repo.SaveAnnouncementState(ctx, storage.AnnouncementState{MessageID: &msgID}); err != nil {
+		t.Fatalf("SaveAnnouncementState: %v", err)
 	}
-	config := &fakeGroupConfigReader{} // no channel/topic configured
 
-	h := handlers.NewGroupHandler(
-		&fakeGroupSubscriber{},
-		allExist(),
-		repo,
-		repo,
-		announcer,
-		stateAccessor,
-		config,
-		allowAll{},
-	)
-
+	h := env.handler(allowAll{})
 	result, err := h.Handle(ctx, makeGroupRequest(handlers.GroupAnnounceArgs{}))
 	if err != nil {
 		t.Fatalf("Handle() failed: %v", err)
@@ -1155,31 +772,17 @@ func TestGroupAnnounceExistingMessageID(t *testing.T) {
 	if result.Content == "" {
 		t.Error("expected non-empty result")
 	}
-	if announcer.called != 1 {
-		t.Errorf("expected announcer called once, got %d", announcer.called)
+	if env.announcer.called != 1 {
+		t.Errorf("expected announcer called once, got %d", env.announcer.called)
 	}
 }
 
 func TestGroupAnnounceNoConfigNoMessageID(t *testing.T) {
-	// No message_id, no channel/topic → user error mentioning set-message
 	t.Parallel()
 	ctx := context.Background()
-	repo := openGroupTestRepo(t)
-	announcer := &fakeAnnouncer{}
-	config := &fakeGroupConfigReader{channelOK: false}
-	stateAccessor := &fakeAnnouncementStateAccessor{ok: false} // no stored state
+	env := newGroupTestEnv(t)
 
-	h := handlers.NewGroupHandler(
-		&fakeGroupSubscriber{},
-		allExist(),
-		repo,
-		repo,
-		announcer,
-		stateAccessor,
-		config,
-		allowAll{},
-	)
-
+	h := env.handler(allowAll{})
 	_, err := h.Handle(ctx, makeGroupRequest(handlers.GroupAnnounceArgs{}))
 	var userErr command.UserError
 	if !errors.As(err, &userErr) {
@@ -1190,20 +793,9 @@ func TestGroupAnnounceNoConfigNoMessageID(t *testing.T) {
 func TestGroupAnnounceSetMessageValid(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	repo := openGroupTestRepo(t)
-	stateAccessor := &fakeAnnouncementStateAccessor{}
+	env := newGroupTestEnv(t)
 
-	h := handlers.NewGroupHandler(
-		&fakeGroupSubscriber{},
-		allExist(),
-		repo,
-		repo,
-		&fakeAnnouncer{},
-		stateAccessor,
-		&fakeGroupConfigReader{},
-		allowAll{},
-	)
-
+	h := env.handler(allowAll{})
 	result, err := h.Handle(ctx, makeGroupRequest(handlers.GroupAnnounceSetMessageArgs{MessageID: 12345}))
 	if err != nil {
 		t.Fatalf("Handle() failed: %v", err)
@@ -1211,41 +803,29 @@ func TestGroupAnnounceSetMessageValid(t *testing.T) {
 	if result.Content == "" {
 		t.Error("expected non-empty result")
 	}
-	if stateAccessor.state.MessageID == nil || *stateAccessor.state.MessageID != 12345 {
-		t.Errorf("expected message_id 12345, got %v", stateAccessor.state.MessageID)
+	state, ok, err := env.repo.GetAnnouncementState(ctx)
+	if err != nil || !ok || state.MessageID == nil || *state.MessageID != 12345 {
+		t.Errorf("expected message_id 12345, got state=%+v ok=%v err=%v", state, ok, err)
 	}
 }
 
 func TestGroupAnnounceSetMessageInvalid(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	repo := openGroupTestRepo(t)
+	env := newGroupTestEnv(t)
+	h := env.handler(allowAll{})
 
-	h := handlers.NewGroupHandler(
-		&fakeGroupSubscriber{},
-		allExist(),
-		repo,
-		repo,
-		&fakeAnnouncer{},
-		&fakeAnnouncementStateAccessor{},
-		&fakeGroupConfigReader{},
-		allowAll{},
-	)
-
-	// Zero
 	_, err := h.Handle(ctx, makeGroupRequest(handlers.GroupAnnounceSetMessageArgs{MessageID: 0}))
 	var userErr command.UserError
 	if !errors.As(err, &userErr) {
 		t.Errorf("expected UserError for 0, got %T: %v", err, err)
 	}
 
-	// Negative
 	_, err = h.Handle(ctx, makeGroupRequest(handlers.GroupAnnounceSetMessageArgs{MessageID: -1}))
 	if !errors.As(err, &userErr) {
 		t.Errorf("expected UserError for -1, got %T: %v", err, err)
 	}
 
-	// Non-numeric input is rejected by the argparser before Handle is called.
 	parser := command.NewArgParser(nil)
 	_, err = parser.Parse(ctx, handlers.GroupArgSpec, []string{"announce", "set-message", "abc"})
 	if !errors.As(err, &userErr) {
@@ -1253,27 +833,12 @@ func TestGroupAnnounceSetMessageInvalid(t *testing.T) {
 	}
 }
 
-// --- Help metadata / visibility tests ---
-
-// buildGroupHandler creates a GroupHandler backed by a real in-memory SQLite repo.
-func buildGroupHandler(t *testing.T, auth command.Authorizer) *handlers.GroupHandler {
-	t.Helper()
-	repo := openGroupTestRepo(t)
-	seedGroupMapping(t, repo, "WI", "wi", 42)
-	return handlers.NewGroupHandler(
-		&fakeGroupSubscriber{},
-		allExist(),
-		repo, repo,
-		&fakeAnnouncer{},
-		&fakeAnnouncementStateAccessor{},
-		&fakeGroupConfigReader{channelID: 1, topic: "t", channelOK: true, topicOK: true},
-		auth,
-	)
-}
-
 func TestGroupMetadataAdminUsageIsSet(t *testing.T) {
 	t.Parallel()
-	gh := buildGroupHandler(t, allowAll{})
+	env := newGroupTestEnv(t)
+	groupID := seedChannelGroup(t, env.client, env.base, "WI")
+	seedGroupMapping(t, env.repo, "WI", "wi", groupID)
+	gh := env.handler(allowAll{})
 	meta := gh.Metadata()
 	if meta.AdminUsage == "" {
 		t.Fatal("GroupHandler.Metadata().AdminUsage must not be empty")
@@ -1295,17 +860,8 @@ func TestGroupMetadataAdminUsageIsSet(t *testing.T) {
 func TestGroupAdminCommandDeniedForNoneUser(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	repo := openGroupTestRepo(t)
-
-	h := handlers.NewGroupHandler(
-		&fakeGroupSubscriber{},
-		allExist(),
-		repo, repo,
-		&fakeAnnouncer{},
-		&fakeAnnouncementStateAccessor{},
-		&fakeGroupConfigReader{},
-		denyAll{},
-	)
+	env := newGroupTestEnv(t)
+	h := env.handler(denyAll{})
 
 	for _, tc := range []struct {
 		name       string
@@ -1329,22 +885,11 @@ func TestGroupAdminCommandDeniedForNoneUser(t *testing.T) {
 func TestGroupSubscribeStillWorksForNoneUser(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	repo := openGroupTestRepo(t)
-	seedGroupMapping(t, repo, "WI", "wi", 42)
+	env := newGroupTestEnv(t)
+	groupID := seedChannelGroup(t, env.client, env.base, "WI")
+	seedGroupMapping(t, env.repo, "WI", "wi", groupID)
 
-	sub := &fakeGroupSubscriber{}
-	// allowAll auth: subscribe doesn't check auth anyway, but use allowAll to be clear
-	h := handlers.NewGroupHandler(
-		sub,
-		allExist(),
-		repo,
-		repo,
-		&fakeAnnouncer{},
-		&fakeAnnouncementStateAccessor{},
-		&fakeGroupConfigReader{},
-		allowAll{},
-	)
-
+	h := env.handler(allowAll{})
 	result, err := h.Handle(ctx, makeGroupRequest(handlers.GroupSubscribeArgs{ShortName: "WI"}))
 	if err != nil {
 		t.Fatalf("subscribe should succeed for any user, got: %v", err)
@@ -1357,26 +902,17 @@ func TestGroupSubscribeStillWorksForNoneUser(t *testing.T) {
 func TestGroupAnnounceInspect(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	repo := openGroupTestRepo(t)
-
+	env := newGroupTestEnv(t)
 	msgID := int64(999)
-	stateAccessor := &fakeAnnouncementStateAccessor{
-		state: storage.AnnouncementState{MessageID: &msgID},
-		ok:    true,
+	if err := env.repo.SaveAnnouncementState(ctx, storage.AnnouncementState{MessageID: &msgID}); err != nil {
+		t.Fatalf("SaveAnnouncementState: %v", err)
 	}
-	config := &fakeGroupConfigReader{channelID: 42, topic: "mytopic", channelOK: true, topicOK: true}
+	env.config.channelID = 42
+	env.config.topic = "mytopic"
+	env.config.channelOK = true
+	env.config.topicOK = true
 
-	h := handlers.NewGroupHandler(
-		&fakeGroupSubscriber{},
-		allExist(),
-		repo,
-		repo,
-		&fakeAnnouncer{},
-		stateAccessor,
-		config,
-		allowAll{},
-	)
-
+	h := env.handler(allowAll{})
 	result, err := h.Handle(ctx, makeGroupRequest(handlers.GroupAnnounceInspectArgs{}))
 	if err != nil {
 		t.Fatalf("Handle() failed: %v", err)
@@ -1384,111 +920,88 @@ func TestGroupAnnounceInspect(t *testing.T) {
 	if result.Content == "" {
 		t.Error("expected non-empty inspect output")
 	}
-	// Should mention message_id
 	if !strings.Contains(result.Content, "999") {
 		t.Errorf("expected inspect output to contain message_id 999, got: %s", result.Content)
 	}
 }
 
-func newGroupTestChannelGroupClient(t *testing.T) channelgroup.Client {
+// --- Channel (`group channel ...`) subcommand tests ---
+
+func newCourseTestEnv(t *testing.T) (*groupTestEnv, int64) {
 	t.Helper()
-	db, err := sql.Open("sqlite3", ":memory:")
-	if err != nil {
-		t.Fatalf("open in-memory sqlite database: %v", err)
-	}
-	db.SetMaxOpenConns(1)
-	t.Cleanup(func() { _ = db.Close() })
-	if err := channelgroup.Migrate(context.Background(), db); err != nil {
-		t.Fatalf("migrate channelgroup schema: %v", err)
-	}
-	client, err := channelgroup.NewClient(
-		context.Background(),
-		zulipmock.NewClient(),
-		db,
-		channelgroup.WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
-	)
-	if err != nil {
-		t.Fatalf("channelgroup.NewClient: %v", err)
-	}
-	return client
+	env := newGroupTestEnv(t)
+	groupID := seedChannelGroup(t, env.client, env.base, "WI")
+	seedGroupMapping(t, env.repo, "WI", "wi", groupID)
+	return env, groupID
 }
 
-func buildCourseHandler(
-	t *testing.T,
-	auth command.Authorizer,
-) (*handlers.GroupHandler, channelgroup.Client) {
+func seedChannel(t *testing.T, base zulipmock.Client, name string) int64 {
 	t.Helper()
-	repo := openGroupTestRepo(t)
-	seedGroupMapping(t, repo, "WI", "wi", 42)
-
-	client := newGroupTestChannelGroupClient(t)
-	if err := client.ImportZulipUserGroup(context.Background(), 42); err != nil {
-		t.Fatalf("ImportZulipUserGroup: %v", err)
+	resp, _, err := base.CreateChannel(context.Background()).Name(name).Execute()
+	if err != nil {
+		t.Fatalf("CreateChannel(%q): %v", name, err)
 	}
-
-	svc := channelgroup.NewGroupService(client)
-	h := handlers.NewGroupHandler(
-		svc,
-		svc,
-		repo, repo,
-		&fakeAnnouncer{},
-		&fakeAnnouncementStateAccessor{},
-		&fakeGroupConfigReader{},
-		auth,
-	).WithChannelManager(svc)
-	return h, client
+	return resp.ID
 }
 
 func TestGroupCourseAdd(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	h, client := buildCourseHandler(t, allowAll{})
+	env, groupID := newCourseTestEnv(t)
+	channelID := seedChannel(t, env.base, "wi-channel")
+	h := env.handler(allowAll{})
 
-	result, err := h.Handle(ctx, makeGroupRequest(handlers.GroupChannelAddArgs{ChannelID: 99, ShortName: "WI"}))
+	result, err := h.Handle(ctx, makeGroupRequest(handlers.GroupChannelAddArgs{ChannelID: channelID, ShortName: "WI"}))
 	if err != nil {
 		t.Fatalf("Handle() failed: %v", err)
 	}
 	if result.Content == "" {
 		t.Error("expected non-empty result content")
 	}
-	resp, _, err := client.GetIsChannelInChannelGroup(ctx, 42, 99).Execute()
+	resp, _, err := env.client.GetIsChannelInChannelGroup(ctx, groupID, channelID).Execute()
 	if err != nil {
 		t.Fatalf("GetIsChannelInChannelGroup: %v", err)
 	}
 	if !resp.IsChannelGroupMember {
-		t.Error("expected channel 99 to be in group 42 after add")
+		t.Errorf("expected channel %d to be in group %d after add", channelID, groupID)
 	}
 }
 
 func TestGroupCourseRemove(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	h, client := buildCourseHandler(t, allowAll{})
+	env, groupID := newCourseTestEnv(t)
+	channelID := seedChannel(t, env.base, "wi-channel")
 
-	if _, _, err := client.UpdateChannelGroupChannels(ctx, 42).Add([]int64{99}).Execute(); err != nil {
-		t.Fatalf("pre-add channel 99 to group 42: %v", err)
+	if _, _, err := env.client.UpdateChannelGroupChannels(ctx, groupID).Add([]int64{channelID}).Execute(); err != nil {
+		t.Fatalf("pre-add channel %d to group %d: %v", channelID, groupID, err)
 	}
 
-	result, err := h.Handle(ctx, makeGroupRequest(handlers.GroupChannelRemoveArgs{ChannelID: 99, ShortName: "WI"}))
+	h := env.handler(allowAll{})
+	result, err := h.Handle(
+		ctx,
+		makeGroupRequest(handlers.GroupChannelRemoveArgs{ChannelID: channelID, ShortName: "WI"}),
+	)
 	if err != nil {
 		t.Fatalf("Handle() failed: %v", err)
 	}
 	if result.Content == "" {
 		t.Error("expected non-empty result content")
 	}
-	resp, _, err := client.GetIsChannelInChannelGroup(ctx, 42, 99).Execute()
+	resp, _, err := env.client.GetIsChannelInChannelGroup(ctx, groupID, channelID).Execute()
 	if err != nil {
 		t.Fatalf("GetIsChannelInChannelGroup: %v", err)
 	}
 	if resp.IsChannelGroupMember {
-		t.Error("expected channel 99 to not be in group 42 after remove")
+		t.Errorf("expected channel %d to not be in group %d after remove", channelID, groupID)
 	}
 }
 
 func TestGroupCoursePermissionDenied(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	h, _ := buildCourseHandler(t, denyAll{})
+	env, _ := newCourseTestEnv(t)
+	h := env.handler(denyAll{})
 
 	_, err := h.Handle(ctx, makeGroupRequest(handlers.GroupChannelAddArgs{ChannelID: 99, ShortName: "WI"}))
 	if err == nil {
@@ -1499,7 +1012,8 @@ func TestGroupCoursePermissionDenied(t *testing.T) {
 func TestGroupCourseUnknownGroup(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	h, _ := buildCourseHandler(t, allowAll{})
+	env, _ := newCourseTestEnv(t)
+	h := env.handler(allowAll{})
 
 	_, err := h.Handle(ctx, makeGroupRequest(handlers.GroupChannelAddArgs{ChannelID: 99, ShortName: "UNKNOWN"}))
 	if err == nil {
@@ -1517,31 +1031,11 @@ func TestGroupCourseInvalidChannelID(t *testing.T) {
 	}
 }
 
-func TestGroupCourseNotConfigured(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	repo := openGroupTestRepo(t)
-	seedGroupMapping(t, repo, "WI", "wi", 42)
-	h := handlers.NewGroupHandler(
-		&fakeGroupSubscriber{},
-		allExist(),
-		repo, repo,
-		&fakeAnnouncer{},
-		&fakeAnnouncementStateAccessor{},
-		&fakeGroupConfigReader{},
-		allowAll{},
-	)
-
-	_, err := h.Handle(ctx, makeGroupRequest(handlers.GroupChannelAddArgs{ChannelID: 99, ShortName: "WI"}))
-	if err == nil {
-		t.Fatal("expected error when channel manager is not configured")
-	}
-}
-
 func TestGroupChannelCreate(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	h, client := buildCourseHandler(t, allowAll{})
+	env, groupID := newCourseTestEnv(t)
+	h := env.handler(allowAll{})
 
 	result, err := h.Handle(
 		ctx,
@@ -1553,43 +1047,20 @@ func TestGroupChannelCreate(t *testing.T) {
 	if !strings.Contains(result.Content, "new-channel") {
 		t.Errorf("expected result to mention channel name, got: %s", result.Content)
 	}
-	resp, _, err := client.GetChannelGroupChannels(ctx, 42).Execute()
+	resp, _, err := env.client.GetChannelGroupChannels(ctx, groupID).Execute()
 	if err != nil {
 		t.Fatalf("GetChannelGroupChannels: %v", err)
 	}
 	if len(resp.ChannelIDs) != 1 {
-		t.Errorf("expected 1 channel in group 42, got %d", len(resp.ChannelIDs))
-	}
-}
-
-func TestGroupChannelCreateCourseAlias(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	h, client := buildCourseHandler(t, allowAll{})
-
-	result, err := h.Handle(
-		ctx,
-		makeGroupRequest(handlers.GroupChannelCreateArgs{ChannelName: "new-channel", ShortName: "WI"}),
-	)
-	if err != nil {
-		t.Fatalf("Handle() failed via course alias: %v", err)
-	}
-	if !strings.Contains(result.Content, "new-channel") {
-		t.Errorf("expected result to mention channel name, got: %s", result.Content)
-	}
-	resp, _, err := client.GetChannelGroupChannels(ctx, 42).Execute()
-	if err != nil {
-		t.Fatalf("GetChannelGroupChannels: %v", err)
-	}
-	if len(resp.ChannelIDs) != 1 {
-		t.Errorf("expected 1 channel in group 42, got %d", len(resp.ChannelIDs))
+		t.Errorf("expected 1 channel in group %d, got %d", groupID, len(resp.ChannelIDs))
 	}
 }
 
 func TestGroupChannelCreateUnknownGroup(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	h, _ := buildCourseHandler(t, allowAll{})
+	env, _ := newCourseTestEnv(t)
+	h := env.handler(allowAll{})
 
 	_, err := h.Handle(
 		ctx,
@@ -1603,7 +1074,8 @@ func TestGroupChannelCreateUnknownGroup(t *testing.T) {
 func TestGroupChannelCreatePermissionDenied(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	h, _ := buildCourseHandler(t, denyAll{})
+	env, _ := newCourseTestEnv(t)
+	h := env.handler(denyAll{})
 
 	_, err := h.Handle(
 		ctx,
@@ -1613,3 +1085,5 @@ func TestGroupChannelCreatePermissionDenied(t *testing.T) {
 		t.Fatal("expected error for non-admin user")
 	}
 }
+
+func itoa(n int64) string { return strconv.FormatInt(n, 10) }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -15,58 +16,9 @@ import (
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/storage"
 )
 
-// GroupSubscriber subscribes or unsubscribes a user from a channel group.
-type GroupSubscriber interface {
-	SubscribeUser(ctx context.Context, userID int64, channelGroupID int64) error
-	UnsubscribeUser(ctx context.Context, userID int64, channelGroupID int64) error
-	UnsubscribeUserKeepChannels(ctx context.Context, userID int64, channelGroupID int64) error
-}
-
-// ChannelGroupChecker reports on the channel groups known to the bot.
-// ChannelGroupExists is used to reject — or, for emoji mappings, auto-import
-// — references to a channel group before they can poison the announcement or
-// reaction-handling flow. ListZulipUserGroups powers the admin `group
-// available` command and queries Zulip live so admins can see which user
-// groups the bot account can see. ImportZulipUserGroup is invoked from
-// `group mapping set` to auto-track a Zulip user group locally on first use.
-type ChannelGroupChecker interface {
-	ChannelGroupExists(ctx context.Context, channelGroupID int64) (bool, error)
-	ListZulipUserGroups(ctx context.Context) ([]channelgroup.ZulipUserGroupSummary, error)
-	ImportZulipUserGroup(ctx context.Context, userGroupID int64) error
-	CreateChannelGroup(ctx context.Context, name string, createChannelFolder bool) (int64, error)
-	DeleteChannelGroup(ctx context.Context, channelGroupID int64) error
-}
-
-// GroupMappingReader looks up emoji->group mappings.
-type GroupMappingReader interface {
-	GetEmojiGroupMappingByShortName(ctx context.Context, shortName string) (storage.EmojiGroupMapping, bool, error)
-	ListEnabledEmojiGroupMappings(ctx context.Context) ([]storage.EmojiGroupMapping, error)
-	ListAllEmojiGroupMappings(ctx context.Context) ([]storage.EmojiGroupMapping, error)
-}
-
-// GroupMappingWriter writes emoji->group mappings.
-type GroupMappingWriter interface {
-	UpsertEmojiGroupMapping(ctx context.Context, m storage.EmojiGroupMapping) error
-	SetEmojiGroupMappingEnabled(ctx context.Context, shortName string, enabled bool) error
-	DeleteEmojiGroupMappingByShortName(ctx context.Context, shortName string) error
-}
-
-// ChannelGroupChannelManager adds, removes, and creates channels in a channel group.
-type ChannelGroupChannelManager interface {
-	AddChannelToGroup(ctx context.Context, channelGroupID int64, channelID int64) error
-	RemoveChannelFromGroup(ctx context.Context, channelGroupID int64, channelID int64) error
-	CreateChannelAndAddToGroup(ctx context.Context, channelName string, channelGroupID int64) (int64, error)
-}
-
 // AnnouncementUpdater triggers announcement re-render.
 type AnnouncementUpdater interface {
 	UpdateAfterMappingChange(ctx context.Context, send *announcement.SendParams) error
-}
-
-// AnnouncementStateAccessor reads and writes announcement state.
-type AnnouncementStateAccessor interface {
-	GetAnnouncementState(ctx context.Context) (storage.AnnouncementState, bool, error)
-	SaveAnnouncementState(ctx context.Context, state storage.AnnouncementState) error
 }
 
 // GroupConfigReader provides announcement channel/topic config.
@@ -77,44 +29,30 @@ type GroupConfigReader interface {
 
 // GroupHandler handles the "group" command.
 type GroupHandler struct {
-	subscriber     GroupSubscriber
-	groupChecker   ChannelGroupChecker
-	mappingReader  GroupMappingReader
-	mappingWriter  GroupMappingWriter
-	announcer      AnnouncementUpdater
-	stateAccessor  AnnouncementStateAccessor
-	configReader   GroupConfigReader
-	auth           command.Authorizer
-	channelManager ChannelGroupChannelManager
+	client       channelgroup.Client
+	repo         *storage.Repository
+	announcer    AnnouncementUpdater
+	configReader GroupConfigReader
+	auth         command.Authorizer
 }
 
-// NewGroupHandler creates a new GroupHandler.
+// NewGroupHandler creates a new GroupHandler. It uses the channelgroup.Client
+// directly for all Zulip and channel-group operations and the storage
+// Repository for emoji-mapping and announcement-state persistence.
 func NewGroupHandler(
-	subscriber GroupSubscriber,
-	groupChecker ChannelGroupChecker,
-	mappingReader GroupMappingReader,
-	mappingWriter GroupMappingWriter,
+	client channelgroup.Client,
+	repo *storage.Repository,
 	announcer AnnouncementUpdater,
-	stateAccessor AnnouncementStateAccessor,
 	configReader GroupConfigReader,
 	auth command.Authorizer,
 ) *GroupHandler {
 	return &GroupHandler{
-		subscriber:    subscriber,
-		groupChecker:  groupChecker,
-		mappingReader: mappingReader,
-		mappingWriter: mappingWriter,
-		announcer:     announcer,
-		stateAccessor: stateAccessor,
-		configReader:  configReader,
-		auth:          auth,
+		client:       client,
+		repo:         repo,
+		announcer:    announcer,
+		configReader: configReader,
+		auth:         auth,
 	}
-}
-
-// WithChannelManager sets the channel manager used by the course subcommand.
-func (h *GroupHandler) WithChannelManager(m ChannelGroupChannelManager) *GroupHandler {
-	h.channelManager = m
-	return h
 }
 
 func (h *GroupHandler) Metadata() command.Metadata {
@@ -122,8 +60,6 @@ func (h *GroupHandler) Metadata() command.Metadata {
 		Name:    "group",
 		Summary: "Subscribe or unsubscribe from a channel group.",
 		Usage:   "group <subscribe|unsubscribe> [-k] <course_short_name>",
-		// AdminUsage lists all subcommands visible to admins and owners.
-		// Normal users only see the public subscribe/unsubscribe form above.
 		AdminUsage: "group subscribe <course_short_name>\n" +
 			"group unsubscribe [-k] <course_short_name>\n" +
 			"group create <short_name> <emoji_name>\n" +
@@ -187,7 +123,7 @@ func (h *GroupHandler) handleCreate(
 		return command.Result{}, err
 	}
 
-	channelGroupID, err := h.groupChecker.CreateChannelGroup(ctx, shortName, true)
+	channelGroupID, err := h.createChannelGroup(ctx, shortName, true)
 	if err != nil {
 		if isDuplicateZulipUserGroupError(err) {
 			return command.Result{}, command.NewUserError(
@@ -203,11 +139,11 @@ func (h *GroupHandler) handleCreate(
 	rollback := func(cause error) error {
 		var rollbackErrs []error
 		if createdMapping {
-			if err := h.mappingWriter.DeleteEmojiGroupMappingByShortName(ctx, shortName); err != nil {
+			if err := h.repo.DeleteEmojiGroupMappingByShortName(ctx, shortName); err != nil {
 				rollbackErrs = append(rollbackErrs, err)
 			}
 		}
-		if err := h.groupChecker.DeleteChannelGroup(ctx, channelGroupID); err != nil {
+		if err := h.client.DeleteChannelGroup(ctx, channelGroupID); err != nil {
 			rollbackErrs = append(rollbackErrs, err)
 		}
 		if len(rollbackErrs) == 0 {
@@ -217,7 +153,7 @@ func (h *GroupHandler) handleCreate(
 	}
 
 	now := time.Now().UTC()
-	if err := h.mappingWriter.UpsertEmojiGroupMapping(ctx, storage.EmojiGroupMapping{
+	if err := h.repo.UpsertEmojiGroupMapping(ctx, storage.EmojiGroupMapping{
 		ShortName:      shortName,
 		ChannelGroupID: channelGroupID,
 		EmojiName:      emojiName,
@@ -240,8 +176,29 @@ func (h *GroupHandler) handleCreate(
 	}, nil
 }
 
+// createChannelGroup creates a Zulip user group and tracks it locally as a
+// channel group, subscribing the bot's own user as the initial member.
+func (h *GroupHandler) createChannelGroup(ctx context.Context, name string, createChannelFolder bool) (int64, error) {
+	ownUserResp, _, err := h.client.GetOwnUser(ctx).Execute()
+	if err != nil {
+		return 0, fmt.Errorf("get own Zulip user for channel group %q: %w", name, err)
+	}
+	if ownUserResp == nil || ownUserResp.User.UserID <= 0 {
+		return 0, fmt.Errorf("get own Zulip user for channel group %q: missing user ID", name)
+	}
+	resp, _, err := h.client.CreateChannelGroup(ctx).
+		CreateChannelFolder(createChannelFolder).
+		Name(name).
+		InitialSubscribers(zulip.UserIDsAsPrincipals(ownUserResp.User.UserID)).
+		Execute()
+	if err != nil {
+		return 0, fmt.Errorf("create channel group %q: %w", name, err)
+	}
+	return resp.ChannelGroupID, nil
+}
+
 func (h *GroupHandler) ensureMappingDoesNotExist(ctx context.Context, shortName, emojiName string) error {
-	mappings, err := h.mappingReader.ListAllEmojiGroupMappings(ctx)
+	mappings, err := h.repo.ListAllEmojiGroupMappings(ctx)
 	if err != nil {
 		return err
 	}
@@ -279,7 +236,7 @@ func (h *GroupHandler) handleSubscribe(
 ) (command.Result, error) {
 	shortName := args.ShortName
 
-	mapping, found, err := h.mappingReader.GetEmojiGroupMappingByShortName(ctx, shortName)
+	mapping, found, err := h.repo.GetEmojiGroupMappingByShortName(ctx, shortName)
 	if err != nil {
 		return command.Result{}, err
 	}
@@ -287,7 +244,9 @@ func (h *GroupHandler) handleSubscribe(
 		return command.Result{}, command.NewUserError(unknownGroupMessage(ctx, h.auth, req, shortName))
 	}
 
-	if err := h.subscriber.SubscribeUser(ctx, req.Actor.UserID, mapping.ChannelGroupID); err != nil {
+	if _, _, err := h.client.SubscribeToChannelGroup(ctx, mapping.ChannelGroupID).
+		Principals(zulip.Principals{UserIDs: &[]int64{req.Actor.UserID}}).
+		Execute(); err != nil {
 		return command.Result{}, fmt.Errorf("subscribe user to group: %w", err)
 	}
 
@@ -304,7 +263,7 @@ func (h *GroupHandler) handleUnsubscribe(
 	keepChannels := args.KeepChannels
 	shortName := args.ShortName
 
-	mapping, found, err := h.mappingReader.GetEmojiGroupMappingByShortName(ctx, shortName)
+	mapping, found, err := h.repo.GetEmojiGroupMappingByShortName(ctx, shortName)
 	if err != nil {
 		return command.Result{}, err
 	}
@@ -312,36 +271,74 @@ func (h *GroupHandler) handleUnsubscribe(
 		return command.Result{}, command.NewUserError(unknownGroupMessage(ctx, h.auth, req, shortName))
 	}
 
+	req2 := h.client.UnsubscribeFromChannelGroup(ctx, mapping.ChannelGroupID).
+		Principals(zulip.Principals{UserIDs: &[]int64{req.Actor.UserID}})
 	if keepChannels {
-		if err := h.subscriber.UnsubscribeUserKeepChannels(ctx, req.Actor.UserID, mapping.ChannelGroupID); err != nil {
+		req2 = req2.KeepChannels()
+	}
+	if _, _, err := req2.Execute(); err != nil {
+		if keepChannels {
 			return command.Result{}, fmt.Errorf("unsubscribe user from group (keep channels): %w", err)
 		}
+		return command.Result{}, fmt.Errorf("unsubscribe user from group: %w", err)
+	}
+
+	if keepChannels {
 		return command.Result{
 			Content: fmt.Sprintf("You have been unsubscribed from **%s** (channels kept).", mapping.ShortName),
 		}, nil
 	}
-
-	if err := h.subscriber.UnsubscribeUser(ctx, req.Actor.UserID, mapping.ChannelGroupID); err != nil {
-		return command.Result{}, fmt.Errorf("unsubscribe user from group: %w", err)
-	}
-
 	return command.Result{
 		Content: fmt.Sprintf("You have been unsubscribed from **%s**.", mapping.ShortName),
 	}, nil
 }
 
-// handleAvailable lists user groups visible in Zulip to the bot account. It is
-// the admin-facing way to discover which Zulip user group IDs may be passed to
-// `group mapping set`. Local-import state is intentionally not shown: the bot
-// auto-imports on first mapping, so admins should not need to think about it.
+// listVisibleZulipUserGroups returns the user groups visible to the bot account
+// in Zulip, excluding deactivated and system groups. Sorted by ID.
+func (h *GroupHandler) listVisibleZulipUserGroups(ctx context.Context) ([]channelgroup.ZulipUserGroupSummary, error) {
+	resp, _, err := h.client.GetUserGroups(ctx).IncludeDeactivatedGroups(false).Execute()
+	if err != nil {
+		return nil, fmt.Errorf("list zulip user groups: %w", err)
+	}
+	summaries := make([]channelgroup.ZulipUserGroupSummary, 0, len(resp.UserGroups))
+	for _, group := range resp.UserGroups {
+		if group.Deactivated || group.IsSystemGroup {
+			continue
+		}
+		summaries = append(summaries, channelgroup.ZulipUserGroupSummary{
+			ID:            group.ID,
+			Name:          group.Name,
+			Description:   group.Description,
+			MemberCount:   len(group.Members),
+			IsSystemGroup: group.IsSystemGroup,
+		})
+	}
+	sort.Slice(summaries, func(i, j int) bool { return summaries[i].ID < summaries[j].ID })
+	return summaries, nil
+}
+
+// channelGroupExists reports whether the channel group with the given ID exists
+// in the local channelgroup database. Returns (false, nil) when missing.
+func (h *GroupHandler) channelGroupExists(ctx context.Context, channelGroupID int64) (bool, error) {
+	_, _, err := h.client.GetChannelGroup(ctx, channelGroupID).Execute()
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, channelgroup.ErrChannelGroupNotFound) {
+		return false, nil
+	}
+	return false, fmt.Errorf("check channel group %d exists: %w", channelGroupID, err)
+}
+
+// handleAvailable lists user groups visible in Zulip to the bot account.
 func (h *GroupHandler) handleAvailable(ctx context.Context, req command.Request) (command.Result, error) {
 	if err := h.auth.Check(ctx, req.Actor, command.PermAdmin); err != nil {
 		return command.Result{}, command.NewUserError("permission denied")
 	}
 
-	groups, err := h.groupChecker.ListZulipUserGroups(ctx)
+	groups, err := h.listVisibleZulipUserGroups(ctx)
 	if err != nil {
-		return command.Result{}, fmt.Errorf("list zulip user groups: %w", err)
+		return command.Result{}, err
 	}
 	if len(groups) == 0 {
 		return command.Result{Content: "No Zulip channel groups/user groups visible to this bot."}, nil
@@ -368,7 +365,6 @@ func (h *GroupHandler) handleAvailable(ctx context.Context, req command.Request)
 }
 
 // unknownGroupMessage returns a permission-safe error message for an unknown channel group.
-// Admins and owners may see a hint about `group mapping list`; normal users see a generic message.
 func unknownGroupMessage(ctx context.Context, auth command.Authorizer, req command.Request, shortName string) string {
 	if auth.Check(ctx, req.Actor, command.PermAdmin) == nil {
 		return fmt.Sprintf("Unknown channel group %q. Use `group mapping list` to see available groups.", shortName)
@@ -383,7 +379,7 @@ func (h *GroupHandler) handleMappingList(ctx context.Context, req command.Reques
 	if err := h.auth.Check(ctx, req.Actor, command.PermAdmin); err != nil {
 		return command.Result{}, command.NewUserError("permission denied")
 	}
-	mappings, err := h.mappingReader.ListAllEmojiGroupMappings(ctx)
+	mappings, err := h.repo.ListAllEmojiGroupMappings(ctx)
 	if err != nil {
 		return command.Result{}, err
 	}
@@ -399,7 +395,7 @@ func (h *GroupHandler) handleMappingList(ctx context.Context, req command.Reques
 			status = "disabled"
 		}
 		annotation := ""
-		exists, checkErr := h.groupChecker.ChannelGroupExists(ctx, m.ChannelGroupID)
+		exists, checkErr := h.channelGroupExists(ctx, m.ChannelGroupID)
 		if checkErr != nil {
 			annotation = " [check failed]"
 		} else if !exists {
@@ -412,16 +408,15 @@ func (h *GroupHandler) handleMappingList(ctx context.Context, req command.Reques
 }
 
 // validateEnabledMappings returns the list of enabled mappings that reference a
-// missing channel group. Used to gate announcement publication so the bot does
-// not advertise reactions it cannot fulfil.
+// missing channel group.
 func (h *GroupHandler) validateEnabledMappings(ctx context.Context) ([]storage.EmojiGroupMapping, error) {
-	mappings, err := h.mappingReader.ListEnabledEmojiGroupMappings(ctx)
+	mappings, err := h.repo.ListEnabledEmojiGroupMappings(ctx)
 	if err != nil {
 		return nil, err
 	}
 	var invalid []storage.EmojiGroupMapping
 	for _, m := range mappings {
-		exists, err := h.groupChecker.ChannelGroupExists(ctx, m.ChannelGroupID)
+		exists, err := h.channelGroupExists(ctx, m.ChannelGroupID)
 		if err != nil {
 			return nil, fmt.Errorf("verify channel group %d exists: %w", m.ChannelGroupID, err)
 		}
@@ -464,11 +459,10 @@ func (h *GroupHandler) handleMappingSet(
 		CreatedAt:      time.Now().UTC(),
 		UpdatedAt:      time.Now().UTC(),
 	}
-	if err := h.mappingWriter.UpsertEmojiGroupMapping(ctx, mapping); err != nil {
+	if err := h.repo.UpsertEmojiGroupMapping(ctx, mapping); err != nil {
 		return command.Result{}, fmt.Errorf("upsert emoji group mapping: %w", err)
 	}
 
-	// Trigger announcement update
 	h.triggerAnnouncementUpdate(ctx)
 
 	if imported {
@@ -484,9 +478,9 @@ func (h *GroupHandler) handleMappingSet(
 }
 
 // zulipGroupVisible reports whether the bot can see a user group with the given
-// ID in Zulip. It uses the same source as `group available`.
+// ID in Zulip.
 func (h *GroupHandler) zulipGroupVisible(ctx context.Context, userGroupID int64) (bool, error) {
-	groups, err := h.groupChecker.ListZulipUserGroups(ctx)
+	groups, err := h.listVisibleZulipUserGroups(ctx)
 	if err != nil {
 		return false, err
 	}
@@ -499,14 +493,13 @@ func (h *GroupHandler) zulipGroupVisible(ctx context.Context, userGroupID int64)
 }
 
 func (h *GroupHandler) ensureChannelGroupImported(ctx context.Context, channelGroupID int64) (bool, error) {
-	exists, err := h.groupChecker.ChannelGroupExists(ctx, channelGroupID)
+	exists, err := h.channelGroupExists(ctx, channelGroupID)
 	if err != nil {
 		return false, fmt.Errorf("verify channel group %d exists: %w", channelGroupID, err)
 	}
 	if exists {
 		return false, nil
 	}
-	// Auto-import: only proceed if the Zulip user group is visible to the bot.
 	visible, err := h.zulipGroupVisible(ctx, channelGroupID)
 	if err != nil {
 		return false, fmt.Errorf("check zulip visibility for group %d: %w", channelGroupID, err)
@@ -517,7 +510,7 @@ func (h *GroupHandler) ensureChannelGroupImported(ctx context.Context, channelGr
 			channelGroupID,
 		))
 	}
-	if err := h.groupChecker.ImportZulipUserGroup(ctx, channelGroupID); err != nil {
+	if err := h.client.ImportZulipUserGroup(ctx, channelGroupID); err != nil {
 		return false, fmt.Errorf("auto-import channel group %d: %w", channelGroupID, err)
 	}
 	return true, nil
@@ -533,11 +526,10 @@ func (h *GroupHandler) handleMappingDisable(
 	}
 	shortName := args.ShortName
 
-	if err := h.mappingWriter.SetEmojiGroupMappingEnabled(ctx, shortName, false); err != nil {
+	if err := h.repo.SetEmojiGroupMappingEnabled(ctx, shortName, false); err != nil {
 		return command.Result{}, fmt.Errorf("disable emoji group mapping: %w", err)
 	}
 
-	// Trigger announcement update
 	h.triggerAnnouncementUpdate(ctx)
 
 	return command.Result{
@@ -565,7 +557,7 @@ func (h *GroupHandler) runAnnounce(ctx context.Context, req command.Request) (co
 		))
 	}
 
-	state, ok, err := h.stateAccessor.GetAnnouncementState(ctx)
+	state, ok, err := h.repo.GetAnnouncementState(ctx)
 	if err != nil {
 		return command.Result{}, fmt.Errorf("read announcement state: %w", err)
 	}
@@ -615,9 +607,9 @@ func (h *GroupHandler) handleAnnounceSetMessage(
 		return command.Result{}, command.NewUserError("message_id must be a positive integer")
 	}
 
-	if err := h.stateAccessor.SaveAnnouncementState(ctx, storage.AnnouncementState{
+	if err := h.repo.SaveAnnouncementState(ctx, storage.AnnouncementState{
 		MessageID:   &msgID,
-		ContentHash: "", // force re-render on next announce
+		ContentHash: "",
 	}); err != nil {
 		return command.Result{}, fmt.Errorf("save announcement state: %w", err)
 	}
@@ -634,7 +626,7 @@ func (h *GroupHandler) handleAnnounceInspect(ctx context.Context, req command.Re
 	if err := h.auth.Check(ctx, req.Actor, command.PermAdmin); err != nil {
 		return command.Result{}, command.NewUserError("permission denied")
 	}
-	state, ok, err := h.stateAccessor.GetAnnouncementState(ctx)
+	state, ok, err := h.repo.GetAnnouncementState(ctx)
 	if err != nil {
 		return command.Result{}, fmt.Errorf("read announcement state: %w", err)
 	}
@@ -673,7 +665,6 @@ func (h *GroupHandler) handleAnnounceInspect(ctx context.Context, req command.Re
 
 func (h *GroupHandler) handleChannelModify(
 	ctx context.Context,
-	_ command.Request,
 	channelID int64,
 	shortName string,
 	op func(ctx context.Context, groupID, channelID int64) error,
@@ -683,7 +674,7 @@ func (h *GroupHandler) handleChannelModify(
 		return command.Result{}, command.NewUserError("channel_id must be a positive integer")
 	}
 
-	mapping, found, err := h.mappingReader.GetEmojiGroupMappingByShortName(ctx, shortName)
+	mapping, found, err := h.repo.GetEmojiGroupMappingByShortName(ctx, shortName)
 	if err != nil {
 		return command.Result{}, err
 	}
@@ -697,6 +688,26 @@ func (h *GroupHandler) handleChannelModify(
 	return command.Result{Content: fmt.Sprintf(successFmt, channelID, mapping.ShortName)}, nil
 }
 
+func (h *GroupHandler) addChannelToGroup(ctx context.Context, channelGroupID, channelID int64) error {
+	_, _, err := h.client.UpdateChannelGroupChannels(ctx, channelGroupID).
+		Add([]int64{channelID}).
+		Execute()
+	if err != nil {
+		return fmt.Errorf("add channel %d to channel group %d: %w", channelID, channelGroupID, err)
+	}
+	return nil
+}
+
+func (h *GroupHandler) removeChannelFromGroup(ctx context.Context, channelGroupID, channelID int64) error {
+	_, _, err := h.client.UpdateChannelGroupChannels(ctx, channelGroupID).
+		Delete([]int64{channelID}).
+		Execute()
+	if err != nil {
+		return fmt.Errorf("remove channel %d from channel group %d: %w", channelID, channelGroupID, err)
+	}
+	return nil
+}
+
 func (h *GroupHandler) handleChannelAdd(
 	ctx context.Context,
 	req command.Request,
@@ -705,11 +716,8 @@ func (h *GroupHandler) handleChannelAdd(
 	if err := h.auth.Check(ctx, req.Actor, command.PermAdmin); err != nil {
 		return command.Result{}, command.NewUserError("permission denied")
 	}
-	if h.channelManager == nil {
-		return command.Result{}, command.NewUserError("channel command not available")
-	}
-	return h.handleChannelModify(ctx, req, args.ChannelID, args.ShortName,
-		h.channelManager.AddChannelToGroup, "Added channel %d to **%s**.")
+	return h.handleChannelModify(ctx, args.ChannelID, args.ShortName,
+		h.addChannelToGroup, "Added channel %d to **%s**.")
 }
 
 func (h *GroupHandler) handleChannelRemove(
@@ -720,11 +728,8 @@ func (h *GroupHandler) handleChannelRemove(
 	if err := h.auth.Check(ctx, req.Actor, command.PermAdmin); err != nil {
 		return command.Result{}, command.NewUserError("permission denied")
 	}
-	if h.channelManager == nil {
-		return command.Result{}, command.NewUserError("channel command not available")
-	}
-	return h.handleChannelModify(ctx, req, args.ChannelID, args.ShortName,
-		h.channelManager.RemoveChannelFromGroup, "Removed channel %d from **%s**.")
+	return h.handleChannelModify(ctx, args.ChannelID, args.ShortName,
+		h.removeChannelFromGroup, "Removed channel %d from **%s**.")
 }
 
 func (h *GroupHandler) handleChannelCreate(
@@ -735,13 +740,10 @@ func (h *GroupHandler) handleChannelCreate(
 	if err := h.auth.Check(ctx, req.Actor, command.PermAdmin); err != nil {
 		return command.Result{}, command.NewUserError("permission denied")
 	}
-	if h.channelManager == nil {
-		return command.Result{}, command.NewUserError("channel command not available")
-	}
 	channelName := args.ChannelName
 	shortName := args.ShortName
 
-	mapping, found, err := h.mappingReader.GetEmojiGroupMappingByShortName(ctx, shortName)
+	mapping, found, err := h.repo.GetEmojiGroupMappingByShortName(ctx, shortName)
 	if err != nil {
 		return command.Result{}, err
 	}
@@ -749,7 +751,7 @@ func (h *GroupHandler) handleChannelCreate(
 		return command.Result{}, command.NewUserError(fmt.Sprintf("Unknown channel group %q.", shortName))
 	}
 
-	channelID, err := h.channelManager.CreateChannelAndAddToGroup(ctx, channelName, mapping.ChannelGroupID)
+	channelID, err := h.createChannelAndAddToGroup(ctx, channelName, mapping.ChannelGroupID)
 	if err != nil {
 		return command.Result{}, fmt.Errorf("create channel and add to group: %w", err)
 	}
@@ -763,8 +765,35 @@ func (h *GroupHandler) handleChannelCreate(
 	}, nil
 }
 
+// createChannelAndAddToGroup creates a new Zulip channel and adds it to the
+// specified group. The bot account is subscribed as the initial member.
+func (h *GroupHandler) createChannelAndAddToGroup(
+	ctx context.Context,
+	channelName string,
+	channelGroupID int64,
+) (int64, error) {
+	ownUserResp, _, err := h.client.GetOwnUser(ctx).Execute()
+	if err != nil {
+		return 0, fmt.Errorf("get own Zulip user for channel creation: %w", err)
+	}
+	if ownUserResp == nil || ownUserResp.User.UserID <= 0 {
+		return 0, errors.New("get own Zulip user for channel creation: missing user ID")
+	}
+	channelResp, _, err := h.client.CreateChannel(ctx).
+		Name(channelName).
+		Subscribers([]int64{ownUserResp.User.UserID}).
+		Execute()
+	if err != nil {
+		return 0, fmt.Errorf("create channel %q: %w", channelName, err)
+	}
+	if err := h.addChannelToGroup(ctx, channelGroupID, channelResp.ID); err != nil {
+		return 0, fmt.Errorf("add channel %d to group %d: %w", channelResp.ID, channelGroupID, err)
+	}
+	return channelResp.ID, nil
+}
+
 func (h *GroupHandler) triggerAnnouncementUpdate(ctx context.Context) {
-	state, ok, err := h.stateAccessor.GetAnnouncementState(ctx)
+	state, ok, err := h.repo.GetAnnouncementState(ctx)
 	if err != nil {
 		return
 	}
@@ -781,34 +810,28 @@ func (h *GroupHandler) triggerAnnouncementUpdate(ctx context.Context) {
 		}
 		send = &announcement.SendParams{ChannelID: channelID, Topic: topic}
 	}
-	// send is nil when message_id is stored; manager handles edit path
 
 	if err := h.announcer.UpdateAfterMappingChange(ctx, send); err != nil {
 		_ = err
 	}
 }
 
-// Ensure GroupHandler implements command.Handler.
 var _ command.Handler = (*GroupHandler)(nil)
 
-// GroupConfigAdapterFromConfigSvc creates a GroupConfigReader backed by a raw config reader.
-// This is used to adapt configsvc.Service to the GroupConfigReader interface.
+// GroupConfigAdapter adapts two provider functions into a GroupConfigReader.
 type GroupConfigAdapter struct {
 	getChannelID func(ctx context.Context) (int64, bool, error)
 	getTopic     func(ctx context.Context) (string, bool, error)
 }
 
-// AnnouncementChannelID implements GroupConfigReader.
 func (a *GroupConfigAdapter) AnnouncementChannelID(ctx context.Context) (int64, bool, error) {
 	return a.getChannelID(ctx)
 }
 
-// AnnouncementTopic implements GroupConfigReader.
 func (a *GroupConfigAdapter) AnnouncementTopic(ctx context.Context) (string, bool, error) {
 	return a.getTopic(ctx)
 }
 
-// NewGroupConfigAdapter wraps two provider functions into a GroupConfigReader.
 func NewGroupConfigAdapter(
 	getChannelID func(ctx context.Context) (int64, bool, error),
 	getTopic func(ctx context.Context) (string, bool, error),
@@ -819,8 +842,6 @@ func NewGroupConfigAdapter(
 	}
 }
 
-// groupConfigInterfaceCheck asserts GroupConfigAdapter implements GroupConfigReader.
 var _ GroupConfigReader = (*GroupConfigAdapter)(nil)
 
-// Ensure zulip.Role import is used.
 var _ zulip.Role = command.PermAdmin
