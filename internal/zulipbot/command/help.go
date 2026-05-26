@@ -81,22 +81,36 @@ func (handler *HelpHandler) visibleMetas(role zulip.Role) []Metadata {
 }
 
 // formatHelp renders the help text for the given command list and actor role.
+// Usage selection priority (highest wins): OwnerUsage > AdminUsage > Usage.
+// Both AdminUsage and OwnerUsage may contain newline-separated variants; each
+// variant is rendered as its own bullet point. The command summary is appended
+// only to the first bullet.
 func formatHelp(metas []Metadata, role zulip.Role) string {
 	var builder strings.Builder
 	builder.WriteString("Supported commands (send as a private message, no prefix needed):\n")
 	for _, meta := range metas {
 		usage := meta.Usage
+		if meta.AdminUsage != "" && role <= zulip.RoleAdmin {
+			usage = meta.AdminUsage
+		}
 		if meta.OwnerUsage != "" && role <= zulip.RoleOwner {
 			usage = meta.OwnerUsage
 		}
-		builder.WriteString("- `")
-		builder.WriteString(usage)
-		builder.WriteString("`")
-		if meta.Summary != "" {
-			builder.WriteString(" — ")
-			builder.WriteString(meta.Summary)
+		lines := strings.Split(usage, "\n")
+		for i, line := range lines {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			builder.WriteString("- `")
+			builder.WriteString(line)
+			builder.WriteString("`")
+			if i == 0 && meta.Summary != "" {
+				builder.WriteString(" — ")
+				builder.WriteString(meta.Summary)
+			}
+			builder.WriteByte('\n')
 		}
-		builder.WriteByte('\n')
 	}
 	return strings.TrimSpace(builder.String())
 }

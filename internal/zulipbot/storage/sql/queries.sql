@@ -138,3 +138,65 @@ INSERT INTO audit_log(
   new_value,
   error
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+
+-- emoji_group_mappings
+
+-- name: UpsertEmojiGroupMapping :exec
+INSERT INTO emoji_group_mappings (short_name, display_name, channel_group_id, emoji_name, emoji_code, reaction_type, enabled, sort_order, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(short_name) DO UPDATE SET
+  display_name = excluded.display_name,
+  channel_group_id = excluded.channel_group_id,
+  emoji_name = excluded.emoji_name,
+  emoji_code = excluded.emoji_code,
+  reaction_type = excluded.reaction_type,
+  enabled = excluded.enabled,
+  sort_order = excluded.sort_order,
+  updated_at = excluded.updated_at;
+
+-- name: ListEnabledEmojiGroupMappings :many
+SELECT id, short_name, display_name, channel_group_id, emoji_name, emoji_code, reaction_type, enabled, sort_order, created_at, updated_at
+FROM emoji_group_mappings
+WHERE enabled = 1
+ORDER BY sort_order, short_name;
+
+-- name: ListAllEmojiGroupMappings :many
+SELECT id, short_name, display_name, channel_group_id, emoji_name, emoji_code, reaction_type, enabled, sort_order, created_at, updated_at
+FROM emoji_group_mappings
+ORDER BY sort_order, short_name;
+
+-- name: GetEmojiGroupMappingByShortName :one
+SELECT id, short_name, display_name, channel_group_id, emoji_name, emoji_code, reaction_type, enabled, sort_order, created_at, updated_at
+FROM emoji_group_mappings
+WHERE short_name = ? AND enabled = 1;
+
+-- name: GetEmojiGroupMappingByEmoji :one
+SELECT id, short_name, display_name, channel_group_id, emoji_name, emoji_code, reaction_type, enabled, sort_order, created_at, updated_at
+FROM emoji_group_mappings
+WHERE emoji_name = ? AND reaction_type = ? AND enabled = 1;
+
+-- name: SetEmojiGroupMappingEnabled :exec
+UPDATE emoji_group_mappings SET enabled = ?, updated_at = ? WHERE short_name = ?;
+
+-- announcement_state
+
+-- name: GetAnnouncementState :one
+SELECT id, message_id, content_hash, updated_at FROM announcement_state WHERE id = 1;
+
+-- name: SaveAnnouncementState :exec
+INSERT INTO announcement_state (id, message_id, content_hash, updated_at)
+VALUES (1, ?, ?, ?)
+ON CONFLICT(id) DO UPDATE SET
+  message_id = excluded.message_id,
+  content_hash = excluded.content_hash,
+  updated_at = excluded.updated_at;
+
+-- processed_reactions
+
+-- name: IsReactionProcessed :one
+SELECT id FROM processed_reactions
+WHERE message_id = ? AND user_id = ? AND emoji_name = ? AND op = ?;
+
+-- name: MarkReactionProcessed :exec
+INSERT OR IGNORE INTO processed_reactions (message_id, user_id, emoji_name, op, processed_at)
+VALUES (?, ?, ?, ?, ?);

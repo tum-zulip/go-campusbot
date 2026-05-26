@@ -19,7 +19,11 @@ type Metadata struct {
 	Name    string
 	Summary string
 	Usage   string
-	// OwnerUsage, when non-empty, overrides Usage in help output shown to owners.
+	// AdminUsage, when non-empty, overrides Usage in help output shown to admins and owners.
+	// May contain multiple newline-separated variants; each is rendered as its own bullet.
+	AdminUsage string
+	// OwnerUsage, when non-empty, overrides Usage (and AdminUsage) in help output shown to owners.
+	// May contain multiple newline-separated variants; each is rendered as its own bullet.
 	OwnerUsage string
 	Permission zulip.Role
 	Privileged bool

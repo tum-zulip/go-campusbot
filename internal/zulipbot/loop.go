@@ -10,6 +10,7 @@ import (
 	z "github.com/tum-zulip/go-zulip/zulip"
 	"github.com/tum-zulip/go-zulip/zulip/events"
 
+	"github.com/tum-zulip/go-campusbot/internal/channelgroup"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/audit"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/command"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/storage"
@@ -27,6 +28,12 @@ type Messenger interface {
 	SendReply(ctx context.Context, target command.ReplyTarget, content string) (int64, error)
 }
 
+// GroupSubscriberForLoop handles subscribe/unsubscribe for reaction events.
+type GroupSubscriberForLoop interface {
+	SubscribeUser(ctx context.Context, userID int64, channelGroupID int64) error
+	UnsubscribeUser(ctx context.Context, userID int64, channelGroupID int64) error
+}
+
 type Loop struct {
 	source           Source
 	repo             *storage.Repository
@@ -38,6 +45,7 @@ type Loop struct {
 	minBackoff       time.Duration
 	maxBackoff       time.Duration
 	pollTimeout      time.Duration
+	groupSubscriber  GroupSubscriberForLoop
 }
 
 type LoopConfig struct {
@@ -49,6 +57,8 @@ type LoopConfig struct {
 	OwnUserID        int64
 	Logger           *slog.Logger
 	PollTimeout      time.Duration
+	// GroupSubscriber is optional; if nil, reaction events are ignored.
+	GroupSubscriber GroupSubscriberForLoop
 }
 
 func NewLoop(cfg LoopConfig) (*Loop, error) {
@@ -84,6 +94,7 @@ func NewLoop(cfg LoopConfig) (*Loop, error) {
 		minBackoff:       defaultMinBackoff,
 		maxBackoff:       defaultMaxBackoff,
 		pollTimeout:      cfg.PollTimeout,
+		groupSubscriber:  cfg.GroupSubscriber,
 	}, nil
 }
 
@@ -262,10 +273,123 @@ func (loop *Loop) handleEvent(ctx context.Context, event events.Event, state *Qu
 		}
 		state.LastEventID = event.GetID()
 		return nil
+	case events.EventTypeReaction:
+		reactionEvent, ok := event.(events.ReactionEvent)
+		if !ok {
+			// Advance state even on malformed events to avoid hot-looping on a
+			// permanently undecodable event.
+			state.LastEventID = event.GetID()
+			return fmt.Errorf("reaction event has unexpected Go type %T", event)
+		}
+		handleErr := loop.handleReaction(ctx, reactionEvent)
+		// Always advance LastEventID for reaction events: domain/configuration
+		// failures (e.g. missing channel group) are marked processed inside
+		// handleReaction, and we must not retry the same event from Zulip.
+		state.LastEventID = event.GetID()
+		return handleErr
 	default:
 		state.LastEventID = event.GetID()
 		return nil
 	}
+}
+
+func (loop *Loop) handleReaction(ctx context.Context, event events.ReactionEvent) error {
+	if loop.groupSubscriber == nil {
+		return nil
+	}
+
+	// Check if reaction is for the announcement message
+	announcementState, ok, err := loop.repo.GetAnnouncementState(ctx)
+	if err != nil || !ok || announcementState.MessageID == nil {
+		return nil // no announcement message, ignore
+	}
+	if event.MessageID != *announcementState.MessageID {
+		return nil // not the announcement message
+	}
+
+	// Ignore bot's own reactions
+	if event.UserID == loop.ownUserID {
+		return nil
+	}
+
+	op, hasOp := event.GetOp()
+	if !hasOp {
+		return nil
+	}
+	opStr := string(op)
+
+	// Dedup
+	processed, err := loop.repo.IsReactionProcessed(ctx, event.MessageID, event.UserID, event.EmojiName, opStr)
+	if err != nil {
+		return err
+	}
+	if processed {
+		return nil
+	}
+
+	// Look up mapping
+	mapping, found, err := loop.repo.GetEmojiGroupMappingByEmoji(ctx, event.EmojiName, string(event.ReactionType))
+	if err != nil {
+		return err
+	}
+	if !found {
+		// Unknown/disabled emoji, mark as processed and ignore
+		return loop.repo.MarkReactionProcessed(ctx, event.MessageID, event.UserID, event.EmojiName, opStr)
+	}
+
+	var opErr error
+	switch op {
+	case events.EventOpAdd:
+		opErr = loop.groupSubscriber.SubscribeUser(ctx, event.UserID, mapping.ChannelGroupID)
+	case events.EventOpRemove:
+		opErr = loop.groupSubscriber.UnsubscribeUser(ctx, event.UserID, mapping.ChannelGroupID)
+	}
+
+	if opErr != nil {
+		// Domain/configuration failures (e.g. mapping points to a channel group
+		// that no longer exists) must not hot-loop the Zulip event queue. Mark
+		// the reaction as handled so we never retry it from the queue. The
+		// admin must fix the mapping or recreate the channel group; users can
+		// then remove and re-add the reaction.
+		if errors.Is(opErr, channelgroup.ErrChannelGroupNotFound) {
+			loop.logger.ErrorContext(
+				ctx,
+				"reaction group operation failed: channel group missing; recording as handled to avoid retry loop",
+				"user_id",
+				event.UserID,
+				"group_short_name",
+				mapping.ShortName,
+				"channel_group_id",
+				mapping.ChannelGroupID,
+				"op",
+				opStr,
+				"message_id",
+				event.MessageID,
+				"error",
+				opErr,
+			)
+			if markErr := loop.repo.MarkReactionProcessed(ctx, event.MessageID, event.UserID, event.EmojiName, opStr); markErr != nil {
+				return markErr
+			}
+			return nil
+		}
+		loop.logger.ErrorContext(ctx, "reaction group operation failed",
+			"user_id", event.UserID,
+			"group_short_name", mapping.ShortName,
+			"channel_group_id", mapping.ChannelGroupID,
+			"op", opStr,
+			"message_id", event.MessageID,
+			"error", opErr)
+		return opErr
+	}
+
+	loop.logger.InfoContext(ctx, "reaction group operation completed",
+		"user_id", event.UserID,
+		"group_short_name", mapping.ShortName,
+		"op", opStr,
+		"message_id", event.MessageID)
+
+	return loop.repo.MarkReactionProcessed(ctx, event.MessageID, event.UserID, event.EmojiName, opStr)
 }
 
 func (loop *Loop) handleMessage(ctx context.Context, event events.MessageEvent) error {

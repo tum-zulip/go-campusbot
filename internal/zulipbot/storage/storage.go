@@ -97,6 +97,11 @@ func (repo *Repository) Close() error {
 	return repo.db.Close()
 }
 
+// DB returns the underlying sql.DB for use by packages that require direct access.
+func (repo *Repository) DB() *sql.DB {
+	return repo.db
+}
+
 func (repo *Repository) Migrate(ctx context.Context) error {
 	if _, err := repo.db.ExecContext(ctx, schemaSQL); err != nil {
 		return fmt.Errorf("apply development SQLite schema: %w", err)
@@ -508,4 +513,248 @@ func parseTime(value string) (time.Time, error) {
 		return time.Time{}, fmt.Errorf("parse stored timestamp %q: %w", value, err)
 	}
 	return parsed, nil
+}
+
+// EmojiGroupMapping is the domain type for emoji -> group mappings.
+type EmojiGroupMapping struct {
+	ID             int64
+	ShortName      string
+	DisplayName    string
+	ChannelGroupID int64
+	EmojiName      string
+	EmojiCode      string
+	ReactionType   string
+	Enabled        bool
+	SortOrder      int64
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+}
+
+func emojiGroupMappingFromRow(row storagedb.EmojiGroupMapping) (EmojiGroupMapping, error) {
+	createdAt, err := parseTime(row.CreatedAt)
+	if err != nil {
+		return EmojiGroupMapping{}, err
+	}
+	updatedAt, err := parseTime(row.UpdatedAt)
+	if err != nil {
+		return EmojiGroupMapping{}, err
+	}
+	return EmojiGroupMapping{
+		ID:             row.ID,
+		ShortName:      row.ShortName,
+		DisplayName:    row.DisplayName,
+		ChannelGroupID: row.ChannelGroupID,
+		EmojiName:      row.EmojiName,
+		EmojiCode:      row.EmojiCode,
+		ReactionType:   row.ReactionType,
+		Enabled:        row.Enabled != 0,
+		SortOrder:      row.SortOrder,
+		CreatedAt:      createdAt,
+		UpdatedAt:      updatedAt,
+	}, nil
+}
+
+// UpsertEmojiGroupMapping creates or updates an emoji->group mapping.
+func (repo *Repository) UpsertEmojiGroupMapping(ctx context.Context, m EmojiGroupMapping) error {
+	now := repo.now()
+	createdAt := formatTime(now)
+	if !m.CreatedAt.IsZero() {
+		createdAt = formatTime(m.CreatedAt)
+	}
+	enabled := int64(0)
+	if m.Enabled {
+		enabled = 1
+	}
+	if err := repo.queries.UpsertEmojiGroupMapping(ctx, storagedb.UpsertEmojiGroupMappingParams{
+		ShortName:      m.ShortName,
+		DisplayName:    m.DisplayName,
+		ChannelGroupID: m.ChannelGroupID,
+		EmojiName:      m.EmojiName,
+		EmojiCode:      m.EmojiCode,
+		ReactionType:   m.ReactionType,
+		Enabled:        enabled,
+		SortOrder:      m.SortOrder,
+		CreatedAt:      createdAt,
+		UpdatedAt:      formatTime(now),
+	}); err != nil {
+		return fmt.Errorf("upsert emoji group mapping %q: %w", m.ShortName, err)
+	}
+	return nil
+}
+
+// ListEnabledEmojiGroupMappings lists enabled mappings ordered for announcement rendering.
+func (repo *Repository) ListEnabledEmojiGroupMappings(ctx context.Context) ([]EmojiGroupMapping, error) {
+	rows, err := repo.queries.ListEnabledEmojiGroupMappings(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list enabled emoji group mappings: %w", err)
+	}
+	result := make([]EmojiGroupMapping, 0, len(rows))
+	for _, row := range rows {
+		m, err := emojiGroupMappingFromRow(row)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, m)
+	}
+	return result, nil
+}
+
+// ListAllEmojiGroupMappings lists all mappings (for admin commands).
+func (repo *Repository) ListAllEmojiGroupMappings(ctx context.Context) ([]EmojiGroupMapping, error) {
+	rows, err := repo.queries.ListAllEmojiGroupMappings(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list all emoji group mappings: %w", err)
+	}
+	result := make([]EmojiGroupMapping, 0, len(rows))
+	for _, row := range rows {
+		m, err := emojiGroupMappingFromRow(row)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, m)
+	}
+	return result, nil
+}
+
+// GetEmojiGroupMappingByShortName looks up an enabled mapping by short name.
+func (repo *Repository) GetEmojiGroupMappingByShortName(
+	ctx context.Context,
+	shortName string,
+) (EmojiGroupMapping, bool, error) {
+	row, err := repo.queries.GetEmojiGroupMappingByShortName(ctx, shortName)
+	if errors.Is(err, sql.ErrNoRows) {
+		return EmojiGroupMapping{}, false, nil
+	}
+	if err != nil {
+		return EmojiGroupMapping{}, false, fmt.Errorf("get emoji group mapping by short name %q: %w", shortName, err)
+	}
+	m, err := emojiGroupMappingFromRow(row)
+	if err != nil {
+		return EmojiGroupMapping{}, false, err
+	}
+	return m, true, nil
+}
+
+// GetEmojiGroupMappingByEmoji looks up an enabled mapping by emoji identity.
+func (repo *Repository) GetEmojiGroupMappingByEmoji(
+	ctx context.Context,
+	emojiName, reactionType string,
+) (EmojiGroupMapping, bool, error) {
+	row, err := repo.queries.GetEmojiGroupMappingByEmoji(ctx, storagedb.GetEmojiGroupMappingByEmojiParams{
+		EmojiName:    emojiName,
+		ReactionType: reactionType,
+	})
+	if errors.Is(err, sql.ErrNoRows) {
+		return EmojiGroupMapping{}, false, nil
+	}
+	if err != nil {
+		return EmojiGroupMapping{}, false, fmt.Errorf("get emoji group mapping by emoji %q: %w", emojiName, err)
+	}
+	m, err := emojiGroupMappingFromRow(row)
+	if err != nil {
+		return EmojiGroupMapping{}, false, err
+	}
+	return m, true, nil
+}
+
+// SetEmojiGroupMappingEnabled enables or disables a mapping by short name.
+func (repo *Repository) SetEmojiGroupMappingEnabled(ctx context.Context, shortName string, enabled bool) error {
+	enabledInt := int64(0)
+	if enabled {
+		enabledInt = 1
+	}
+	if err := repo.queries.SetEmojiGroupMappingEnabled(ctx, storagedb.SetEmojiGroupMappingEnabledParams{
+		Enabled:   enabledInt,
+		UpdatedAt: formatTime(repo.now()),
+		ShortName: shortName,
+	}); err != nil {
+		return fmt.Errorf("set emoji group mapping enabled for %q: %w", shortName, err)
+	}
+	return nil
+}
+
+// AnnouncementState holds the stored announcement message state.
+type AnnouncementState struct {
+	MessageID   *int64
+	ContentHash string
+	UpdatedAt   time.Time
+}
+
+// GetAnnouncementState returns the current announcement state (ok=false if not yet seeded).
+func (repo *Repository) GetAnnouncementState(ctx context.Context) (AnnouncementState, bool, error) {
+	row, err := repo.queries.GetAnnouncementState(ctx)
+	if errors.Is(err, sql.ErrNoRows) {
+		return AnnouncementState{}, false, nil
+	}
+	if err != nil {
+		return AnnouncementState{}, false, fmt.Errorf("get announcement state: %w", err)
+	}
+	updatedAt, err := parseTime(row.UpdatedAt)
+	if err != nil {
+		return AnnouncementState{}, false, err
+	}
+	state := AnnouncementState{
+		ContentHash: row.ContentHash,
+		UpdatedAt:   updatedAt,
+	}
+	if row.MessageID.Valid {
+		id := row.MessageID.Int64
+		state.MessageID = &id
+	}
+	return state, true, nil
+}
+
+// SaveAnnouncementState persists the announcement message state.
+func (repo *Repository) SaveAnnouncementState(ctx context.Context, state AnnouncementState) error {
+	var messageID sql.NullInt64
+	if state.MessageID != nil {
+		messageID = sql.NullInt64{Int64: *state.MessageID, Valid: true}
+	}
+	if err := repo.queries.SaveAnnouncementState(ctx, storagedb.SaveAnnouncementStateParams{
+		MessageID:   messageID,
+		ContentHash: state.ContentHash,
+		UpdatedAt:   formatTime(repo.now()),
+	}); err != nil {
+		return fmt.Errorf("save announcement state: %w", err)
+	}
+	return nil
+}
+
+// IsReactionProcessed returns true if this reaction event has already been processed.
+func (repo *Repository) IsReactionProcessed(
+	ctx context.Context,
+	messageID, userID int64,
+	emojiName, op string,
+) (bool, error) {
+	_, err := repo.queries.IsReactionProcessed(ctx, storagedb.IsReactionProcessedParams{
+		MessageID: messageID,
+		UserID:    userID,
+		EmojiName: emojiName,
+		Op:        op,
+	})
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("check processed reaction: %w", err)
+	}
+	return true, nil
+}
+
+// MarkReactionProcessed records that a reaction event has been processed.
+func (repo *Repository) MarkReactionProcessed(
+	ctx context.Context,
+	messageID, userID int64,
+	emojiName, op string,
+) error {
+	if err := repo.queries.MarkReactionProcessed(ctx, storagedb.MarkReactionProcessedParams{
+		MessageID:   messageID,
+		UserID:      userID,
+		EmojiName:   emojiName,
+		Op:          op,
+		ProcessedAt: formatTime(repo.now()),
+	}); err != nil {
+		return fmt.Errorf("mark reaction processed: %w", err)
+	}
+	return nil
 }

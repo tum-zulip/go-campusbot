@@ -16,6 +16,8 @@ import (
 
 const (
 	KeyRestartStartupNotification = "restart_startup_notification"
+	KeyAnnouncementChannelID      = "announcement.channel_id"
+	KeyAnnouncementTopic          = "announcement.topic"
 )
 
 var ErrUnknownKey = errors.New("unknown config key")
@@ -64,6 +66,22 @@ func DefaultDefinitions() map[string]Definition {
 			ReadPermission:  zulip.RoleAdmin,
 			WritePermission: zulip.RoleAdmin,
 			Validate:        validateBool,
+		},
+		{
+			Key:             KeyAnnouncementChannelID,
+			Summary:         "Channel ID for the channel group announcement message.",
+			Default:         "",
+			ReadPermission:  zulip.RoleAdmin,
+			WritePermission: zulip.RoleAdmin,
+			Validate:        validateNonNegativeInt64,
+		},
+		{
+			Key:             KeyAnnouncementTopic,
+			Summary:         "Topic for the channel group announcement message.",
+			Default:         "",
+			ReadPermission:  zulip.RoleAdmin,
+			WritePermission: zulip.RoleAdmin,
+			Validate:        validateNonEmptyString,
 		},
 	}
 
@@ -192,4 +210,20 @@ func validateBool(value string) (string, error) {
 	default:
 		return "", errors.New("expected a boolean value")
 	}
+}
+
+func validateNonNegativeInt64(value string) (string, error) {
+	v, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+	if err != nil || v <= 0 {
+		return "", errors.New("expected a positive integer")
+	}
+	return strconv.FormatInt(v, 10), nil
+}
+
+func validateNonEmptyString(value string) (string, error) {
+	v := strings.TrimSpace(value)
+	if v == "" {
+		return "", errors.New("value must not be empty")
+	}
+	return v, nil
 }
