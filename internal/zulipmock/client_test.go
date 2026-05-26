@@ -4,6 +4,8 @@ import (
 	"context"
 	"testing"
 
+	"github.com/tum-zulip/go-zulip/zulip"
+	"github.com/tum-zulip/go-zulip/zulip/api/channels"
 	"github.com/tum-zulip/go-zulip/zulip/client"
 )
 
@@ -22,4 +24,147 @@ func TestBuilderExecuteReturnsNil(t *testing.T) {
 	if err != nil {
 		t.Fatalf("error = %v, want nil", err)
 	}
+}
+
+func TestUserGroupsAreInMemoryPerClient(t *testing.T) {
+	ctx := context.Background()
+	client := NewClient()
+
+	created, _, err := client.CreateUserGroup(ctx).
+		Name("testers").
+		Description("Test users").
+		Members([]int64{2, 1}).
+		Execute()
+	if err != nil {
+		t.Fatalf("CreateUserGroup error = %v", err)
+	}
+
+	members, _, err := client.GetUserGroupMembers(ctx, created.GroupID).Execute()
+	if err != nil {
+		t.Fatalf("GetUserGroupMembers error = %v", err)
+	}
+	if got, want := members.Members, []int64{1, 2}; !equalInt64s(got, want) {
+		t.Fatalf("members = %v, want %v", got, want)
+	}
+
+	_, _, err = client.UpdateUserGroupMembers(ctx, created.GroupID).
+		Delete([]int64{1}).
+		Add([]int64{3}).
+		Execute()
+	if err != nil {
+		t.Fatalf("UpdateUserGroupMembers error = %v", err)
+	}
+
+	status, _, err := client.GetIsUserGroupMember(ctx, created.GroupID, 3).Execute()
+	if err != nil {
+		t.Fatalf("GetIsUserGroupMember error = %v", err)
+	}
+	if !status.IsUserGroupMember {
+		t.Fatalf("IsUserGroupMember = false, want true")
+	}
+
+	members, _, err = client.GetUserGroupMembers(ctx, created.GroupID).Execute()
+	if err != nil {
+		t.Fatalf("GetUserGroupMembers after update error = %v", err)
+	}
+	if got, want := members.Members, []int64{2, 3}; !equalInt64s(got, want) {
+		t.Fatalf("members after update = %v, want %v", got, want)
+	}
+
+	_, _, err = client.DeactivateUserGroup(ctx, created.GroupID).Execute()
+	if err != nil {
+		t.Fatalf("DeactivateUserGroup error = %v", err)
+	}
+	_, _, err = client.GetUserGroupMembers(ctx, created.GroupID).Execute()
+	if err != nil {
+		t.Fatalf("GetUserGroupMembers after deactivate error = %v", err)
+	}
+
+	otherClient := NewClient()
+	_, _, err = otherClient.GetUserGroupMembers(ctx, created.GroupID).Execute()
+	if err == nil {
+		t.Fatalf("second client found first client's user group")
+	}
+}
+
+func TestSubscribeUnsubscribeAndGetChannelByID(t *testing.T) {
+	ctx := context.Background()
+	client := NewClient()
+	description := "Course channel"
+
+	resp, _, err := client.Subscribe(ctx).
+		Subscriptions([]channels.SubscriptionRequest{{Name: "course", Description: &description}}).
+		Principals(zulip.UserIDsAsPrincipals(10, 20)).
+		Execute()
+	if err != nil {
+		t.Fatalf("Subscribe error = %v", err)
+	}
+	if got, want := resp.Subscribed["10"], []string{"course"}; !equalStrings(got, want) {
+		t.Fatalf("subscribed[10] = %v, want %v", got, want)
+	}
+
+	resp, _, err = client.Subscribe(ctx).
+		Subscriptions([]channels.SubscriptionRequest{{Name: "course"}}).
+		Principals(zulip.UserIDsAsPrincipals(10)).
+		Execute()
+	if err != nil {
+		t.Fatalf("second Subscribe error = %v", err)
+	}
+	if got, want := resp.AlreadySubscribed["10"], []string{"course"}; !equalStrings(got, want) {
+		t.Fatalf("already_subscribed[10] = %v, want %v", got, want)
+	}
+
+	channel, _, err := client.GetChannelByID(ctx, 1).Execute()
+	if err != nil {
+		t.Fatalf("GetChannelByID error = %v", err)
+	}
+	if channel.Channel.Name != "course" || channel.Channel.Description != description {
+		t.Fatalf("channel = %#v, want name %q and description %q", channel.Channel, "course", description)
+	}
+
+	unsubscribed, _, err := client.Unsubscribe(ctx).
+		Subscriptions([]string{"course"}).
+		Principals(zulip.UserIDsAsPrincipals(10)).
+		Execute()
+	if err != nil {
+		t.Fatalf("Unsubscribe error = %v", err)
+	}
+	if got, want := unsubscribed.Removed, []string{"course"}; !equalStrings(got, want) {
+		t.Fatalf("removed = %v, want %v", got, want)
+	}
+
+	unsubscribed, _, err = client.Unsubscribe(ctx).
+		Subscriptions([]string{"course"}).
+		Principals(zulip.UserIDsAsPrincipals(10)).
+		Execute()
+	if err != nil {
+		t.Fatalf("second Unsubscribe error = %v", err)
+	}
+	if got, want := unsubscribed.NotRemoved, []string{"course"}; !equalStrings(got, want) {
+		t.Fatalf("not_removed = %v, want %v", got, want)
+	}
+}
+
+func equalInt64s(a, b []int64) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

@@ -3,6 +3,7 @@ package zulipmock
 
 import (
 	"context"
+	"fmt"
 	"github.com/tum-zulip/go-zulip/zulip"
 	"github.com/tum-zulip/go-zulip/zulip/api/authentication"
 	"github.com/tum-zulip/go-zulip/zulip/api/channels"
@@ -20,15 +21,52 @@ import (
 	"github.com/tum-zulip/go-zulip/zulip/client/statistics"
 	"net/http"
 	"reflect"
+	"sort"
+	"sync"
 	"unsafe"
 )
 
-type Client struct{}
+type Client struct {
+	state *state
+}
+
+type state struct {
+	mu              sync.Mutex
+	nextChannelID   int64
+	nextUserGroupID int64
+	channels        map[int64]channelState
+	channelIDs      map[string]int64
+	userGroups      map[int64]userGroupState
+}
+
+type channelState struct {
+	channel     zulip.Channel
+	subscribers map[int64]bool
+}
+
+type userGroupState struct {
+	group zulip.UserGroup
+}
 
 var _ client.Client = Client{}
 
-func NewClient() Client                             { return Client{} }
+func NewClient() Client {
+	return Client{state: &state{
+		nextChannelID:   1,
+		nextUserGroupID: 1,
+		channels:        map[int64]channelState{},
+		channelIDs:      map[string]int64{},
+		userGroups:      map[int64]userGroupState{},
+	}}
+}
 func (Client) GetStatistics() statistics.Statistics { return statistics.Statistics{} }
+
+func (c Client) ensureState() *state {
+	if c.state != nil {
+		return c.state
+	}
+	return NewClient().state
+}
 
 func withAPIService[T any](request T, service Client) T {
 	v := reflect.ValueOf(&request).Elem()
@@ -38,6 +76,84 @@ func withAPIService[T any](request T, service Client) T {
 	}
 	reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).Elem().Set(reflect.ValueOf(service))
 	return request
+}
+
+func withInt64Field[T any](request T, name string, value int64) T {
+	v := reflect.ValueOf(&request).Elem()
+	field := v.FieldByName(name)
+	if !field.IsValid() || !field.CanAddr() {
+		return request
+	}
+	reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).Elem().SetInt(value)
+	return request
+}
+
+func requestInt64[T any](request T, name string) int64 {
+	v := reflect.ValueOf(request)
+	field := v.FieldByName(name)
+	return field.Int()
+}
+
+func requestStringPtr[T any](request T, name string) *string {
+	v := reflect.ValueOf(request)
+	field := v.FieldByName(name)
+	if field.IsNil() {
+		return nil
+	}
+	return (*string)(unsafe.Pointer(field.Pointer()))
+}
+
+func requestInt64SlicePtr[T any](request T, name string) *[]int64 {
+	v := reflect.ValueOf(request)
+	field := v.FieldByName(name)
+	if field.IsNil() {
+		return nil
+	}
+	return (*[]int64)(unsafe.Pointer(field.Pointer()))
+}
+
+func requestPrincipalsPtr[T any](request T, name string) *zulip.Principals {
+	v := reflect.ValueOf(request)
+	field := v.FieldByName(name)
+	if field.IsNil() {
+		return nil
+	}
+	return (*zulip.Principals)(unsafe.Pointer(field.Pointer()))
+}
+
+func requestSubscriptionsPtr(request channels.SubscribeRequest) *[]channels.SubscriptionRequest {
+	v := reflect.ValueOf(request)
+	field := v.FieldByName("subscriptions")
+	if field.IsNil() {
+		return nil
+	}
+	return (*[]channels.SubscriptionRequest)(unsafe.Pointer(field.Pointer()))
+}
+
+func requestSubscriptionNamesPtr(request channels.UnsubscribeRequest) *[]string {
+	v := reflect.ValueOf(request)
+	field := v.FieldByName("subscriptions")
+	if field.IsNil() {
+		return nil
+	}
+	return (*[]string)(unsafe.Pointer(field.Pointer()))
+}
+
+func principalUserIDs(p *zulip.Principals) []int64 {
+	if p == nil || p.UserIDs == nil {
+		return []int64{0}
+	}
+	return append([]int64(nil), (*p.UserIDs)...)
+}
+
+func sortedMemberIDs(members []int64) []int64 {
+	out := append([]int64(nil), members...)
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
+}
+
+func successResponse() zulip.Response {
+	return zulip.Response{Result: zulip.ResponseSuccess}
 }
 func (Client) AddAlertWords(_arg0 context.Context) users.AddAlertWordsRequest {
 	return withAPIService(users.AddAlertWordsRequest{}, Client{})
@@ -159,11 +275,49 @@ func (Client) CreateUser(_arg0 context.Context) users.CreateUserRequest {
 func (Client) CreateUserExecute(_arg0 users.CreateUserRequest) (*users.CreateUserResponse, *http.Response, error) {
 	return nil, nil, nil
 }
-func (Client) CreateUserGroup(_arg0 context.Context) users.CreateUserGroupRequest {
-	return withAPIService(users.CreateUserGroupRequest{}, Client{})
+func (c Client) CreateUserGroup(_arg0 context.Context) users.CreateUserGroupRequest {
+	return withAPIService(users.CreateUserGroupRequest{}, c)
 }
-func (Client) CreateUserGroupExecute(_arg0 users.CreateUserGroupRequest) (*users.CreateUserGroupResponse, *http.Response, error) {
-	return nil, nil, nil
+func (c Client) CreateUserGroupExecute(r users.CreateUserGroupRequest) (*users.CreateUserGroupResponse, *http.Response, error) {
+	state := c.ensureState()
+	state.mu.Lock()
+	defer state.mu.Unlock()
+
+	name := ""
+	if v := requestStringPtr(r, "name"); v != nil {
+		name = *v
+	}
+	if name == "" {
+		return nil, nil, fmt.Errorf("name is required")
+	}
+	description := ""
+	if v := requestStringPtr(r, "description"); v != nil {
+		description = *v
+	} else {
+		return nil, nil, fmt.Errorf("description is required")
+	}
+	members := []int64(nil)
+	if v := requestInt64SlicePtr(r, "members"); v != nil {
+		members = sortedMemberIDs(*v)
+	} else {
+		return nil, nil, fmt.Errorf("members is required")
+	}
+	subgroups := []int64(nil)
+	if v := requestInt64SlicePtr(r, "subgroups"); v != nil {
+		subgroups = sortedMemberIDs(*v)
+	}
+
+	id := state.nextUserGroupID
+	state.nextUserGroupID++
+	state.userGroups[id] = userGroupState{group: zulip.UserGroup{
+		ID:                id,
+		Name:              name,
+		Description:       description,
+		Members:           members,
+		DirectSubgroupIDs: subgroups,
+	}}
+
+	return &users.CreateUserGroupResponse{Response: successResponse(), GroupID: id}, nil, nil
 }
 func (Client) DeactivateCustomEmoji(_arg0 context.Context, _arg1 string) serverandorganizations.DeactivateCustomEmojiRequest {
 	return withAPIService(serverandorganizations.DeactivateCustomEmojiRequest{}, Client{})
@@ -183,11 +337,23 @@ func (Client) DeactivateUser(_arg0 context.Context, _arg1 int64) users.Deactivat
 func (Client) DeactivateUserExecute(_arg0 users.DeactivateUserRequest) (*zulip.Response, *http.Response, error) {
 	return nil, nil, nil
 }
-func (Client) DeactivateUserGroup(_arg0 context.Context, _arg1 int64) users.DeactivateUserGroupRequest {
-	return withAPIService(users.DeactivateUserGroupRequest{}, Client{})
+func (c Client) DeactivateUserGroup(_arg0 context.Context, userGroupID int64) users.DeactivateUserGroupRequest {
+	return withInt64Field(withAPIService(users.DeactivateUserGroupRequest{}, c), "userGroupID", userGroupID)
 }
-func (Client) DeactivateUserGroupExecute(_arg0 users.DeactivateUserGroupRequest) (*zulip.Response, *http.Response, error) {
-	return nil, nil, nil
+func (c Client) DeactivateUserGroupExecute(r users.DeactivateUserGroupRequest) (*zulip.Response, *http.Response, error) {
+	state := c.ensureState()
+	state.mu.Lock()
+	defer state.mu.Unlock()
+
+	id := requestInt64(r, "userGroupID")
+	group, ok := state.userGroups[id]
+	if !ok {
+		return nil, nil, fmt.Errorf("user group %d not found", id)
+	}
+	group.group.Deactivated = true
+	state.userGroups[id] = group
+	resp := successResponse()
+	return &resp, nil, nil
 }
 func (Client) DeleteDraft(_arg0 context.Context, _arg1 int64) drafts.DeleteDraftRequest {
 	return withAPIService(drafts.DeleteDraftRequest{}, Client{})
@@ -285,11 +451,20 @@ func (Client) GetAttachments(_arg0 context.Context) users.GetAttachmentsRequest 
 func (Client) GetAttachmentsExecute(_arg0 users.GetAttachmentsRequest) (*users.GetAttachmentsResponse, *http.Response, error) {
 	return nil, nil, nil
 }
-func (Client) GetChannelByID(_arg0 context.Context, _arg1 int64) channels.GetChannelByIDRequest {
-	return withAPIService(channels.GetChannelByIDRequest{}, Client{})
+func (c Client) GetChannelByID(_arg0 context.Context, channelID int64) channels.GetChannelByIDRequest {
+	return withInt64Field(withAPIService(channels.GetChannelByIDRequest{}, c), "channelID", channelID)
 }
-func (Client) GetChannelByIDExecute(_arg0 channels.GetChannelByIDRequest) (*channels.GetChannelResponse, *http.Response, error) {
-	return nil, nil, nil
+func (c Client) GetChannelByIDExecute(r channels.GetChannelByIDRequest) (*channels.GetChannelResponse, *http.Response, error) {
+	state := c.ensureState()
+	state.mu.Lock()
+	defer state.mu.Unlock()
+
+	id := requestInt64(r, "channelID")
+	channel, ok := state.channels[id]
+	if !ok {
+		return nil, nil, fmt.Errorf("channel %d not found", id)
+	}
+	return &channels.GetChannelResponse{Response: successResponse(), Channel: channel.channel}, nil, nil
 }
 func (Client) GetChannelEmailAddress(_arg0 context.Context, _arg1 int64) channels.GetChannelEmailAddressRequest {
 	return withAPIService(channels.GetChannelEmailAddressRequest{}, Client{})
@@ -357,11 +532,28 @@ func (Client) GetInvites(_arg0 context.Context) invites.GetInvitesRequest {
 func (Client) GetInvitesExecute(_arg0 invites.GetInvitesRequest) (*invites.GetInvitesResponse, *http.Response, error) {
 	return nil, nil, nil
 }
-func (Client) GetIsUserGroupMember(_arg0 context.Context, _arg1 int64, _arg2 int64) users.GetIsUserGroupMemberRequest {
-	return withAPIService(users.GetIsUserGroupMemberRequest{}, Client{})
+func (c Client) GetIsUserGroupMember(_arg0 context.Context, userGroupID int64, userID int64) users.GetIsUserGroupMemberRequest {
+	r := withAPIService(users.GetIsUserGroupMemberRequest{}, c)
+	r = withInt64Field(r, "userGroupID", userGroupID)
+	return withInt64Field(r, "userID", userID)
 }
-func (Client) GetIsUserGroupMemberExecute(_arg0 users.GetIsUserGroupMemberRequest) (*users.GetIsUserGroupMemberResponse, *http.Response, error) {
-	return nil, nil, nil
+func (c Client) GetIsUserGroupMemberExecute(r users.GetIsUserGroupMemberRequest) (*users.GetIsUserGroupMemberResponse, *http.Response, error) {
+	state := c.ensureState()
+	state.mu.Lock()
+	defer state.mu.Unlock()
+
+	groupID := requestInt64(r, "userGroupID")
+	userID := requestInt64(r, "userID")
+	group, ok := state.userGroups[groupID]
+	if !ok {
+		return nil, nil, fmt.Errorf("user group %d not found", groupID)
+	}
+	for _, memberID := range group.group.Members {
+		if memberID == userID {
+			return &users.GetIsUserGroupMemberResponse{Response: successResponse(), IsUserGroupMember: true}, nil, nil
+		}
+	}
+	return &users.GetIsUserGroupMemberResponse{Response: successResponse()}, nil, nil
 }
 func (Client) GetLinkifiers(_arg0 context.Context) serverandorganizations.GetLinkifiersRequest {
 	return withAPIService(serverandorganizations.GetLinkifiersRequest{}, Client{})
@@ -477,11 +669,23 @@ func (Client) GetUserByEmailExecute(_arg0 users.GetUserByEmailRequest) (*users.G
 func (Client) GetUserExecute(_arg0 users.GetUserRequest) (*users.GetUserResponse, *http.Response, error) {
 	return nil, nil, nil
 }
-func (Client) GetUserGroupMembers(_arg0 context.Context, _arg1 int64) users.GetUserGroupMembersRequest {
-	return withAPIService(users.GetUserGroupMembersRequest{}, Client{})
+func (c Client) GetUserGroupMembers(_arg0 context.Context, userGroupID int64) users.GetUserGroupMembersRequest {
+	return withInt64Field(withAPIService(users.GetUserGroupMembersRequest{}, c), "userGroupID", userGroupID)
 }
-func (Client) GetUserGroupMembersExecute(_arg0 users.GetUserGroupMembersRequest) (*users.GetUserGroupMembersResponse, *http.Response, error) {
-	return nil, nil, nil
+func (c Client) GetUserGroupMembersExecute(r users.GetUserGroupMembersRequest) (*users.GetUserGroupMembersResponse, *http.Response, error) {
+	state := c.ensureState()
+	state.mu.Lock()
+	defer state.mu.Unlock()
+
+	id := requestInt64(r, "userGroupID")
+	group, ok := state.userGroups[id]
+	if !ok {
+		return nil, nil, fmt.Errorf("user group %d not found", id)
+	}
+	return &users.GetUserGroupMembersResponse{
+		Response: successResponse(),
+		Members:  sortedMemberIDs(group.group.Members),
+	}, nil, nil
 }
 func (Client) GetUserGroupSubgroups(_arg0 context.Context, _arg1 int64) users.GetUserGroupSubgroupsRequest {
 	return withAPIService(users.GetUserGroupSubgroupsRequest{}, Client{})
@@ -687,11 +891,56 @@ func (Client) SetTypingStatusForMessageEdit(_arg0 context.Context, _arg1 int64) 
 func (Client) SetTypingStatusForMessageEditExecute(_arg0 users.SetTypingStatusForMessageEditRequest) (*zulip.Response, *http.Response, error) {
 	return nil, nil, nil
 }
-func (Client) Subscribe(_arg0 context.Context) channels.SubscribeRequest {
-	return withAPIService(channels.SubscribeRequest{}, Client{})
+func (c Client) Subscribe(_arg0 context.Context) channels.SubscribeRequest {
+	return withAPIService(channels.SubscribeRequest{}, c)
 }
-func (Client) SubscribeExecute(_arg0 channels.SubscribeRequest) (*channels.SubscribeResponse, *http.Response, error) {
-	return nil, nil, nil
+func (c Client) SubscribeExecute(r channels.SubscribeRequest) (*channels.SubscribeResponse, *http.Response, error) {
+	state := c.ensureState()
+	state.mu.Lock()
+	defer state.mu.Unlock()
+
+	subscriptions := requestSubscriptionsPtr(r)
+	if subscriptions == nil {
+		return nil, nil, fmt.Errorf("subscriptions is required")
+	}
+	userIDs := principalUserIDs(requestPrincipalsPtr(r, "principals"))
+	resp := &channels.SubscribeResponse{
+		Response:          successResponse(),
+		Subscribed:        map[string][]string{},
+		AlreadySubscribed: map[string][]string{},
+	}
+	for _, sub := range *subscriptions {
+		channelID, ok := state.channelIDs[sub.Name]
+		if !ok {
+			channelID = state.nextChannelID
+			state.nextChannelID++
+			description := ""
+			if sub.Description != nil {
+				description = *sub.Description
+			}
+			state.channels[channelID] = channelState{
+				channel: zulip.Channel{
+					ChannelID:   channelID,
+					Name:        sub.Name,
+					Description: description,
+				},
+				subscribers: map[int64]bool{},
+			}
+			state.channelIDs[sub.Name] = channelID
+		}
+		channel := state.channels[channelID]
+		for _, userID := range userIDs {
+			key := fmt.Sprintf("%d", userID)
+			if channel.subscribers[userID] {
+				resp.AlreadySubscribed[key] = append(resp.AlreadySubscribed[key], sub.Name)
+				continue
+			}
+			channel.subscribers[userID] = true
+			resp.Subscribed[key] = append(resp.Subscribed[key], sub.Name)
+		}
+		state.channels[channelID] = channel
+	}
+	return resp, nil, nil
 }
 func (Client) TestNotify(_arg0 context.Context) mobile.TestNotifyRequest {
 	return withAPIService(mobile.TestNotifyRequest{}, Client{})
@@ -711,11 +960,43 @@ func (Client) UnmuteUser(_arg0 context.Context, _arg1 int64) users.UnmuteUserReq
 func (Client) UnmuteUserExecute(_arg0 users.UnmuteUserRequest) (*zulip.Response, *http.Response, error) {
 	return nil, nil, nil
 }
-func (Client) Unsubscribe(_arg0 context.Context) channels.UnsubscribeRequest {
-	return withAPIService(channels.UnsubscribeRequest{}, Client{})
+func (c Client) Unsubscribe(_arg0 context.Context) channels.UnsubscribeRequest {
+	return withAPIService(channels.UnsubscribeRequest{}, c)
 }
-func (Client) UnsubscribeExecute(_arg0 channels.UnsubscribeRequest) (*channels.UnsubscribeResponse, *http.Response, error) {
-	return nil, nil, nil
+func (c Client) UnsubscribeExecute(r channels.UnsubscribeRequest) (*channels.UnsubscribeResponse, *http.Response, error) {
+	state := c.ensureState()
+	state.mu.Lock()
+	defer state.mu.Unlock()
+
+	subscriptions := requestSubscriptionNamesPtr(r)
+	if subscriptions == nil {
+		return nil, nil, fmt.Errorf("subscriptions is required")
+	}
+	userIDs := principalUserIDs(requestPrincipalsPtr(r, "principals"))
+	resp := &channels.UnsubscribeResponse{Response: successResponse()}
+	for _, name := range *subscriptions {
+		channelID, ok := state.channelIDs[name]
+		if !ok {
+			resp.NotRemoved = append(resp.NotRemoved, name)
+			continue
+		}
+		channel := state.channels[channelID]
+		removed := false
+		for _, userID := range userIDs {
+			if !channel.subscribers[userID] {
+				continue
+			}
+			delete(channel.subscribers, userID)
+			removed = true
+		}
+		if removed {
+			resp.Removed = append(resp.Removed, name)
+		} else {
+			resp.NotRemoved = append(resp.NotRemoved, name)
+		}
+		state.channels[channelID] = channel
+	}
+	return resp, nil, nil
 }
 func (Client) UpdateChannel(_arg0 context.Context, _arg1 int64) channels.UpdateChannelRequest {
 	return withAPIService(channels.UpdateChannelRequest{}, Client{})
@@ -819,11 +1100,41 @@ func (Client) UpdateUserGroup(_arg0 context.Context, _arg1 int64) users.UpdateUs
 func (Client) UpdateUserGroupExecute(_arg0 users.UpdateUserGroupRequest) (*zulip.Response, *http.Response, error) {
 	return nil, nil, nil
 }
-func (Client) UpdateUserGroupMembers(_arg0 context.Context, _arg1 int64) users.UpdateUserGroupMembersRequest {
-	return withAPIService(users.UpdateUserGroupMembersRequest{}, Client{})
+func (c Client) UpdateUserGroupMembers(_arg0 context.Context, userGroupID int64) users.UpdateUserGroupMembersRequest {
+	return withInt64Field(withAPIService(users.UpdateUserGroupMembersRequest{}, c), "userGroupID", userGroupID)
 }
-func (Client) UpdateUserGroupMembersExecute(_arg0 users.UpdateUserGroupMembersRequest) (*zulip.Response, *http.Response, error) {
-	return nil, nil, nil
+func (c Client) UpdateUserGroupMembersExecute(r users.UpdateUserGroupMembersRequest) (*zulip.Response, *http.Response, error) {
+	state := c.ensureState()
+	state.mu.Lock()
+	defer state.mu.Unlock()
+
+	id := requestInt64(r, "userGroupID")
+	group, ok := state.userGroups[id]
+	if !ok {
+		return nil, nil, fmt.Errorf("user group %d not found", id)
+	}
+	members := map[int64]bool{}
+	for _, memberID := range group.group.Members {
+		members[memberID] = true
+	}
+	if del := requestInt64SlicePtr(r, "delete"); del != nil {
+		for _, memberID := range *del {
+			delete(members, memberID)
+		}
+	}
+	if add := requestInt64SlicePtr(r, "add"); add != nil {
+		for _, memberID := range *add {
+			members[memberID] = true
+		}
+	}
+	group.group.Members = group.group.Members[:0]
+	for memberID := range members {
+		group.group.Members = append(group.group.Members, memberID)
+	}
+	group.group.Members = sortedMemberIDs(group.group.Members)
+	state.userGroups[id] = group
+	resp := successResponse()
+	return &resp, nil, nil
 }
 func (Client) UpdateUserGroupSubgroups(_arg0 context.Context, _arg1 int64) users.UpdateUserGroupSubgroupsRequest {
 	return withAPIService(users.UpdateUserGroupSubgroupsRequest{}, Client{})
