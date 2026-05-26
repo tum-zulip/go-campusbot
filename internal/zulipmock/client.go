@@ -52,6 +52,7 @@ const (
 type state struct {
 	mu              sync.Mutex
 	nextChannelID   int64
+	nextFolderID    int64
 	nextUserGroupID int64
 	nextMessageID   int64
 	ownUser         zulip.User
@@ -59,6 +60,7 @@ type state struct {
 	lastMessage     *SentMessage
 	channels        map[int64]channelState
 	channelIDs      map[string]int64
+	channelFolders  map[int64]zulip.ChannelFolder
 	userGroups      map[int64]userGroupState
 	failures        map[Operation][]error
 	serialization   *RequestSerialization
@@ -128,6 +130,7 @@ var _ client.Client = Client{}
 func NewClient() Client {
 	return Client{state: &state{
 		nextChannelID:   1,
+		nextFolderID:    1,
 		nextUserGroupID: 1,
 		nextMessageID:   1,
 		ownUser: zulip.User{
@@ -144,10 +147,11 @@ func NewClient() Client {
 				IsBot:    true,
 			},
 		},
-		channels:   map[int64]channelState{},
-		channelIDs: map[string]int64{},
-		userGroups: map[int64]userGroupState{},
-		failures:   map[Operation][]error{},
+		channels:       map[int64]channelState{},
+		channelIDs:     map[string]int64{},
+		channelFolders: map[int64]zulip.ChannelFolder{},
+		userGroups:     map[int64]userGroupState{},
+		failures:       map[Operation][]error{},
 	}}
 }
 func (Client) GetStatistics() statistics.Statistics { return statistics.Statistics{} }
@@ -453,6 +457,15 @@ func requestInt64[T any](request T, name string) int64 {
 	return field.Int()
 }
 
+func requestInt64Ptr[T any](request T, name string) *int64 {
+	v := reflect.ValueOf(request)
+	field := v.FieldByName(name)
+	if field.IsNil() {
+		return nil
+	}
+	return (*int64)(unsafe.Pointer(field.Pointer()))
+}
+
 func requestContext[T any](request T) context.Context {
 	v := reflect.ValueOf(&request).Elem()
 	field := v.FieldByName("ctx")
@@ -640,11 +653,36 @@ func (Client) CreateChannel(_ context.Context) channels.CreateChannelRequest {
 func (Client) CreateChannelExecute(_ channels.CreateChannelRequest) (*channels.CreateChannelResponse, *http.Response, error) {
 	return nil, nil, nil
 }
-func (Client) CreateChannelFolder(_ context.Context) channels.CreateChannelFolderRequest {
-	return withAPIService(channels.CreateChannelFolderRequest{}, Client{})
+func (c Client) CreateChannelFolder(ctx context.Context) channels.CreateChannelFolderRequest {
+	return withContext(withAPIService(channels.CreateChannelFolderRequest{}, c), ctx)
 }
-func (Client) CreateChannelFolderExecute(_ channels.CreateChannelFolderRequest) (*channels.CreateChannelFolderResponse, *http.Response, error) {
-	return nil, nil, nil
+func (c Client) CreateChannelFolderExecute(r channels.CreateChannelFolderRequest) (*channels.CreateChannelFolderResponse, *http.Response, error) {
+	state := c.ensureState()
+	state.mu.Lock()
+	defer state.mu.Unlock()
+
+	name := ""
+	if v := requestStringPtr(r, "name"); v != nil {
+		name = *v
+	}
+	if name == "" {
+		return nil, nil, fmt.Errorf("name is required")
+	}
+	description := ""
+	if v := requestStringPtr(r, "description"); v != nil {
+		description = *v
+	}
+	id := state.nextFolderID
+	state.nextFolderID++
+	state.channelFolders[id] = zulip.ChannelFolder{
+		ID:          id,
+		Name:        name,
+		Description: description,
+	}
+	return &channels.CreateChannelFolderResponse{
+		Response:        successResponse(),
+		ChannelFolderID: id,
+	}, nil, nil
 }
 func (Client) CreateCustomProfileField(_ context.Context) serverandorganizations.CreateCustomProfileFieldRequest {
 	return withAPIService(serverandorganizations.CreateCustomProfileFieldRequest{}, Client{})
@@ -918,11 +956,23 @@ func (Client) GetChannelEmailAddress(_ context.Context, _arg1 int64) channels.Ge
 func (Client) GetChannelEmailAddressExecute(_ channels.GetChannelEmailAddressRequest) (*channels.GetChannelEmailAddressResponse, *http.Response, error) {
 	return nil, nil, nil
 }
-func (Client) GetChannelFolders(_ context.Context) channels.GetChannelFoldersRequest {
-	return withAPIService(channels.GetChannelFoldersRequest{}, Client{})
+func (c Client) GetChannelFolders(ctx context.Context) channels.GetChannelFoldersRequest {
+	return withContext(withAPIService(channels.GetChannelFoldersRequest{}, c), ctx)
 }
-func (Client) GetChannelFoldersExecute(_ channels.GetChannelFoldersRequest) (*channels.GetChannelFoldersResponse, *http.Response, error) {
-	return nil, nil, nil
+func (c Client) GetChannelFoldersExecute(_ channels.GetChannelFoldersRequest) (*channels.GetChannelFoldersResponse, *http.Response, error) {
+	state := c.ensureState()
+	state.mu.Lock()
+	defer state.mu.Unlock()
+
+	folders := make([]zulip.ChannelFolder, 0, len(state.channelFolders))
+	for _, folder := range state.channelFolders {
+		folders = append(folders, folder)
+	}
+	sort.Slice(folders, func(i, j int) bool { return folders[i].ID < folders[j].ID })
+	return &channels.GetChannelFoldersResponse{
+		Response:       successResponse(),
+		ChannelFolders: folders,
+	}, nil, nil
 }
 func (Client) GetChannelID(_ context.Context) channels.GetChannelIDRequest {
 	return withAPIService(channels.GetChannelIDRequest{}, Client{})
@@ -1588,11 +1638,29 @@ func (c Client) UnsubscribeExecute(r channels.UnsubscribeRequest) (*channels.Uns
 	}
 	return resp, nil, nil
 }
-func (Client) UpdateChannel(_ context.Context, _arg1 int64) channels.UpdateChannelRequest {
-	return withAPIService(channels.UpdateChannelRequest{}, Client{})
+func (c Client) UpdateChannel(ctx context.Context, channelID int64) channels.UpdateChannelRequest {
+	return withInt64Field(withContext(withAPIService(channels.UpdateChannelRequest{}, c), ctx), "channelID", channelID)
 }
-func (Client) UpdateChannelExecute(_ channels.UpdateChannelRequest) (*zulip.Response, *http.Response, error) {
-	return nil, nil, nil
+func (c Client) UpdateChannelExecute(r channels.UpdateChannelRequest) (*zulip.Response, *http.Response, error) {
+	state := c.ensureState()
+	state.mu.Lock()
+	defer state.mu.Unlock()
+
+	channelID := requestInt64(r, "channelID")
+	channel, ok := state.channels[channelID]
+	if !ok {
+		return nil, nil, fmt.Errorf("channel %d not found", channelID)
+	}
+	if folderID := requestInt64Ptr(r, "folderID"); folderID != nil {
+		if _, ok := state.channelFolders[*folderID]; !ok {
+			return nil, nil, fmt.Errorf("channel folder %d not found", *folderID)
+		}
+		id := *folderID
+		channel.channel.FolderID = &id
+	}
+	state.channels[channelID] = channel
+	resp := successResponse()
+	return &resp, nil, nil
 }
 func (Client) UpdateChannelFolder(_ context.Context, _arg1 int64) channels.UpdateChannelFolderRequest {
 	return withAPIService(channels.UpdateChannelFolderRequest{}, Client{})

@@ -354,16 +354,38 @@ func (s *channelGroups) CreateChannelGroupExecute(
 	}
 	group.ID = userGroupResp.GroupID
 
+	var channelFolderID sql.NullInt64
+	if r.createChannelFolder {
+		folderResp, _, err := s.base.CreateChannelFolder(r.ctx).
+			Name(group.Name).
+			Description("").
+			Execute()
+		if err != nil {
+			return nil, nil, err
+		}
+		channelFolderID = sql.NullInt64{Int64: folderResp.ChannelFolderID, Valid: true}
+		group.ChannelFolderID = &channelFolderID.Int64 //nolint:govet // is currently not used, but the values in the struct should be consistent
+	}
+
 	if len(group.ChannelIDs) > 0 && len(initialMembers) > 0 {
 		if err = s.subscribeUsersToChannels(r.ctx, group.ChannelIDs, initialMembers); err != nil {
 			return nil, nil, err
 		}
 	}
+	if channelFolderID.Valid {
+		if err = s.addChannelsToFolder(r.ctx, group.ChannelIDs, channelFolderID.Int64); err != nil {
+			return nil, nil, err
+		}
+	}
 
-	dbGroupID, err := s.queries.CreateChannelGroup(r.ctx, group.ID)
+	dbGroup, err := s.queries.CreateChannelGroup(r.ctx, channelgroupdb.CreateChannelGroupParams{
+		ID:              group.ID,
+		ChannelFolderID: channelFolderID,
+	})
 	if err != nil {
 		return nil, nil, err
 	}
+	dbGroupID := dbGroup.ID
 	for _, channelID := range group.ChannelIDs {
 		if err = s.queries.AddChannelGroupChannel(r.ctx, channelgroupdb.AddChannelGroupChannelParams{
 			ChannelGroupID: dbGroupID,
@@ -376,6 +398,7 @@ func (s *channelGroups) CreateChannelGroupExecute(
 	s.logger.InfoContext(r.ctx, "created channel group",
 		"channel_group_id", dbGroupID,
 		"user_group_id", group.ID,
+		"channel_folder_id", nullableInt64LogValue(channelFolderID),
 		"name", group.Name,
 		"channel_count", len(group.ChannelIDs),
 		"subscriber_count", len(initialMembers),
@@ -503,6 +526,11 @@ func (s *channelGroups) UpdateChannelGroupChannelsExecute(
 	}
 	if len(added) > 0 && len(members) > 0 {
 		if err = s.subscribeUsersToChannels(r.ctx, added, members); err != nil {
+			return nil, nil, err
+		}
+	}
+	if group.ChannelFolderID != nil {
+		if err = s.addChannelsToFolder(r.ctx, added, *group.ChannelFolderID); err != nil {
 			return nil, nil, err
 		}
 	}
@@ -689,7 +717,7 @@ func (s *channelGroups) UnsubscribeFromChannelGroupExecute(
 }
 
 func (s *channelGroups) getGroup(ctx context.Context, channelGroupID int64) (ChannelGroup, error) {
-	dbGroupID, err := s.queries.GetChannelGroup(ctx, channelGroupID)
+	dbGroup, err := s.queries.GetChannelGroup(ctx, channelGroupID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return ChannelGroup{}, errChannelGroupNotFound(channelGroupID)
@@ -700,23 +728,23 @@ func (s *channelGroups) getGroup(ctx context.Context, channelGroupID int64) (Cha
 	if err != nil {
 		return ChannelGroup{}, err
 	}
-	return channelGroupFromDB(dbGroupID, channels), nil
+	return channelGroupFromDB(dbGroup, channels), nil
 }
 
 func (s *channelGroups) getGroups(ctx context.Context) ([]ChannelGroup, error) {
-	dbGroupIDs, err := s.queries.ListChannelGroups(ctx)
+	dbGroups, err := s.queries.ListChannelGroups(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	groups := make([]ChannelGroup, 0, len(dbGroupIDs))
-	for _, dbGroupID := range dbGroupIDs {
+	groups := make([]ChannelGroup, 0, len(dbGroups))
+	for _, dbGroup := range dbGroups {
 		var channels []int64
-		channels, err = s.queries.ListChannelGroupChannels(ctx, dbGroupID)
+		channels, err = s.queries.ListChannelGroupChannels(ctx, dbGroup.ID)
 		if err != nil {
 			return nil, err
 		}
-		groups = append(groups, channelGroupFromDB(dbGroupID, channels))
+		groups = append(groups, channelGroupFromDB(dbGroup, channels))
 	}
 	return groups, nil
 }
@@ -751,6 +779,15 @@ func (s *channelGroups) updateGroupChannels(
 		}
 	}
 	return s.getGroup(ctx, channelGroupID)
+}
+
+func (s *channelGroups) addChannelsToFolder(ctx context.Context, channelIDs []int64, channelFolderID int64) error {
+	for _, channelID := range uniqueInt64s(channelIDs) {
+		if _, _, err := s.base.UpdateChannel(ctx, channelID).FolderID(channelFolderID).Execute(); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *channelGroups) cleanupAddedChannels(
@@ -973,11 +1010,22 @@ func (s *channelGroups) withUserGroupNames(ctx context.Context, groups []Channel
 	return hydrated, nil
 }
 
-func channelGroupFromDB(id int64, channelIDs []int64) ChannelGroup {
-	return ChannelGroup{
-		ID:         id,
+func channelGroupFromDB(dbGroup channelgroupdb.ChannelGroup, channelIDs []int64) ChannelGroup {
+	group := ChannelGroup{
+		ID:         dbGroup.ID,
 		ChannelIDs: uniqueInt64s(channelIDs),
 	}
+	if dbGroup.ChannelFolderID.Valid {
+		group.ChannelFolderID = &dbGroup.ChannelFolderID.Int64
+	}
+	return group
+}
+
+func nullableInt64LogValue(value sql.NullInt64) any {
+	if value.Valid {
+		return value.Int64
+	}
+	return nil
 }
 
 func successResponse() zulip.Response {
@@ -1170,6 +1218,10 @@ type ChannelGroup struct {
 
 	// ChannelIDs are the channels currently in the group.
 	ChannelIDs []int64 `json:"channel_ids"`
+
+	// ChannelFolderID is set when this channel group also manages a Zulip
+	// channel folder.
+	ChannelFolderID *int64 `json:"channel_folder_id,omitempty"`
 }
 
 // =============================================================================
@@ -1183,11 +1235,12 @@ type ChannelGroup struct {
 // --- Create -----------------------------------------------------------------
 
 type CreateChannelGroupRequest struct {
-	ctx                context.Context
-	apiService         APIChannelGroups
-	name               *string
-	channelIDs         *[]int64
-	initialSubscribers *zulip.Principals
+	ctx                 context.Context
+	apiService          APIChannelGroups
+	name                *string
+	channelIDs          *[]int64
+	initialSubscribers  *zulip.Principals
+	createChannelFolder bool
 }
 
 func (r CreateChannelGroupRequest) Name(name string) CreateChannelGroupRequest {
@@ -1202,6 +1255,11 @@ func (r CreateChannelGroupRequest) ChannelIDs(ids []int64) CreateChannelGroupReq
 
 func (r CreateChannelGroupRequest) InitialSubscribers(p zulip.Principals) CreateChannelGroupRequest {
 	r.initialSubscribers = &p
+	return r
+}
+
+func (r CreateChannelGroupRequest) CreateChannelFolder(create bool) CreateChannelGroupRequest {
+	r.createChannelFolder = create
 	return r
 }
 

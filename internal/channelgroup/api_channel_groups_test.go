@@ -142,6 +142,53 @@ func TestCreateChannelGroupCreatesRestrictiveUserGroup(t *testing.T) {
 	assertAdminGroupSettingValue(t, "CanRemoveMembersGroup", group.CanRemoveMembersGroup)
 }
 
+func TestChannelGroupWithChannelFolderAssignsInitialAndAddedChannels(t *testing.T) {
+	ctx := context.Background()
+	base := zulipmock.NewClient()
+	client := newTestClient(t, base)
+	channelIDs := createMockBotSubscribedChannels(t, ctx, base, 3)
+
+	created, _, err := client.CreateChannelGroup(ctx).
+		Name("folder group").
+		ChannelIDs(channelIDs[:1]).
+		CreateChannelFolder(true).
+		Execute()
+	if err != nil {
+		t.Fatalf("CreateChannelGroup error = %v", err)
+	}
+
+	group, _, err := client.GetChannelGroup(ctx, created.ChannelGroupID).Execute()
+	if err != nil {
+		t.Fatalf("GetChannelGroup error = %v", err)
+	}
+	if group.ChannelGroup.ChannelFolderID == nil {
+		t.Fatalf("channel folder ID = nil, want created folder")
+	}
+
+	folders, _, err := base.GetChannelFolders(ctx).Execute()
+	if err != nil {
+		t.Fatalf("GetChannelFolders error = %v", err)
+	}
+	if len(folders.ChannelFolders) != 1 {
+		t.Fatalf("channel folders = %d, want 1", len(folders.ChannelFolders))
+	}
+	if folders.ChannelFolders[0].Name != "folder group" {
+		t.Fatalf("channel folder name = %q, want %q", folders.ChannelFolders[0].Name, "folder group")
+	}
+
+	assertChannelFolderID(t, ctx, base, channelIDs[0], *group.ChannelGroup.ChannelFolderID)
+	assertNoChannelFolder(t, ctx, base, channelIDs[1])
+
+	_, _, err = client.UpdateChannelGroupChannels(ctx, created.ChannelGroupID).
+		Add(channelIDs[1:]).
+		Execute()
+	if err != nil {
+		t.Fatalf("UpdateChannelGroupChannels error = %v", err)
+	}
+	assertChannelFolderID(t, ctx, base, channelIDs[1], *group.ChannelGroup.ChannelFolderID)
+	assertChannelFolderID(t, ctx, base, channelIDs[2], *group.ChannelGroup.ChannelFolderID)
+}
+
 func TestInitializeChannelGroupsRemovesChannelsMissingFromBotSubscriptions(t *testing.T) {
 	ctx := context.Background()
 	base := zulipmock.NewClient()
@@ -1367,6 +1414,39 @@ func createMockBotSubscribedChannels(t *testing.T, ctx context.Context, client z
 		ids = append(ids, int64(i+1))
 	}
 	return ids
+}
+
+func assertChannelFolderID(
+	t *testing.T,
+	ctx context.Context,
+	client zulipmock.Client,
+	channelID int64,
+	wantFolderID int64,
+) {
+	t.Helper()
+
+	resp, _, err := client.GetChannelByID(ctx, channelID).Execute()
+	if err != nil {
+		t.Fatalf("GetChannelByID(%d) error = %v", channelID, err)
+	}
+	if resp.Channel.FolderID == nil {
+		t.Fatalf("channel %d folder ID = nil, want %d", channelID, wantFolderID)
+	}
+	if *resp.Channel.FolderID != wantFolderID {
+		t.Fatalf("channel %d folder ID = %d, want %d", channelID, *resp.Channel.FolderID, wantFolderID)
+	}
+}
+
+func assertNoChannelFolder(t *testing.T, ctx context.Context, client zulipmock.Client, channelID int64) {
+	t.Helper()
+
+	resp, _, err := client.GetChannelByID(ctx, channelID).Execute()
+	if err != nil {
+		t.Fatalf("GetChannelByID(%d) error = %v", channelID, err)
+	}
+	if resp.Channel.FolderID != nil {
+		t.Fatalf("channel %d folder ID = %d, want nil", channelID, *resp.Channel.FolderID)
+	}
 }
 
 func channelSubscribers(t *testing.T, ctx context.Context, client zulipmock.Client, channelID int64) []int64 {

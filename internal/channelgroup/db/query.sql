@@ -1,7 +1,9 @@
 -- name: CreateChannelGroup :one
 INSERT INTO channel_groups (
-  id
+  id,
+  channel_folder_id
 ) VALUES (
+  ?,
   ?
 )
 RETURNING *;

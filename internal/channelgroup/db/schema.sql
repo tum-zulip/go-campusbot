@@ -1,5 +1,6 @@
 CREATE TABLE channel_groups (
-  id INTEGER PRIMARY KEY
+  id INTEGER PRIMARY KEY,
+  channel_folder_id INTEGER
 );
 
 CREATE TABLE channel_group_channels (
