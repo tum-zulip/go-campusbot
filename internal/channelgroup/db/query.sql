@@ -34,6 +34,10 @@ DELETE FROM channel_group_channels
 WHERE channel_group_id = ?
   AND channel_id = ?;
 
+-- name: RemoveChannelFromChannelGroups :exec
+DELETE FROM channel_group_channels
+WHERE channel_id = ?;
+
 -- name: ListChannelGroupChannels :many
 SELECT channel_id
 FROM channel_group_channels

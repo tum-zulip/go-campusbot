@@ -16,12 +16,14 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
+	"time"
 
 	"github.com/tum-zulip/go-campusbot/internal/callorigin"
 	channelgroupdb "github.com/tum-zulip/go-campusbot/internal/channelgroup/db"
 	"github.com/tum-zulip/go-zulip/zulip"
 	"github.com/tum-zulip/go-zulip/zulip/api/channels"
 	"github.com/tum-zulip/go-zulip/zulip/client"
+	"github.com/tum-zulip/go-zulip/zulip/events"
 )
 
 // Names of the high-level channel-group operations, propagated through ctx
@@ -33,6 +35,8 @@ const (
 	originSubscribe      = "SubscribeToChannelGroup"
 	originUnsubscribe    = "UnsubscribeFromChannelGroup"
 )
+
+const deleteQueueTimeout = 5 * time.Second
 
 // Client is the campusbot Zulip client. It is a drop-in replacement for
 // client.Client and additionally exposes channel-group endpoints.
@@ -66,8 +70,9 @@ func NewClient(base client.Client, database *sql.DB, opts ...ClientOption) Clien
 	return newClientWithService(base, service)
 }
 
-// NewInitializedClient wraps an upstream client and reconciles persisted
-// channel-group metadata against Zulip state before returning it.
+// NewInitializedClient wraps an upstream client, reconciles persisted
+// channel-group metadata against Zulip state, and starts the channel-group
+// event listener before returning it.
 func NewInitializedClient(
 	ctx context.Context,
 	base client.Client,
@@ -75,7 +80,10 @@ func NewInitializedClient(
 	opts ...ClientOption,
 ) (Client, error) {
 	service := newChannelGroups(base, database, opts...)
-	if err := service.InitializeChannelGroups(ctx); err != nil {
+	if err := service.initializeChannelGroups(ctx); err != nil {
+		return nil, err
+	}
+	if err := service.startChannelGroupEventListener(ctx); err != nil {
 		return nil, err
 	}
 	return newClientWithService(base, service), nil
@@ -110,7 +118,7 @@ var _ APIChannelGroups = (*channelGroups)(nil)
 
 const zulipAdministratorsSystemGroupID int64 = 2
 
-func (s *channelGroups) InitializeChannelGroups(ctx context.Context) error {
+func (s *channelGroups) initializeChannelGroups(ctx context.Context) error {
 	groups, err := s.getGroups(ctx)
 	if err != nil {
 		return err
@@ -158,6 +166,150 @@ func (s *channelGroups) InitializeChannelGroups(ctx context.Context) error {
 		}
 	}
 
+	return nil
+}
+
+func (s *channelGroups) startChannelGroupEventListener(ctx context.Context) error {
+	if ctx == nil {
+		return errors.New("context must not be nil")
+	}
+	queueID, lastEventID, err := s.registerChannelGroupEventQueue(ctx)
+	if err != nil {
+		return err
+	}
+	go s.runChannelGroupEventListener(ctx, queueID, lastEventID)
+	return nil
+}
+
+func (s *channelGroups) registerChannelGroupEventQueue(ctx context.Context) (string, int64, error) {
+	resp, _, err := s.base.RegisterQueue(ctx).
+		AllPublicChannels(true).
+		ApplyMarkdown(false).
+		EventTypes([]events.EventType{events.EventTypeChannel, events.EventTypeUserGroup}).
+		ClientCapabilities(map[string]interface{}{
+			"include_deactivated_groups": false,
+		}).
+		Execute()
+	if err != nil {
+		return "", 0, err
+	}
+	if resp == nil || resp.QueueID == nil || *resp.QueueID == "" {
+		return "", 0, errors.New("register channel-group event queue: empty queue ID")
+	}
+	return *resp.QueueID, resp.LastEventID, nil
+}
+
+func (s *channelGroups) runChannelGroupEventListener(ctx context.Context, queueID string, lastEventID int64) {
+	defer s.deleteChannelGroupEventQueue(queueID)
+
+	for {
+		resp, _, err := s.base.GetEvents(ctx).
+			QueueID(queueID).
+			LastEventID(lastEventID).
+			Execute()
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			s.logger.WarnContext(ctx, "failed to poll channel-group Zulip event queue", "error", err)
+			timer := time.NewTimer(time.Second)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
+			continue
+		}
+		if resp == nil {
+			continue
+		}
+
+		for _, event := range resp.Events {
+			if err = s.handleChannelGroupEvent(ctx, event); err != nil {
+				s.logger.WarnContext(ctx, "failed to process channel-group Zulip event",
+					"event_id", event.GetID(),
+					"error", err,
+				)
+				continue
+			}
+			lastEventID = event.GetID()
+		}
+	}
+}
+
+func (s *channelGroups) deleteChannelGroupEventQueue(queueID string) {
+	if queueID == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), deleteQueueTimeout)
+	defer cancel()
+	if _, _, err := s.base.DeleteQueue(ctx).QueueID(queueID).Execute(); err != nil {
+		s.logger.WarnContext(ctx, "failed to delete channel-group Zulip event queue", "queue_id", queueID, "error", err)
+	}
+}
+
+func (s *channelGroups) handleChannelGroupEvent(ctx context.Context, event events.Event) error {
+	switch event := event.(type) {
+	case events.ChannelDeleteEvent:
+		for _, channelID := range channelDeleteEventIDs(event) {
+			if err := s.removeChannelFromChannelGroups(ctx, channelID); err != nil {
+				return err
+			}
+		}
+	case events.UserGroupRemoveEvent:
+		return s.removeDeletedUserGroupChannelGroup(ctx, event.GroupID)
+	case events.UserGroupUpdateEvent:
+		if event.Data.Deactivated != nil && *event.Data.Deactivated {
+			return s.removeDeletedUserGroupChannelGroup(ctx, event.GroupID)
+		}
+	}
+	return nil
+}
+
+func channelDeleteEventIDs(event events.ChannelDeleteEvent) []int64 {
+	if len(event.ChannelIDs) > 0 {
+		return uniqueInt64s(event.ChannelIDs)
+	}
+
+	ids := make([]int64, 0, len(event.Channels))
+	for _, channel := range event.Channels {
+		fields, ok := channel.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		for _, key := range []string{"stream_id", "id"} {
+			value, ok := fields[key]
+			if !ok {
+				continue
+			}
+			switch value := value.(type) {
+			case float64:
+				ids = append(ids, int64(value))
+			case int64:
+				ids = append(ids, value)
+			case int:
+				ids = append(ids, int64(value))
+			}
+			break
+		}
+	}
+	return uniqueInt64s(ids)
+}
+
+func (s *channelGroups) removeChannelFromChannelGroups(ctx context.Context, channelID int64) error {
+	if err := s.queries.RemoveChannelFromChannelGroups(ctx, channelID); err != nil {
+		return err
+	}
+	s.logger.InfoContext(ctx, "removed deleted channel from channel groups", "channel_id", channelID)
+	return nil
+}
+
+func (s *channelGroups) removeDeletedUserGroupChannelGroup(ctx context.Context, userGroupID int64) error {
+	if err := s.queries.DeleteChannelGroup(ctx, userGroupID); err != nil {
+		return err
+	}
+	s.logger.InfoContext(ctx, "removed channel group for deleted user group", "channel_group_id", userGroupID)
 	return nil
 }
 
@@ -905,11 +1057,6 @@ func containsInt64(values []int64, needle int64) bool {
 // service. Method shape (Builder / Execute split, context on the
 // constructor) matches the upstream go-zulip conventions.
 type APIChannelGroups interface {
-	// InitializeChannelGroups reconciles persisted channel groups against
-	// Zulip state at startup. It removes stale metadata only; it does not
-	// unsubscribe users from channels.
-	InitializeChannelGroups(ctx context.Context) error
-
 	// CreateChannelGroup creates a new channel group, optionally
 	// pre-populated with channels and initial subscribers.
 	CreateChannelGroup(ctx context.Context) CreateChannelGroupRequest
