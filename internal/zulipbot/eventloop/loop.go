@@ -12,7 +12,6 @@ import (
 
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/audit"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/command"
-	"github.com/tum-zulip/go-campusbot/internal/zulipbot/lifecycle"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/model"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/storage"
 )
@@ -20,38 +19,36 @@ import (
 const (
 	processedMessageRetention = 7 * 24 * time.Hour
 	processedMessageMaxRows   = 100000
+	defaultMinBackoff         = time.Second
+	defaultMaxBackoff         = 30 * time.Second
 )
 
 type Messenger interface {
 	SendReply(ctx context.Context, target model.ReplyTarget, content string) (int64, error)
 }
 
-type RestartController interface {
-	RestartRequested() bool
-}
-
 type Loop struct {
-	source      Source
-	repo        *storage.Repository
-	router      *command.Router
-	messenger   Messenger
-	restart     RestartController
-	ownUserID   int64
-	logger      *slog.Logger
-	minBackoff  time.Duration
-	maxBackoff  time.Duration
-	pollTimeout time.Duration
+	source           Source
+	repo             *storage.Repository
+	router           *command.Router
+	messenger        Messenger
+	restartRequested func() bool
+	ownUserID        int64
+	logger           *slog.Logger
+	minBackoff       time.Duration
+	maxBackoff       time.Duration
+	pollTimeout      time.Duration
 }
 
 type Config struct {
-	Source      Source
-	Repo        *storage.Repository
-	Router      *command.Router
-	Messenger   Messenger
-	Restart     RestartController
-	OwnUserID   int64
-	Logger      *slog.Logger
-	PollTimeout time.Duration
+	Source           Source
+	Repo             *storage.Repository
+	Router           *command.Router
+	Messenger        Messenger
+	RestartRequested func() bool
+	OwnUserID        int64
+	Logger           *slog.Logger
+	PollTimeout      time.Duration
 }
 
 func New(cfg Config) (*Loop, error) {
@@ -67,8 +64,8 @@ func New(cfg Config) (*Loop, error) {
 	if cfg.Messenger == nil {
 		return nil, errors.New("messenger must not be nil")
 	}
-	if cfg.Restart == nil {
-		return nil, errors.New("restart controller must not be nil")
+	if cfg.RestartRequested == nil {
+		return nil, errors.New("restart requested callback must not be nil")
 	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
@@ -77,20 +74,21 @@ func New(cfg Config) (*Loop, error) {
 		cfg.PollTimeout = 90 * time.Second
 	}
 	return &Loop{
-		source:      cfg.Source,
-		repo:        cfg.Repo,
-		router:      cfg.Router,
-		messenger:   cfg.Messenger,
-		restart:     cfg.Restart,
-		ownUserID:   cfg.OwnUserID,
-		logger:      cfg.Logger,
-		minBackoff:  time.Second,
-		maxBackoff:  30 * time.Second,
-		pollTimeout: cfg.PollTimeout,
+		source:           cfg.Source,
+		repo:             cfg.Repo,
+		router:           cfg.Router,
+		messenger:        cfg.Messenger,
+		restartRequested: cfg.RestartRequested,
+		ownUserID:        cfg.OwnUserID,
+		logger:           cfg.Logger,
+		minBackoff:       defaultMinBackoff,
+		maxBackoff:       defaultMaxBackoff,
+		pollTimeout:      cfg.PollTimeout,
 	}, nil
 }
 
-func (loop *Loop) Run(ctx context.Context) error {
+//nolint:gocognit,funlen // long-poll loop with queue recovery, backoff, and restart exit
+func (loop *Loop) Run(ctx context.Context) (bool, error) {
 	if deleted, err := loop.repo.CleanupProcessedMessages(ctx, processedMessageRetention, processedMessageMaxRows); err != nil {
 		loop.logger.WarnContext(ctx, "failed to clean processed message cache", "error", err)
 	} else if deleted > 0 {
@@ -99,13 +97,13 @@ func (loop *Loop) Run(ctx context.Context) error {
 
 	state, err := loop.ensureQueue(ctx)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	backoff := loop.minBackoff
 	for {
 		if err := ctx.Err(); err != nil {
-			return err
+			return false, err
 		}
 
 		pollCtx, cancelPoll := context.WithTimeout(ctx, loop.pollTimeout)
@@ -123,11 +121,11 @@ func (loop *Loop) Run(ctx context.Context) error {
 				)
 				loop.auditQueueRecovery(ctx, state)
 				if err := loop.repo.ClearEventQueueState(ctx); err != nil {
-					return err
+					return false, err
 				}
 				state, err = loop.registerQueue(ctx)
 				if err != nil {
-					return err
+					return false, err
 				}
 				backoff = loop.minBackoff
 				continue
@@ -138,11 +136,11 @@ func (loop *Loop) Run(ctx context.Context) error {
 				continue
 			}
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				return err
+				return false, err
 			}
 			loop.logger.WarnContext(ctx, "Zulip event poll failed", "error", err, "backoff", backoff)
 			if sleepErr := sleep(ctx, backoff); sleepErr != nil {
-				return sleepErr
+				return false, sleepErr
 			}
 			backoff = nextBackoff(backoff, loop.maxBackoff)
 			continue
@@ -170,10 +168,10 @@ func (loop *Loop) Run(ctx context.Context) error {
 				QueueID:     state.QueueID,
 				LastEventID: state.LastEventID,
 			}); err != nil {
-				return err
+				return false, err
 			}
-			if loop.restart.RestartRequested() {
-				return lifecycle.ErrRestartRequested
+			if loop.restartRequested() {
+				return true, nil
 			}
 		}
 	}

@@ -40,18 +40,18 @@ func TestLoopProcessesMessageCommandsAndPersistsEventState(t *testing.T) {
 	}
 	messenger := &recordingMessenger{}
 	loop, err := New(Config{
-		Source:    source,
-		Repo:      repo,
-		Router:    router,
-		Messenger: messenger,
-		Restart:   neverRestart{},
-		OwnUserID: 999,
+		Source:           source,
+		Repo:             repo,
+		Router:           router,
+		Messenger:        messenger,
+		RestartRequested: func() bool { return false },
+		OwnUserID:        999,
 	})
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
 
-	err = loop.Run(ctx)
+	_, err = loop.Run(ctx)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run() error = %v, want context.Canceled", err)
 	}
@@ -99,17 +99,17 @@ func TestLoopRecoversFromBadStoredQueue(t *testing.T) {
 		registerStates: []QueueState{{QueueID: "new", LastEventID: 20}},
 	}
 	loop, err := New(Config{
-		Source:    source,
-		Repo:      repo,
-		Router:    router,
-		Messenger: &recordingMessenger{},
-		Restart:   neverRestart{},
-		OwnUserID: 999,
+		Source:           source,
+		Repo:             repo,
+		Router:           router,
+		Messenger:        &recordingMessenger{},
+		RestartRequested: func() bool { return false },
+		OwnUserID:        999,
 	})
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
-	err = loop.Run(ctx)
+	_, err = loop.Run(ctx)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run() error = %v, want context.Canceled", err)
 	}
@@ -147,18 +147,18 @@ func TestLoopSkipsDuplicateMessageEvents(t *testing.T) {
 	}
 	messenger := &recordingMessenger{}
 	loop, err := New(Config{
-		Source:    source,
-		Repo:      repo,
-		Router:    router,
-		Messenger: messenger,
-		Restart:   neverRestart{},
-		OwnUserID: 999,
+		Source:           source,
+		Repo:             repo,
+		Router:           router,
+		Messenger:        messenger,
+		RestartRequested: func() bool { return false },
+		OwnUserID:        999,
 	})
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
 
-	err = loop.Run(ctx)
+	_, err = loop.Run(ctx)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run() error = %v, want context.Canceled", err)
 	}
@@ -200,18 +200,18 @@ func TestLoopResumesStoredQueueWithoutRegistering(t *testing.T) {
 	}
 	source := &fakeSource{}
 	loop, err := New(Config{
-		Source:    source,
-		Repo:      repo,
-		Router:    router,
-		Messenger: &recordingMessenger{},
-		Restart:   neverRestart{},
-		OwnUserID: 999,
+		Source:           source,
+		Repo:             repo,
+		Router:           router,
+		Messenger:        &recordingMessenger{},
+		RestartRequested: func() bool { return false },
+		OwnUserID:        999,
 	})
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
 
-	err = loop.Run(ctx)
+	_, err = loop.Run(ctx)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run() error = %v, want context.Canceled", err)
 	}
@@ -246,18 +246,18 @@ func TestLoopRecoversFromBadQueueDuringPollAndAudits(t *testing.T) {
 		pollErrs: []error{ErrBadEventQueueID},
 	}
 	loop, err := New(Config{
-		Source:    source,
-		Repo:      repo,
-		Router:    router,
-		Messenger: &recordingMessenger{},
-		Restart:   neverRestart{},
-		OwnUserID: 999,
+		Source:           source,
+		Repo:             repo,
+		Router:           router,
+		Messenger:        &recordingMessenger{},
+		RestartRequested: func() bool { return false },
+		OwnUserID:        999,
 	})
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
 
-	err = loop.Run(ctx)
+	_, err = loop.Run(ctx)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run() error = %v, want context.Canceled", err)
 	}
@@ -297,18 +297,18 @@ func TestLoopHeartbeatUpdatesOnlyEventState(t *testing.T) {
 		pollBatches:    [][]events.Event{{mustHeartbeatEvent(t, 2)}},
 	}
 	loop, err := New(Config{
-		Source:    source,
-		Repo:      repo,
-		Router:    router,
-		Messenger: messenger,
-		Restart:   neverRestart{},
-		OwnUserID: 999,
+		Source:           source,
+		Repo:             repo,
+		Router:           router,
+		Messenger:        messenger,
+		RestartRequested: func() bool { return false },
+		OwnUserID:        999,
 	})
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
 
-	err = loop.Run(ctx)
+	_, err = loop.Run(ctx)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run() error = %v, want context.Canceled", err)
 	}
@@ -350,18 +350,18 @@ func TestLoopHandlesMalformedMessageEventWithoutAdvancing(t *testing.T) {
 		pollBatches:    [][]events.Event{{fakeMalformedEvent{id: 2, eventType: events.EventTypeMessage}}},
 	}
 	loop, err := New(Config{
-		Source:    source,
-		Repo:      repo,
-		Router:    router,
-		Messenger: &recordingMessenger{},
-		Restart:   neverRestart{},
-		OwnUserID: 999,
+		Source:           source,
+		Repo:             repo,
+		Router:           router,
+		Messenger:        &recordingMessenger{},
+		RestartRequested: func() bool { return false },
+		OwnUserID:        999,
 	})
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
 
-	err = loop.Run(ctx)
+	_, err = loop.Run(ctx)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run() error = %v, want context.Canceled", err)
 	}
@@ -429,12 +429,6 @@ func (messenger *recordingMessenger) SendReply(
 	messenger.lastContent = content
 	messenger.count++
 	return 500, nil
-}
-
-type neverRestart struct{}
-
-func (neverRestart) RestartRequested() bool {
-	return false
 }
 
 func mustMessageEvent(t *testing.T, eventID int64, messageID int64, content string) events.MessageEvent {
@@ -559,19 +553,19 @@ func TestLoopPollTimeoutRetriesWithoutBackoff(t *testing.T) {
 	}
 
 	loop, err := New(Config{
-		Source:      source,
-		Repo:        repo,
-		Router:      router,
-		Messenger:   &recordingMessenger{},
-		Restart:     neverRestart{},
-		OwnUserID:   999,
-		PollTimeout: 50 * time.Millisecond,
+		Source:           source,
+		Repo:             repo,
+		Router:           router,
+		Messenger:        &recordingMessenger{},
+		RestartRequested: func() bool { return false },
+		OwnUserID:        999,
+		PollTimeout:      50 * time.Millisecond,
 	})
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
 
-	runErr := loop.Run(ctx)
+	_, runErr := loop.Run(ctx)
 	if !errors.Is(runErr, context.Canceled) {
 		t.Fatalf("Run() error = %v, want context.Canceled", runErr)
 	}
@@ -593,12 +587,12 @@ func TestLoopPollTimeoutDefaultIs90s(t *testing.T) {
 	}
 
 	loop, err := New(Config{
-		Source:    &fakeSource{},
-		Repo:      repo,
-		Router:    router,
-		Messenger: &recordingMessenger{},
-		Restart:   neverRestart{},
-		OwnUserID: 999,
+		Source:           &fakeSource{},
+		Repo:             repo,
+		Router:           router,
+		Messenger:        &recordingMessenger{},
+		RestartRequested: func() bool { return false },
+		OwnUserID:        999,
 		// PollTimeout not set; should default to 90s
 	})
 	if err != nil {

@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -14,15 +13,17 @@ import (
 	"time"
 
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot"
-	"github.com/tum-zulip/go-campusbot/internal/zulipbot/lifecycle"
 )
 
 const (
 	exitSuccess = 0
 	exitFailure = 1
 
-	startupTimeout = 15 * time.Second
+	startupTimeout     = 15 * time.Second
+	restartMarkTimeout = 5 * time.Second
 )
+
+type execFunc func(path string, argv []string, env []string) error
 
 var (
 	zuliprc       = envOrDefault("ZULIPRC", zulipbot.DefaultRCPath)
@@ -62,21 +63,12 @@ func main() {
 	runCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	var restartExec lifecycle.ExecFunc
-	if dryRunRestart {
-		restartExec = func(path string, argv []string, _ []string) error {
-			fmt.Fprintf(os.Stderr, "dry-run: would exec %q with argv %v\n", path, argv)
-			return nil
-		}
-	}
-
 	startupCtx, cancelStartup := context.WithTimeout(runCtx, startupTimeout)
 	app, err := zulipbot.NewApp(startupCtx, zulipbot.RuntimeConfig{
 		RCPath:      zuliprc,
 		DBPath:      dbPath,
 		Logger:      logger,
 		PollTimeout: pollTimeout,
-		RestartExec: restartExec,
 	})
 	cancelStartup()
 	if err != nil {
@@ -96,20 +88,53 @@ func main() {
 		"full_name", ownUser.FullName,
 	)
 
-	if err := app.Run(runCtx); err != nil {
-		if errors.Is(err, lifecycle.ErrRestartRequested) {
-			logger.InfoContext(runCtx, "executing requested restart")
-			if err := app.RestartProcess(); err != nil {
-				logger.ErrorContext(runCtx, "failed to restart process", "error", err)
-				os.Exit(exitFailure)
-			}
-			os.Exit(exitSuccess)
-		}
+	restartRequested, err := app.Run(runCtx)
+	if err != nil {
 		logger.ErrorContext(runCtx, "bot stopped with error", "error", err)
 		os.Exit(exitFailure)
 	}
+	if !restartRequested {
+		os.Exit(exitSuccess)
+	}
 
-	os.Exit(exitSuccess)
+	logger.InfoContext(runCtx, "executing requested restart")
+	if restartErr := restartProcess(runCtx, app, restartExec(dryRunRestart)); restartErr != nil {
+		logger.ErrorContext(runCtx, "failed to restart process", "error", restartErr)
+		os.Exit(exitFailure)
+	}
+}
+
+func restartProcess(ctx context.Context, app *zulipbot.App, exec execFunc) error {
+	markCtx, cancel := context.WithTimeout(ctx, restartMarkTimeout)
+	defer cancel()
+	if err := app.MarkRestartInProgress(markCtx); err != nil {
+		return err
+	}
+	if err := app.Close(); err != nil {
+		return err
+	}
+	return execRestart(exec)
+}
+
+func restartExec(dryRun bool) execFunc {
+	if !dryRun {
+		return syscall.Exec
+	}
+	return func(path string, argv []string, _ []string) error {
+		fmt.Fprintf(os.Stderr, "dry-run: would exec %q with argv %v\n", path, argv)
+		return nil
+	}
+}
+
+func execRestart(exec execFunc) error {
+	if exec == nil {
+		exec = syscall.Exec
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("resolve executable for restart: %w", err)
+	}
+	return exec(executable, os.Args, os.Environ())
 }
 
 func parseLogLevel(s string) (slog.Level, error) {
