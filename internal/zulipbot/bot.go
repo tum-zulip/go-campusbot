@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/tum-zulip/go-zulip/zulip"
+	realtimeevents "github.com/tum-zulip/go-zulip/zulip/api/real_time_events"
 	zulipclient "github.com/tum-zulip/go-zulip/zulip/client"
 	"github.com/tum-zulip/go-zulip/zulip/events"
 
@@ -35,10 +36,6 @@ const (
 	closeDeregisterTimeout    = 5 * time.Second
 	processedMessageRetention = 7 * 24 * time.Hour
 	processedMessageMaxRows   = 100000
-	defaultMinBackoff         = time.Second
-	defaultMaxBackoff         = 30 * time.Second
-	defaultPollTimeout        = 90 * time.Second
-	backoffMultiplier         = 2
 
 	secondsPerMinute = 60
 	secondsPerHour   = 60 * secondsPerMinute
@@ -59,8 +56,7 @@ type GroupSubscriber interface {
 }
 
 type RuntimeConfig struct {
-	Logger      *slog.Logger
-	PollTimeout time.Duration
+	Logger *slog.Logger
 	// RunContext is the context used for background goroutines (e.g. the
 	// channel-group event listener). It should be tied to the application
 	// lifetime, not to the startup timeout. If nil, the ctx passed to NewBot
@@ -84,10 +80,7 @@ type Bot struct {
 	accepting atomic.Bool
 	requested atomic.Bool
 
-	closed      atomic.Bool
-	minBackoff  time.Duration
-	maxBackoff  time.Duration
-	pollTimeout time.Duration
+	closed atomic.Bool
 }
 
 // New creates a minimal Bot that wraps the Zulip client. Used by tests that
@@ -141,12 +134,6 @@ func NewBot(
 	bot.repo = repo
 	bot.logger = cfg.Logger
 	bot.startedAt = time.Now().UTC()
-	bot.minBackoff = defaultMinBackoff
-	bot.maxBackoff = defaultMaxBackoff
-	bot.pollTimeout = cfg.PollTimeout
-	if bot.pollTimeout == 0 {
-		bot.pollTimeout = defaultPollTimeout
-	}
 
 	bot.config = configsvc.NewService(repo, bot)
 	bot.argParser = command.NewArgParser(bot)
@@ -233,32 +220,8 @@ func (bot *Bot) RestartRequested() bool {
 	return bot.requested.Load()
 }
 
-// BotIdentity holds the resolved identity information for the bot account.
-type BotIdentity struct {
-	IsBot   bool
-	OwnerID int64
-}
-
-// ResolveBotIdentity fetches the bot's own user details from Zulip to determine
-// whether it is a bot account and who its owner is.
-func (bot *Bot) ResolveBotIdentity(ctx context.Context) (BotIdentity, error) {
-	resp, _, err := bot.client.GetUser(ctx, bot.ownUser.UserID).Execute()
-	if err != nil {
-		return BotIdentity{}, fmt.Errorf("get Zulip user details for bot identity: %w", err)
-	}
-	if resp == nil {
-		return BotIdentity{}, errors.New("get Zulip user details: empty response")
-	}
-	identity := BotIdentity{IsBot: resp.User.IsBot}
-	if resp.User.BotOwnerID != nil {
-		identity.OwnerID = *resp.User.BotOwnerID
-	}
-	return identity, nil
-}
-
-// Run executes the long-poll event loop. Returns true if a restart was requested.
-//
-//nolint:gocognit,funlen // long-poll loop with queue recovery, backoff, and restart exit
+// Run consumes the Zulip event queue via realtimeevents.EventQueue, recovering
+// expired queues by re-registering. Returns true if a restart was requested.
 func (bot *Bot) Run(ctx context.Context) (bool, error) {
 	if bot.repo == nil {
 		return false, errors.New("Bot.Run requires a repository (use NewBot)")
@@ -282,15 +245,6 @@ func (bot *Bot) Run(ctx context.Context) (bool, error) {
 		bot.logger.DebugContext(ctx, "cleaned processed message cache", "deleted", deleted)
 	}
 
-	state, err := bot.ensureQueue(ctx)
-	if err != nil {
-		if errors.Is(err, context.Canceled) {
-			return false, nil
-		}
-		return false, err
-	}
-
-	backoff := bot.minBackoff
 	for {
 		if err := ctx.Err(); err != nil {
 			if errors.Is(err, context.Canceled) {
@@ -299,77 +253,91 @@ func (bot *Bot) Run(ctx context.Context) (bool, error) {
 			return false, err
 		}
 
-		pollCtx, cancelPoll := context.WithTimeout(ctx, bot.pollTimeout)
-		polled, err := bot.pollQueue(pollCtx, state)
-		cancelPoll()
+		state, err := bot.ensureQueue(ctx)
 		if err != nil {
-			if errors.Is(err, ErrBadEventQueueID) {
-				bot.logger.WarnContext(
-					ctx,
-					"Zulip event queue expired; registering a new queue; events may have been missed",
-					"queue_id",
-					state.QueueID,
-					"last_event_id",
-					state.LastEventID,
-				)
-				if err := bot.repo.ClearEventQueueState(ctx); err != nil {
-					return false, err
-				}
-				state, err = bot.registerAndSaveQueue(ctx)
-				if err != nil {
-					return false, err
-				}
-				backoff = bot.minBackoff
-				continue
-			}
-			if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
-				backoff = bot.minBackoff
-				continue
-			}
 			if errors.Is(err, context.Canceled) {
 				return false, nil
 			}
-			if errors.Is(err, context.DeadlineExceeded) {
-				return false, err
-			}
-			bot.logger.WarnContext(ctx, "Zulip event poll failed", "error", err, "backoff", backoff)
-			if sleepErr := sleep(ctx, backoff); sleepErr != nil {
-				if errors.Is(sleepErr, context.Canceled) {
-					return false, nil
-				}
-				return false, sleepErr
-			}
-			backoff = nextBackoff(backoff, bot.maxBackoff)
-			continue
+			return false, err
 		}
-		backoff = bot.minBackoff
 
-		for _, event := range polled {
+		restart, badQueue, err := bot.consumeQueue(ctx, state)
+		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				return false, nil
+			}
+			return false, err
+		}
+		if restart {
+			return true, nil
+		}
+		if !badQueue {
+			return false, nil
+		}
+		bot.logger.WarnContext(
+			ctx,
+			"Zulip event queue expired; registering a new queue; events may have been missed",
+			"queue_id", state.QueueID,
+			"last_event_id", state.LastEventID,
+		)
+		if err := bot.repo.ClearEventQueueState(ctx); err != nil {
+			return false, err
+		}
+	}
+}
+
+//nolint:gocognit
+func (bot *Bot) consumeQueue(ctx context.Context, state QueueState) (bool, bool, error) {
+	errs := make(chan error, 1)
+	queue := realtimeevents.NewEventQueue(
+		bot.client,
+		realtimeevents.WithLogger(bot.logger),
+		realtimeevents.WithEventQueueChannelErrorHandler(bot.logger, errs),
+	)
+
+	queueCtx, cancelQueue := context.WithCancel(ctx)
+	defer cancelQueue()
+
+	eventCh, connectErr := queue.Connect(queueCtx, state.QueueID, state.LastEventID)
+	if connectErr != nil {
+		if isBadEventQueueID(connectErr) {
+			return false, true, nil
+		}
+		return false, false, fmt.Errorf("connect to Zulip event queue: %w", connectErr)
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return false, false, nil
+		case event, ok := <-eventCh:
+			if !ok {
+				return false, false, ctx.Err()
+			}
 			if event == nil {
 				bot.logger.WarnContext(ctx, "received nil Zulip event")
 				continue
 			}
 			if err := bot.handleEvent(ctx, event, &state); err != nil {
-				bot.logger.ErrorContext(
-					ctx,
-					"failed to handle Zulip event",
-					"event_id",
-					event.GetID(),
-					"event_type",
-					event.GetType(),
-					"error",
-					err,
-				)
+				bot.logger.ErrorContext(ctx, "failed to handle Zulip event",
+					"event_id", event.GetID(),
+					"event_type", event.GetType(),
+					"error", err)
 			}
 			if err := bot.repo.SaveEventQueueState(ctx, storage.EventQueueState{
 				QueueID:     state.QueueID,
 				LastEventID: state.LastEventID,
 			}); err != nil {
-				return false, err
+				return false, false, err
 			}
 			if bot.requested.Load() {
-				return true, nil
+				return true, false, nil
 			}
+		case pollErr := <-errs:
+			if isBadEventQueueID(pollErr) {
+				return false, true, nil
+			}
+			bot.logger.WarnContext(ctx, "Zulip event poll failed", "error", pollErr)
 		}
 	}
 }
@@ -498,7 +466,7 @@ var (
 )
 
 func (bot *Bot) handleHelp(ctx context.Context, req command.Request) command.Result {
-	role, err := bot.RoleFor(ctx, req.Actor)
+	role, err := bot.roleFor(ctx, req.Actor)
 	if err != nil {
 		role = zulip.RoleMember
 	}
@@ -669,7 +637,7 @@ func (bot *Bot) SendChannelMessage(ctx context.Context, channelID int64, topic s
 	return resp.ID, nil
 }
 
-func (bot *Bot) SendDirectMessage(ctx context.Context, userIDs []int64, content string) (int64, error) {
+func (bot *Bot) sendDirectMessage(ctx context.Context, userIDs []int64, content string) (int64, error) {
 	if ctx == nil {
 		return 0, errors.New(errContextRequired)
 	}
@@ -693,7 +661,7 @@ func (bot *Bot) SendDirectMessage(ctx context.Context, userIDs []int64, content 
 	return resp.ID, nil
 }
 
-func (bot *Bot) SendReply(ctx context.Context, target command.ReplyTarget, content string) (int64, error) {
+func (bot *Bot) sendReply(ctx context.Context, target command.ReplyTarget, content string) (int64, error) {
 	if err := target.Validate(); err != nil {
 		return 0, err
 	}
@@ -701,7 +669,7 @@ func (bot *Bot) SendReply(ctx context.Context, target command.ReplyTarget, conte
 	case command.ReplyKindChannel:
 		return bot.SendChannelMessage(ctx, target.ChannelID, target.Topic, content)
 	case command.ReplyKindDirect:
-		return bot.SendDirectMessage(ctx, target.UserIDs, content)
+		return bot.sendDirectMessage(ctx, target.UserIDs, content)
 	default:
 		return 0, errors.New("unsupported reply target kind")
 	}
@@ -721,7 +689,7 @@ func (bot *Bot) Check(ctx context.Context, actor command.Actor, minRole zulip.Ro
 	return fmt.Errorf("%w", command.ErrDenied)
 }
 
-func (bot *Bot) RoleFor(ctx context.Context, actor command.Actor) (zulip.Role, error) {
+func (bot *Bot) roleFor(ctx context.Context, actor command.Actor) (zulip.Role, error) {
 	return bot.fetchRole(ctx, actor.UserID)
 }
 
@@ -770,36 +738,6 @@ func (bot *Bot) GetUserByID(ctx context.Context, id int64) (zulip.User, error) {
 	return resp.User, nil
 }
 
-func (bot *Bot) CreateChannel(
-	ctx context.Context,
-	name string,
-	description string,
-	subscriberIDs []int64,
-) (int64, error) {
-	if ctx == nil {
-		return 0, errors.New(errContextRequired)
-	}
-	if name == "" {
-		return 0, errors.New("channel name must not be empty")
-	}
-	if len(subscriberIDs) == 0 {
-		return 0, errors.New("at least one subscriber ID is required")
-	}
-
-	resp, _, err := bot.client.CreateChannel(ctx).
-		Name(name).
-		Description(description).
-		Subscribers(subscriberIDs).
-		Execute()
-	if err != nil {
-		return 0, fmt.Errorf("create Zulip channel: %w", err)
-	}
-	if resp == nil {
-		return 0, errors.New("create Zulip channel: empty response")
-	}
-	return resp.ID, nil
-}
-
 // --- Restart state --------------------------------------------------------
 
 // ScheduleRestart records a restart request in storage and flips the bot to
@@ -846,7 +784,7 @@ func (bot *Bot) NotifyRestartComplete(ctx context.Context) error {
 		return nil
 	}
 
-	messageID, sendErr := bot.SendReply(
+	messageID, sendErr := bot.sendReply(
 		ctx,
 		request.Target,
 		"Restart complete. Event processing is back online.",
@@ -887,23 +825,10 @@ func (bot *Bot) ensureQueue(ctx context.Context) (QueueState, error) {
 	}
 	if ok {
 		state := QueueState{QueueID: stored.QueueID, LastEventID: stored.LastEventID}
-		if err := bot.checkQueue(ctx, state); err == nil {
-			bot.logger.InfoContext(
-				ctx,
-				"resuming Zulip event queue",
-				"queue_id",
-				state.QueueID,
-				"last_event_id",
-				state.LastEventID,
-			)
-			return state, nil
-		} else if !errors.Is(err, ErrBadEventQueueID) {
-			return QueueState{}, err
-		}
-		bot.logger.WarnContext(ctx, "stored Zulip event queue is no longer valid", "queue_id", state.QueueID)
-		if err := bot.repo.ClearEventQueueState(ctx); err != nil {
-			return QueueState{}, err
-		}
+		bot.logger.InfoContext(ctx, "resuming Zulip event queue",
+			"queue_id", state.QueueID,
+			"last_event_id", state.LastEventID)
+		return state, nil
 	}
 	return bot.registerAndSaveQueue(ctx)
 }
@@ -968,38 +893,6 @@ func (bot *Bot) registerQueue(ctx context.Context) (QueueState, error) {
 		return QueueState{}, errors.New("register Zulip event queue: empty queue ID")
 	}
 	return QueueState{QueueID: *resp.QueueID, LastEventID: resp.LastEventID}, nil
-}
-
-func (bot *Bot) checkQueue(ctx context.Context, state QueueState) error {
-	_, _, err := bot.client.GetEvents(ctx).
-		QueueID(state.QueueID).
-		LastEventID(state.LastEventID).
-		DontBlock(true).
-		Execute()
-	if err != nil {
-		if IsBadEventQueueID(err) {
-			return ErrBadEventQueueID
-		}
-		return fmt.Errorf("check Zulip event queue: %w", err)
-	}
-	return nil
-}
-
-func (bot *Bot) pollQueue(ctx context.Context, state QueueState) ([]events.Event, error) {
-	resp, _, err := bot.client.GetEvents(ctx).
-		QueueID(state.QueueID).
-		LastEventID(state.LastEventID).
-		Execute()
-	if err != nil {
-		if IsBadEventQueueID(err) {
-			return nil, ErrBadEventQueueID
-		}
-		return nil, fmt.Errorf("poll Zulip event queue: %w", err)
-	}
-	if resp == nil {
-		return nil, errors.New("poll Zulip event queue: empty response")
-	}
-	return resp.Events, nil
 }
 
 func (bot *Bot) deleteQueue(ctx context.Context, queueID string) error {
@@ -1190,7 +1083,7 @@ func (bot *Bot) handleReaction(ctx context.Context, event events.ReactionEvent) 
 }
 
 func (bot *Bot) send(ctx context.Context, target command.ReplyTarget, content string) error {
-	messageID, err := bot.SendReply(ctx, target, content)
+	messageID, err := bot.sendReply(ctx, target, content)
 	if err != nil {
 		return err
 	}
@@ -1253,25 +1146,6 @@ func directReplyUserIDs(msg zulip.Message, ownUserID int64) []int64 {
 	return userIDs
 }
 
-func sleep(ctx context.Context, delay time.Duration) error {
-	timer := time.NewTimer(delay)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
-	}
-}
-
-func nextBackoff(current time.Duration, maxBackoff time.Duration) time.Duration {
-	next := current * backoffMultiplier
-	if next > maxBackoff {
-		return maxBackoff
-	}
-	return next
-}
-
 // --- Queue register-response decoding (moved from source.go) --------------
 
 type registerQueueResponse struct {
@@ -1306,7 +1180,7 @@ func queueStateFromRegisterHTTPResponse(httpResp *http.Response) (QueueState, er
 	return QueueState{QueueID: *resp.QueueID, LastEventID: resp.LastEventID}, nil
 }
 
-func IsBadEventQueueID(err error) bool {
+func isBadEventQueueID(err error) bool {
 	if err == nil {
 		return false
 	}

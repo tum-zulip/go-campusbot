@@ -37,7 +37,6 @@ type execFunc func(path string, argv []string, env []string) error
 var (
 	zuliprc       = envOrDefault("ZULIPRC", defaultRCPath)
 	dbPath        = envOrDefault("CAMPUSBOT_DB_PATH", defaultDBPath)
-	pollTimeout   = 90 * time.Second
 	dryRunRestart bool
 	logLevel      = envOrDefault("CAMPUSBOT_LOG_LEVEL", "info")
 )
@@ -45,7 +44,6 @@ var (
 func init() {
 	flag.StringVar(&zuliprc, "zuliprc", zuliprc, "path to zuliprc")
 	flag.StringVar(&dbPath, "db", dbPath, "path to SQLite database")
-	flag.DurationVar(&pollTimeout, "poll-timeout", pollTimeout, "HTTP timeout per Zulip event poll")
 	flag.BoolVar(&dryRunRestart, "dry-run-restart", false, "log restart exec arguments without exec-ing")
 	flag.StringVar(&logLevel, "log-level", logLevel, "log level: debug, info, warn, error")
 	flag.Usage = func() {
@@ -95,9 +93,8 @@ func main() {
 	bot, err := zulipbot.NewBot(
 		startupCtx,
 		zulipbot.RuntimeConfig{
-			Logger:      logger,
-			PollTimeout: pollTimeout,
-			RunContext:  runCtx,
+			Logger:     logger,
+			RunContext: runCtx,
 		},
 		client,
 		repo,
