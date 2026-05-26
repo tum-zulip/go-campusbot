@@ -16,9 +16,21 @@ import (
 	"strconv"
 	"sync"
 
+	"github.com/tum-zulip/go-campusbot/internal/callorigin"
 	"github.com/tum-zulip/go-zulip/zulip"
 	"github.com/tum-zulip/go-zulip/zulip/api/channels"
 	"github.com/tum-zulip/go-zulip/zulip/client"
+)
+
+// Names of the high-level channel-group operations, propagated through ctx
+// via [callorigin] so test doubles can distinguish which logical op issued a
+// low-level call. Unused in production.
+const (
+	originCreate              = "CreateChannelGroup"
+	originDeactivate          = "DeactivateChannelGroup"
+	originUpdateChannels      = "UpdateChannelGroupChannels"
+	originSubscribe           = "SubscribeToChannelGroup"
+	originUnsubscribe         = "UnsubscribeFromChannelGroup"
 )
 
 // Client is the campusbot Zulip client. It is a drop-in replacement for
@@ -76,6 +88,7 @@ func (s *inMemoryChannelGroups) CreateChannelGroup(ctx context.Context) CreateCh
 func (s *inMemoryChannelGroups) CreateChannelGroupExecute(
 	r CreateChannelGroupRequest,
 ) (*CreateChannelGroupResponse, *http.Response, error) {
+	r.ctx = callorigin.With(r.ctx, originCreate)
 	if r.name == nil {
 		return nil, nil, errors.New("name is required and must be specified")
 	}
@@ -137,6 +150,7 @@ func (s *inMemoryChannelGroups) DeactivateChannelGroup(
 func (s *inMemoryChannelGroups) DeactivateChannelGroupExecute(
 	r DeactivateChannelGroupRequest,
 ) (*zulip.Response, *http.Response, error) {
+	r.ctx = callorigin.With(r.ctx, originDeactivate)
 	state, err := s.getGroupState(r.channelGroupID)
 	if err != nil {
 		return nil, nil, err
@@ -268,6 +282,7 @@ func (s *inMemoryChannelGroups) UpdateChannelGroupChannels(
 func (s *inMemoryChannelGroups) UpdateChannelGroupChannelsExecute(
 	r UpdateChannelGroupChannelsRequest,
 ) (*zulip.Response, *http.Response, error) {
+	r.ctx = callorigin.With(r.ctx, originUpdateChannels)
 	state, err := s.getGroupState(r.channelGroupID)
 	if err != nil {
 		return nil, nil, err
@@ -374,6 +389,7 @@ func (s *inMemoryChannelGroups) SubscribeToChannelGroup(
 func (s *inMemoryChannelGroups) SubscribeToChannelGroupExecute(
 	r SubscribeToChannelGroupRequest,
 ) (*SubscribeToChannelGroupResponse, *http.Response, error) {
+	r.ctx = callorigin.With(r.ctx, originSubscribe)
 	state, err := s.getGroupState(r.channelGroupID)
 	if err != nil {
 		return nil, nil, err
@@ -429,6 +445,7 @@ func (s *inMemoryChannelGroups) UnsubscribeFromChannelGroup(
 func (s *inMemoryChannelGroups) UnsubscribeFromChannelGroupExecute(
 	r UnsubscribeFromChannelGroupRequest,
 ) (*UnsubscribeFromChannelGroupResponse, *http.Response, error) {
+	r.ctx = callorigin.With(r.ctx, originUnsubscribe)
 	state, err := s.getGroupState(r.channelGroupID)
 	if err != nil {
 		return nil, nil, err

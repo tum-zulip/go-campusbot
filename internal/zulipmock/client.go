@@ -4,6 +4,7 @@ package zulipmock
 import (
 	"context"
 	"fmt"
+	"github.com/tum-zulip/go-campusbot/internal/callorigin"
 	"github.com/tum-zulip/go-zulip/zulip"
 	"github.com/tum-zulip/go-zulip/zulip/api/authentication"
 	"github.com/tum-zulip/go-zulip/zulip/api/channels"
@@ -67,6 +68,16 @@ type RequestSerialization struct {
 type RequestStep struct {
 	Operation Operation
 	Key       string
+	// Origin optionally restricts the step to calls issued under a matching
+	// callorigin tag (see internal/callorigin). An empty Origin matches any
+	// origin, preserving compatibility with tests that don't care.
+	Origin string
+}
+
+// From returns a copy of step restricted to calls tagged with origin.
+func (s RequestStep) From(origin string) RequestStep {
+	s.Origin = origin
+	return s
 }
 
 func OperationRequest(op Operation) RequestStep {
@@ -181,7 +192,7 @@ func (s *state) waitForTurn(ctx context.Context, op Operation, key string) error
 	if serialization == nil {
 		return nil
 	}
-	return serialization.waitForTurn(ctx, RequestStep{Operation: op, Key: key})
+	return serialization.waitForTurn(ctx, RequestStep{Operation: op, Key: key, Origin: callorigin.From(ctx)})
 }
 
 func (s *RequestSerialization) Close() {
@@ -261,7 +272,16 @@ func (s *RequestSerialization) waitForTurn(ctx context.Context, step RequestStep
 }
 
 func requestStepMatches(expected RequestStep, actual RequestStep) bool {
-	return expected.Operation == actual.Operation && (expected.Key == "" || expected.Key == actual.Key)
+	if expected.Operation != actual.Operation {
+		return false
+	}
+	if expected.Key != "" && expected.Key != actual.Key {
+		return false
+	}
+	if expected.Origin != "" && expected.Origin != actual.Origin {
+		return false
+	}
+	return true
 }
 
 func int64Key(value int64) string {
