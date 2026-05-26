@@ -12,10 +12,10 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"sort"
-	"strconv"
 	"time"
 
 	"github.com/tum-zulip/go-campusbot/internal/callorigin"
@@ -31,6 +31,7 @@ import (
 // low-level call. Unused in production.
 const (
 	originCreate         = "CreateChannelGroup"
+	originImport         = "ImportZulipUserGroup"
 	originUpdateChannels = "UpdateChannelGroupChannels"
 	originSubscribe      = "SubscribeToChannelGroup"
 	originUnsubscribe    = "UnsubscribeFromChannelGroup"
@@ -409,6 +410,27 @@ func (s *channelGroups) CreateChannelGroupExecute(
 	}, nil, nil
 }
 
+// ImportZulipUserGroup records an existing Zulip user group as a local channel
+// group. Unlike CreateChannelGroup it does NOT create a new Zulip user group;
+// it only inserts the user-group ID into the local channel_groups table.
+// The operation is idempotent: if the group is already tracked locally, it
+// returns nil without touching the database.
+func (s *channelGroups) ImportZulipUserGroup(ctx context.Context, userGroupID int64) error {
+	ctx = callorigin.With(ctx, originImport)
+	if _, err := s.queries.GetChannelGroup(ctx, userGroupID); err == nil {
+		return nil
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("check channel group %d: %w", userGroupID, err)
+	}
+	if _, err := s.queries.CreateChannelGroup(ctx, channelgroupdb.CreateChannelGroupParams{
+		ID:              userGroupID,
+		ChannelFolderID: sql.NullInt64{},
+	}); err != nil {
+		return fmt.Errorf("import channel group %d: %w", userGroupID, err)
+	}
+	return nil
+}
+
 func (s *channelGroups) GetChannelGroups(ctx context.Context) GetChannelGroupsRequest {
 	return GetChannelGroupsRequest{ctx: ctx, apiService: s}
 }
@@ -679,29 +701,34 @@ func (s *channelGroups) UnsubscribeFromChannelGroupExecute(
 		return nil, nil, errors.New("principals with user IDs are required")
 	}
 
-	if len(group.ChannelIDs) > 0 {
+	if !r.keepChannels && len(group.ChannelIDs) > 0 {
 		if err = s.unsubscribeUsersFromChannels(r.ctx, group.ChannelIDs, userIDs); err != nil {
 			return nil, nil, err
 		}
 	}
 	_, _, err = s.base.UpdateUserGroupMembers(r.ctx, group.ID).Delete(userIDs).Execute()
 	if err != nil {
-		_ = s.subscribeUsersToChannels(r.ctx, group.ChannelIDs, userIDs)
+		if !r.keepChannels {
+			_ = s.subscribeUsersToChannels(r.ctx, group.ChannelIDs, userIDs)
+		}
 		return nil, nil, err
 	}
-	finalState, err := s.getGroup(r.ctx, r.channelGroupID)
-	if err != nil {
-		return nil, nil, err
-	}
-	addedWhileUnsubscribing := removeInt64s(finalState.ChannelIDs, group.ChannelIDs)
-	if len(addedWhileUnsubscribing) > 0 {
-		s.logger.DebugContext(r.ctx, "removing unsubscribed users from channels added concurrently",
-			"channel_group_id", r.channelGroupID,
-			"channel_ids", addedWhileUnsubscribing,
-			"user_ids", userIDs,
-		)
-		if err = s.unsubscribeUsersFromChannels(r.ctx, addedWhileUnsubscribing, userIDs); err != nil {
+	finalState := group
+	if !r.keepChannels {
+		finalState, err = s.getGroup(r.ctx, r.channelGroupID)
+		if err != nil {
 			return nil, nil, err
+		}
+		addedWhileUnsubscribing := removeInt64s(finalState.ChannelIDs, group.ChannelIDs)
+		if len(addedWhileUnsubscribing) > 0 {
+			s.logger.DebugContext(r.ctx, "removing unsubscribed users from channels added concurrently",
+				"channel_group_id", r.channelGroupID,
+				"channel_ids", addedWhileUnsubscribing,
+				"user_ids", userIDs,
+			)
+			if err = s.unsubscribeUsersFromChannels(r.ctx, addedWhileUnsubscribing, userIDs); err != nil {
+				return nil, nil, err
+			}
 		}
 	}
 
@@ -1041,8 +1068,12 @@ func ptrResponse(r zulip.Response) *zulip.Response {
 	return &r
 }
 
+// ErrChannelGroupNotFound is returned (wrapped) when a channel group ID does not
+// exist in the local channelgroup database. Callers can detect it with errors.Is.
+var ErrChannelGroupNotFound = errors.New("channel group not found")
+
 func errChannelGroupNotFound(channelGroupID int64) error {
-	return errors.New("channel group " + strconv.FormatInt(channelGroupID, 10) + " not found")
+	return fmt.Errorf("channel group %d: %w", channelGroupID, ErrChannelGroupNotFound)
 }
 
 func cloneChannelGroup(group ChannelGroup) ChannelGroup {
@@ -1144,6 +1175,10 @@ type APIChannelGroups interface {
 	// pre-populated with channels and initial subscribers.
 	CreateChannelGroup(ctx context.Context) CreateChannelGroupRequest
 	CreateChannelGroupExecute(r CreateChannelGroupRequest) (*CreateChannelGroupResponse, *http.Response, error)
+
+	// ImportZulipUserGroup records an existing Zulip user group as a local
+	// channel group, without creating a new Zulip user group. Idempotent.
+	ImportZulipUserGroup(ctx context.Context, userGroupID int64) error
 
 	// GetChannelGroups lists channel groups visible to the acting user.
 	GetChannelGroups(ctx context.Context) GetChannelGroupsRequest
@@ -1430,12 +1465,20 @@ type UnsubscribeFromChannelGroupRequest struct {
 	apiService     APIChannelGroups
 	channelGroupID int64
 	principals     *zulip.Principals
+	keepChannels   bool
 }
 
 // Principals selects which users to unsubscribe. This implementation requires
 // user ID principals so it can update the backing Zulip user group.
 func (r UnsubscribeFromChannelGroupRequest) Principals(p zulip.Principals) UnsubscribeFromChannelGroupRequest {
 	r.principals = &p
+	return r
+}
+
+// KeepChannels marks the request to only remove the user from the Zulip user
+// group but not unsubscribe them from the group's channels.
+func (r UnsubscribeFromChannelGroupRequest) KeepChannels() UnsubscribeFromChannelGroupRequest {
+	r.keepChannels = true
 	return r
 }
 

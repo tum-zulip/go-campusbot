@@ -56,3 +56,51 @@ CREATE TABLE IF NOT EXISTS audit_log (
   new_value TEXT,
   error TEXT
 );
+
+-- channelgroup tables (shared SQLite file)
+CREATE TABLE IF NOT EXISTS channel_groups (
+  id INTEGER PRIMARY KEY
+);
+
+CREATE TABLE IF NOT EXISTS channel_group_channels (
+  channel_group_id INTEGER NOT NULL REFERENCES channel_groups(id) ON DELETE CASCADE,
+  channel_id INTEGER NOT NULL,
+  PRIMARY KEY (channel_group_id, channel_id)
+);
+
+CREATE INDEX IF NOT EXISTS channel_group_channels_channel_id_idx
+  ON channel_group_channels(channel_id);
+
+-- emoji -> channel group mappings
+CREATE TABLE IF NOT EXISTS emoji_group_mappings (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  short_name TEXT NOT NULL UNIQUE,
+  display_name TEXT NOT NULL,
+  channel_group_id INTEGER NOT NULL,
+  emoji_name TEXT NOT NULL,
+  emoji_code TEXT NOT NULL DEFAULT '',
+  reaction_type TEXT NOT NULL DEFAULT 'unicode_emoji',
+  enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+-- announcement message state (single row, id always 1)
+CREATE TABLE IF NOT EXISTS announcement_state (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  message_id INTEGER,
+  content_hash TEXT NOT NULL DEFAULT '',
+  updated_at TEXT NOT NULL
+);
+
+-- reaction event deduplication
+CREATE TABLE IF NOT EXISTS processed_reactions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  message_id INTEGER NOT NULL,
+  user_id INTEGER NOT NULL,
+  emoji_name TEXT NOT NULL,
+  op TEXT NOT NULL CHECK (op IN ('add', 'remove')),
+  processed_at TEXT NOT NULL,
+  UNIQUE(message_id, user_id, emoji_name, op)
+);

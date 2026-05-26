@@ -182,6 +182,31 @@ func (bot *Bot) fetchRole(ctx context.Context, userID int64) (zulip.Role, error)
 	return resp.User.Role, nil
 }
 
+// EditMessage edits an existing Zulip message.
+func (bot *Bot) EditMessage(ctx context.Context, messageID int64, content string) error {
+	_, _, err := bot.client.UpdateMessage(ctx, messageID).Content(content).Execute()
+	if err != nil {
+		return fmt.Errorf("edit Zulip message %d: %w", messageID, err)
+	}
+	return nil
+}
+
+// AddReaction adds a reaction to a Zulip message.
+func (bot *Bot) AddReaction(ctx context.Context, messageID int64, emojiName, emojiCode, reactionType string) error {
+	req := bot.client.AddReaction(ctx, messageID).EmojiName(emojiName)
+	if emojiCode != "" {
+		req = req.EmojiCode(emojiCode)
+	}
+	if reactionType != "" {
+		req = req.ReactionType(reactionType)
+	}
+	_, _, err := req.Execute()
+	if err != nil {
+		return fmt.Errorf("add reaction %q to message %d: %w", emojiName, messageID, err)
+	}
+	return nil
+}
+
 func (bot *Bot) CreateChannel(
 	ctx context.Context,
 	name string,

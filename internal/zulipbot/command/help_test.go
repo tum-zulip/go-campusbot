@@ -22,7 +22,8 @@ func (p staticRoleProvider) RoleFor(_ context.Context, _ command.Actor) (zulip.R
 }
 
 // buildHelpTestRegistry builds a registry with one command per permission level
-// plus a "role" command that has OwnerUsage set (to mirror real bot behaviour).
+// plus a "role" command that has OwnerUsage set (to mirror real bot behaviour),
+// and a "group"-like command that has AdminUsage set (to mirror the group handler).
 func buildHelpTestRegistry(t *testing.T) *command.Registry {
 	t.Helper()
 	registry := command.NewRegistry()
@@ -70,6 +71,16 @@ func buildHelpTestRegistry(t *testing.T) *command.Registry {
 		Summary:    "Gracefully restart the bot process.",
 		Usage:      "restart",
 		Permission: command.PermOwner,
+	})
+
+	// Public command with admin-only subcommands exposed via AdminUsage.
+	// Mirrors the real "group" handler pattern.
+	mustRegister(command.Metadata{
+		Name:       "widget",
+		Summary:    "Manage widgets.",
+		Usage:      "widget <subscribe|unsubscribe> <name>",
+		AdminUsage: "widget subscribe <name>\nwidget unsubscribe <name>\nwidget admin-action <name>",
+		Permission: command.PermOpen,
 	})
 
 	return registry
@@ -294,5 +305,99 @@ func TestHelpAdminCanLookUpRoleDetails(t *testing.T) {
 	}
 	if strings.Contains(out, "set") {
 		t.Errorf("admin role detail must not mention 'set', got: %q", out)
+	}
+}
+
+// --- AdminUsage: public command with admin-only extra subcommands ---
+
+func TestHelpNoneUserDoesNotSeeAdminUsage(t *testing.T) {
+	t.Parallel()
+
+	registry := buildHelpTestRegistry(t)
+	h := command.NewHelpHandler(registry, staticRoleProvider{role: zulip.RoleMember})
+
+	out, err := runHelp(t, h, command.Actor{UserID: 1})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// "widget" is public and must appear.
+	if !strings.Contains(out, "widget") {
+		t.Errorf("member should see 'widget', got: %q", out)
+	}
+	// Admin-only subcommand text must not appear.
+	if strings.Contains(out, "admin-action") {
+		t.Errorf("member must NOT see 'admin-action' from AdminUsage, got: %q", out)
+	}
+}
+
+func TestHelpAdminSeesAdminUsage(t *testing.T) {
+	t.Parallel()
+
+	registry := buildHelpTestRegistry(t)
+	h := command.NewHelpHandler(registry, staticRoleProvider{role: zulip.RoleAdmin})
+
+	out, err := runHelp(t, h, command.Actor{UserID: 2})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Admin should see public subcommands in widget's AdminUsage.
+	if !strings.Contains(out, "widget subscribe") {
+		t.Errorf("admin should see 'widget subscribe', got: %q", out)
+	}
+	// Admin should see admin-only subcommand via AdminUsage.
+	if !strings.Contains(out, "admin-action") {
+		t.Errorf("admin should see 'admin-action' from AdminUsage, got: %q", out)
+	}
+}
+
+func TestHelpOwnerSeesAdminUsageFallingBackFromOwnerUsage(t *testing.T) {
+	t.Parallel()
+
+	// "widget" has AdminUsage but no OwnerUsage, so owners should see AdminUsage.
+	registry := buildHelpTestRegistry(t)
+	h := command.NewHelpHandler(registry, staticRoleProvider{role: zulip.RoleOwner})
+
+	out, err := runHelp(t, h, command.Actor{UserID: 3})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !strings.Contains(out, "admin-action") {
+		t.Errorf("owner should see 'admin-action' (from AdminUsage, no OwnerUsage override), got: %q", out)
+	}
+}
+
+func TestHelpNoneUserLookupWidgetShowsPublicUsageOnly(t *testing.T) {
+	t.Parallel()
+
+	registry := buildHelpTestRegistry(t)
+	h := command.NewHelpHandler(registry, staticRoleProvider{role: zulip.RoleMember})
+
+	out, err := runHelp(t, h, command.Actor{UserID: 1}, "widget")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(out, "widget") {
+		t.Errorf("expected 'widget' in detail, got: %q", out)
+	}
+	if strings.Contains(out, "admin-action") {
+		t.Errorf("member must not see 'admin-action' in widget detail, got: %q", out)
+	}
+}
+
+func TestHelpAdminLookupWidgetShowsAdminUsage(t *testing.T) {
+	t.Parallel()
+
+	registry := buildHelpTestRegistry(t)
+	h := command.NewHelpHandler(registry, staticRoleProvider{role: zulip.RoleAdmin})
+
+	out, err := runHelp(t, h, command.Actor{UserID: 2}, "widget")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(out, "admin-action") {
+		t.Errorf("admin should see 'admin-action' in widget detail, got: %q", out)
 	}
 }

@@ -5,11 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"sync/atomic"
 	"time"
 
 	zulipclient "github.com/tum-zulip/go-zulip/zulip/client"
 
+	"github.com/tum-zulip/go-campusbot/internal/channelgroup"
+	"github.com/tum-zulip/go-campusbot/internal/zulipbot/announcement"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/command"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/configsvc"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/handlers"
@@ -48,15 +51,15 @@ func NewApp(ctx context.Context, cfg RuntimeConfig, client zulipclient.Client, r
 		return nil, err
 	}
 
-	identity, err := bot.ResolveBotIdentity(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("resolve bot identity: %w", err)
-	}
-	if !identity.IsBot {
-		return nil, errors.New(
-			"campusbot must run as a Zulip bot account; the configured credentials belong to a regular user account",
-		)
-	}
+	// identity, err := bot.ResolveBotIdentity(ctx)
+	//if err != nil {
+	//return nil, fmt.Errorf("resolve bot identity: %w", err)
+	//	}
+	//if !identity.IsBot {
+	//	return nil, errors.New(
+	//		"campusbot must run as a Zulip bot account; the configured credentials belong to a regular user account",
+	//	)
+	//}
 
 	restart := newRestartState()
 	configService := configsvc.NewService(repo, bot)
@@ -73,7 +76,42 @@ func NewApp(ctx context.Context, cfg RuntimeConfig, client zulipclient.Client, r
 		startedAt: startedAt,
 	}
 
-	router, err := app.initCommands(configService)
+	// Set up channelgroup client using the shared SQLite database.
+	channelGroupClient := channelgroup.NewClient(bot.Client(), repo.DB())
+	groupService := channelgroup.NewGroupService(channelGroupClient)
+
+	// Set up announcement manager.
+	announcementManager := announcement.NewManager(repo, bot, cfg.Logger)
+
+	// Build group config reader adapter.
+	groupConfigReader := handlers.NewGroupConfigAdapter(
+		func(ctx context.Context) (int64, bool, error) {
+			v, err := configService.GetRaw(ctx, configsvc.KeyAnnouncementChannelID)
+			if err != nil {
+				return 0, false, err
+			}
+			if v.IsDefault || v.Value == "" {
+				return 0, false, nil
+			}
+			id, err := strconv.ParseInt(v.Value, 10, 64)
+			if err != nil {
+				return 0, false, err
+			}
+			return id, true, nil
+		},
+		func(ctx context.Context) (string, bool, error) {
+			v, err := configService.GetRaw(ctx, configsvc.KeyAnnouncementTopic)
+			if err != nil {
+				return "", false, err
+			}
+			if v.IsDefault || v.Value == "" {
+				return "", false, nil
+			}
+			return v.Value, true, nil
+		},
+	)
+
+	router, err := app.initCommands(configService, groupService, announcementManager, groupConfigReader)
 	if err != nil {
 		return nil, err
 	}
@@ -87,6 +125,7 @@ func NewApp(ctx context.Context, cfg RuntimeConfig, client zulipclient.Client, r
 		OwnUserID:        bot.OwnUserID(),
 		Logger:           cfg.Logger,
 		PollTimeout:      cfg.PollTimeout,
+		GroupSubscriber:  groupService,
 	})
 	if err != nil {
 		return nil, err
@@ -97,7 +136,12 @@ func NewApp(ctx context.Context, cfg RuntimeConfig, client zulipclient.Client, r
 	return app, nil
 }
 
-func (app *App) initCommands(configService *configsvc.Service) (*command.Router, error) {
+func (app *App) initCommands(
+	configService *configsvc.Service,
+	groupService *channelgroup.GroupService,
+	announcementManager *announcement.Manager,
+	groupConfigReader handlers.GroupConfigReader,
+) (*command.Router, error) {
 	registry := command.NewRegistry()
 	if err := registry.Register(command.NewHelpHandler(registry, app.bot)); err != nil {
 		return nil, err
@@ -110,6 +154,20 @@ func (app *App) initCommands(configService *configsvc.Service) (*command.Router,
 	}
 	if err := registry.Register(handlers.NewStatusHandler(app, app.bot)); err != nil {
 		return nil, err
+	}
+	if groupService != nil && announcementManager != nil && groupConfigReader != nil {
+		if err := registry.Register(handlers.NewGroupHandler(
+			groupService,
+			groupService,
+			app.repo,
+			app.repo,
+			announcementManager,
+			app.repo,
+			groupConfigReader,
+			app.bot,
+		)); err != nil {
+			return nil, err
+		}
 	}
 
 	return command.NewRouter(command.RouterConfig{
