@@ -36,6 +36,36 @@ type ZulipUserGroupSummary struct {
 	IsSystemGroup bool
 }
 
+// CreateChannelGroup creates a Zulip user group and tracks it locally as a
+// channel group. If a later step fails after the user group is created, the
+// lower-level API rolls back the created resources where Zulip exposes a
+// reversal operation.
+func (s *GroupService) CreateChannelGroup(ctx context.Context, name string) (int64, error) {
+	ownUserResp, _, err := s.client.GetOwnUser(ctx).Execute()
+	if err != nil {
+		return 0, fmt.Errorf("get own Zulip user for channel group %q: %w", name, err)
+	}
+	if ownUserResp == nil || ownUserResp.User.UserID <= 0 {
+		return 0, fmt.Errorf("get own Zulip user for channel group %q: missing user ID", name)
+	}
+
+	resp, _, err := s.client.CreateChannelGroup(ctx).
+		Name(name).
+		InitialSubscribers(zulip.UserIDsAsPrincipals(ownUserResp.User.UserID)).
+		Execute()
+	if err != nil {
+		return 0, fmt.Errorf("create channel group %q: %w", name, err)
+	}
+	return resp.ChannelGroupID, nil
+}
+
+// DeleteChannelGroup removes the local channel group and deactivates its
+// backing Zulip user group. It is intended for rollback of groups created by
+// this bot.
+func (s *GroupService) DeleteChannelGroup(ctx context.Context, channelGroupID int64) error {
+	return s.client.DeleteChannelGroup(ctx, channelGroupID)
+}
+
 // SubscribeUser subscribes a single user to the specified channel group.
 func (s *GroupService) SubscribeUser(ctx context.Context, userID int64, channelGroupID int64) error {
 	_, _, err := s.client.SubscribeToChannelGroup(ctx, channelGroupID).
@@ -97,7 +127,7 @@ func (s *GroupService) ListZulipUserGroups(ctx context.Context) ([]ZulipUserGrou
 
 	summaries := make([]ZulipUserGroupSummary, 0, len(resp.UserGroups))
 	for _, group := range resp.UserGroups {
-		if group.Deactivated {
+		if group.Deactivated || group.IsSystemGroup {
 			continue
 		}
 		summaries = append(summaries, ZulipUserGroupSummary{

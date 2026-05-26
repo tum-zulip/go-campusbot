@@ -1,3 +1,12 @@
+CREATE TABLE IF NOT EXISTS channelgroup_schema_migrations (
+  version INTEGER PRIMARY KEY,
+  name TEXT NOT NULL,
+  applied_at TEXT NOT NULL
+);
+
+INSERT OR IGNORE INTO channelgroup_schema_migrations(version, name, applied_at)
+VALUES (1, 'channelgroup baseline', '1970-01-01T00:00:00Z');
+
 CREATE TABLE IF NOT EXISTS channel_groups (
   id INTEGER PRIMARY KEY,
   channel_folder_id INTEGER

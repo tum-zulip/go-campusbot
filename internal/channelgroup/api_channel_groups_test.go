@@ -20,8 +20,6 @@ import (
 	"github.com/tum-zulip/go-zulip/zulip/api/channels"
 )
 
-const zulipAdministratorsSystemGroupID int64 = 2
-
 func newTestDatabase(t *testing.T) *sql.DB {
 	t.Helper()
 
@@ -44,6 +42,61 @@ func newTestDatabase(t *testing.T) *sql.DB {
 		t.Fatalf("apply channelgroup schema: %v", err)
 	}
 	return database
+}
+
+func TestMigrateAddsChannelFolderColumnToExistingChannelGroups(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	database, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatalf("open in-memory sqlite database: %v", err)
+	}
+	database.SetMaxOpenConns(1)
+	t.Cleanup(func() {
+		if err = database.Close(); err != nil {
+			t.Errorf("close test database: %v", err)
+		}
+	})
+
+	if _, err := database.ExecContext(ctx, `
+		CREATE TABLE channel_groups (
+			id INTEGER PRIMARY KEY
+		);
+	`); err != nil {
+		t.Fatalf("seed old channelgroup schema: %v", err)
+	}
+
+	if err := channelgroup.Migrate(ctx, database); err != nil {
+		t.Fatalf("Migrate() failed: %v", err)
+	}
+
+	rows, err := database.QueryContext(ctx, "PRAGMA table_info(channel_groups)")
+	if err != nil {
+		t.Fatalf("inspect migrated schema: %v", err)
+	}
+	defer rows.Close()
+
+	found := false
+	for rows.Next() {
+		var cid int
+		var name, columnType string
+		var notNull int
+		var defaultValue sql.NullString
+		var primaryKey int
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			t.Fatalf("scan migrated schema: %v", err)
+		}
+		if name == "channel_folder_id" {
+			found = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate migrated schema: %v", err)
+	}
+	if !found {
+		t.Fatal("channel_folder_id column was not added")
+	}
 }
 
 func newTestClient(t *testing.T, base zulipmock.Client) channelgroup.Client {
@@ -109,7 +162,7 @@ func TestCreateChannelGroupWithMockClient(t *testing.T) {
 	}
 }
 
-func TestCreateChannelGroupCreatesRestrictiveUserGroup(t *testing.T) {
+func TestCreateChannelGroupCreatesUserGroup(t *testing.T) {
 	ctx := context.Background()
 	base := zulipmock.NewClient()
 	client := newTestClient(t, base)
@@ -126,11 +179,10 @@ func TestCreateChannelGroupCreatesRestrictiveUserGroup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetUserGroups error = %v", err)
 	}
-	if len(groups.UserGroups) != 1 {
-		t.Fatalf("created user groups = %d, want 1", len(groups.UserGroups))
+	group, ok := findUserGroupByID(groups.UserGroups, created.ChannelGroupID)
+	if !ok {
+		t.Fatalf("created user group %d not found in %+v", created.ChannelGroupID, groups.UserGroups)
 	}
-
-	group := groups.UserGroups[0]
 	if group.ID != created.ChannelGroupID {
 		t.Fatalf("user group ID = %d, want %d", group.ID, created.ChannelGroupID)
 	}
@@ -140,6 +192,40 @@ func TestCreateChannelGroupCreatesRestrictiveUserGroup(t *testing.T) {
 	assertAdminGroupSettingValue(t, "CanManageGroup", group.CanManageGroup)
 	assertAdminGroupSettingValue(t, "CanMentionGroup", group.CanMentionGroup)
 	assertAdminGroupSettingValue(t, "CanRemoveMembersGroup", group.CanRemoveMembersGroup)
+}
+
+func TestCreateChannelGroupRollsBackUserGroupOnError(t *testing.T) {
+	ctx := context.Background()
+	base := zulipmock.NewClient()
+	client := newTestClient(t, base)
+	channelIDs := createMockBotSubscribedChannels(t, ctx, base, 1)
+	base.FailNext(zulipmock.OperationSubscribe, errors.New("subscribe failed"))
+
+	_, _, err := client.CreateChannelGroup(ctx).
+		Name("rollback group").
+		ChannelIDs(channelIDs).
+		InitialSubscribers(zulip.UserIDsAsPrincipals(101)).
+		Execute()
+	if err == nil {
+		t.Fatalf("CreateChannelGroup error = nil, want failure")
+	}
+
+	groups, _, err := base.GetUserGroups(ctx).Execute()
+	if err != nil {
+		t.Fatalf("GetUserGroups error = %v", err)
+	}
+	rolledBackGroup, ok := findUserGroupByName(groups.UserGroups, "rollback group")
+	if !ok {
+		t.Fatalf("rolled-back user group not found in %+v", groups.UserGroups)
+	}
+	if !rolledBackGroup.Deactivated {
+		t.Fatalf("created user group was not deactivated after rollback")
+	}
+
+	_, _, err = client.GetChannelGroup(ctx, rolledBackGroup.ID).Execute()
+	if !errors.Is(err, channelgroup.ErrChannelGroupNotFound) {
+		t.Fatalf("GetChannelGroup error = %v, want ErrChannelGroupNotFound", err)
+	}
 }
 
 func TestChannelGroupWithChannelFolderAssignsInitialAndAddedChannels(t *testing.T) {
@@ -1471,12 +1557,30 @@ func equalInt64s(a, b []int64) bool {
 	return true
 }
 
+func findUserGroupByID(groups []zulip.UserGroup, id int64) (zulip.UserGroup, bool) {
+	for _, group := range groups {
+		if group.ID == id {
+			return group, true
+		}
+	}
+	return zulip.UserGroup{}, false
+}
+
+func findUserGroupByName(groups []zulip.UserGroup, name string) (zulip.UserGroup, bool) {
+	for _, group := range groups {
+		if group.Name == name {
+			return group, true
+		}
+	}
+	return zulip.UserGroup{}, false
+}
+
 func assertAdminGroupSettingValue(t *testing.T, name string, got zulip.GroupSettingValue) {
 	t.Helper()
 	if got.GroupID == nil {
-		t.Fatalf("%s.GroupID = nil, want %d", name, zulipAdministratorsSystemGroupID)
+		t.Fatalf("%s.GroupID = nil, want administrators system group", name)
 	}
-	if *got.GroupID != zulipAdministratorsSystemGroupID {
-		t.Fatalf("%s.GroupID = %d, want %d", name, *got.GroupID, zulipAdministratorsSystemGroupID)
+	if *got.GroupID != 42 {
+		t.Fatalf("%s.GroupID = %d, want administrators system group ID 42", name, *got.GroupID)
 	}
 }

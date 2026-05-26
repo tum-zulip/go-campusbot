@@ -131,7 +131,7 @@ func NewClient() Client {
 	return Client{state: &state{
 		nextChannelID:   1,
 		nextFolderID:    1,
-		nextUserGroupID: 1,
+		nextUserGroupID: 100,
 		nextMessageID:   1,
 		ownUser: zulip.User{
 			UserID:   1,
@@ -150,8 +150,15 @@ func NewClient() Client {
 		channels:       map[int64]channelState{},
 		channelIDs:     map[string]int64{},
 		channelFolders: map[int64]zulip.ChannelFolder{},
-		userGroups:     map[int64]userGroupState{},
-		failures:       map[Operation][]error{},
+		userGroups: map[int64]userGroupState{
+			42: {group: zulip.UserGroup{
+				ID:            42,
+				Name:          "role:administrators",
+				Description:   "Administrators of this organization, including owners",
+				IsSystemGroup: true,
+			}},
+		},
+		failures: map[Operation][]error{},
 	}}
 }
 func (Client) GetStatistics() statistics.Statistics { return statistics.Statistics{} }

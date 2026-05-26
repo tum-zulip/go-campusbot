@@ -77,6 +77,9 @@ func NewApp(ctx context.Context, cfg RuntimeConfig, client zulipclient.Client, r
 	}
 
 	// Set up channelgroup client using the shared SQLite database.
+	if err := channelgroup.Migrate(ctx, repo.DB()); err != nil {
+		return nil, err
+	}
 	channelGroupClient := channelgroup.NewClient(bot.Client(), repo.DB())
 	groupService := channelgroup.NewGroupService(channelGroupClient)
 

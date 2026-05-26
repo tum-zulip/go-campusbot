@@ -9,11 +9,10 @@ import (
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/storage"
 )
 
-func mapping(shortName, displayName, emojiName string, channelGroupID int64) storage.EmojiGroupMapping {
+func mapping(shortName, emojiName string, channelGroupID int64) storage.EmojiGroupMapping {
 	return storage.EmojiGroupMapping{
 		ID:             1,
 		ShortName:      shortName,
-		DisplayName:    displayName,
 		ChannelGroupID: channelGroupID,
 		EmojiName:      emojiName,
 		EmojiCode:      "",
@@ -42,11 +41,11 @@ func TestRenderEmpty(t *testing.T) {
 func TestRenderSingleMapping(t *testing.T) {
 	t.Parallel()
 	mappings := []storage.EmojiGroupMapping{
-		mapping("WI", "Wirtschaftsinformatik", "wi", 42),
+		mapping("WI", "wi", 42),
 	}
 	content := announcement.Render(mappings)
-	if !strings.Contains(content, "Wirtschaftsinformatik") {
-		t.Error("expected display name in rendered content")
+	if !strings.Contains(content, "WI") {
+		t.Error("expected short name in rendered content")
 	}
 	if !strings.Contains(content, ":wi:") {
 		t.Error("expected emoji in rendered content")
@@ -56,16 +55,16 @@ func TestRenderSingleMapping(t *testing.T) {
 func TestRenderThreeMappings(t *testing.T) {
 	t.Parallel()
 	mappings := []storage.EmojiGroupMapping{
-		mapping("A", "Alpha", "alpha", 1),
-		mapping("B", "Beta", "beta", 2),
-		mapping("C", "Gamma", "gamma", 3),
+		mapping("A", "alpha", 1),
+		mapping("B", "beta", 2),
+		mapping("C", "gamma", 3),
 	}
 	content := announcement.Render(mappings)
 	// All three should be in one row
 	lines := strings.Split(content, "\n")
 	found := false
 	for _, line := range lines {
-		if strings.Contains(line, "Alpha") && strings.Contains(line, "Beta") && strings.Contains(line, "Gamma") {
+		if strings.Contains(line, "A") && strings.Contains(line, "B") && strings.Contains(line, "C") {
 			found = true
 			break
 		}
@@ -78,13 +77,13 @@ func TestRenderThreeMappings(t *testing.T) {
 func TestRenderFourMappingsPadsToSix(t *testing.T) {
 	t.Parallel()
 	mappings := []storage.EmojiGroupMapping{
-		mapping("A", "Alpha", "alpha", 1),
-		mapping("B", "Beta", "beta", 2),
-		mapping("C", "Gamma", "gamma", 3),
-		mapping("D", "Delta", "delta", 4),
+		mapping("A", "alpha", 1),
+		mapping("B", "beta", 2),
+		mapping("C", "gamma", 3),
+		mapping("D", "delta", 4),
 	}
 	content := announcement.Render(mappings)
-	if !strings.Contains(content, "Alpha") || !strings.Contains(content, "Delta") {
+	if !strings.Contains(content, "A") || !strings.Contains(content, "D") {
 		t.Error("expected all four mappings in rendered content")
 	}
 	// Should have two data rows (first row has A,B,C; second row has D + padding)
@@ -103,21 +102,21 @@ func TestRenderFourMappingsPadsToSix(t *testing.T) {
 func TestRenderMarkdownEscaping(t *testing.T) {
 	t.Parallel()
 	mappings := []storage.EmojiGroupMapping{
-		mapping("test", "Course|With|Pipes", "emoji", 1),
+		mapping("Course|With|Pipes", "emoji", 1),
 	}
 	content := announcement.Render(mappings)
 	if strings.Contains(content, "Course|With|Pipes") {
-		t.Error("expected pipes to be escaped in display name")
+		t.Error("expected pipes to be escaped in short name")
 	}
 	if !strings.Contains(content, `Course\|With\|Pipes`) {
-		t.Error("expected escaped pipes in display name")
+		t.Error("expected escaped pipes in short name")
 	}
 }
 
 func TestContentHashDeterministic(t *testing.T) {
 	t.Parallel()
 	mappings := []storage.EmojiGroupMapping{
-		mapping("WI", "WI", "wi", 42),
+		mapping("WI", "wi", 42),
 	}
 	hash1 := announcement.ContentHash(mappings)
 	hash2 := announcement.ContentHash(mappings)
@@ -132,7 +131,7 @@ func TestContentHashDeterministic(t *testing.T) {
 func TestContentHashChangesWithMappings(t *testing.T) {
 	t.Parallel()
 	empty := announcement.ContentHash(nil)
-	one := announcement.ContentHash([]storage.EmojiGroupMapping{mapping("WI", "WI", "wi", 42)})
+	one := announcement.ContentHash([]storage.EmojiGroupMapping{mapping("WI", "wi", 42)})
 	if empty == one {
 		t.Error("expected different hashes for empty and non-empty mappings")
 	}

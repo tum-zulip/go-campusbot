@@ -57,25 +57,10 @@ CREATE TABLE IF NOT EXISTS audit_log (
   error TEXT
 );
 
--- channelgroup tables (shared SQLite file)
-CREATE TABLE IF NOT EXISTS channel_groups (
-  id INTEGER PRIMARY KEY
-);
-
-CREATE TABLE IF NOT EXISTS channel_group_channels (
-  channel_group_id INTEGER NOT NULL REFERENCES channel_groups(id) ON DELETE CASCADE,
-  channel_id INTEGER NOT NULL,
-  PRIMARY KEY (channel_group_id, channel_id)
-);
-
-CREATE INDEX IF NOT EXISTS channel_group_channels_channel_id_idx
-  ON channel_group_channels(channel_id);
-
 -- emoji -> channel group mappings
 CREATE TABLE IF NOT EXISTS emoji_group_mappings (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   short_name TEXT NOT NULL UNIQUE,
-  display_name TEXT NOT NULL,
   channel_group_id INTEGER NOT NULL,
   emoji_name TEXT NOT NULL,
   emoji_code TEXT NOT NULL DEFAULT '',

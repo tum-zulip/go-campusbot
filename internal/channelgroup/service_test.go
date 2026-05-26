@@ -41,6 +41,29 @@ func TestGroupServiceChannelGroupExists(t *testing.T) {
 	}
 }
 
+func TestGroupServiceCreateChannelGroupAddsBotUser(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	base := zulipmock.NewClient()
+	base.SetOwnUser(zulip.User{UserID: 77, Email: "bot@example.com", FullName: "Bot", IsBot: true})
+	client := newTestClient(t, base)
+	svc := channelgroup.NewGroupService(client)
+
+	groupID, err := svc.CreateChannelGroup(ctx, "test-group")
+	if err != nil {
+		t.Fatalf("CreateChannelGroup() failed: %v", err)
+	}
+
+	resp, _, err := client.GetIsChannelGroupSubscriber(ctx, groupID, 77).Execute()
+	if err != nil {
+		t.Fatalf("GetIsChannelGroupSubscriber() failed: %v", err)
+	}
+	if !resp.IsSubscriber {
+		t.Fatal("expected bot user to be a channel group subscriber")
+	}
+}
+
 func TestGroupServiceSubscribeUser(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

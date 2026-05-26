@@ -13,6 +13,7 @@ import (
 	// Import the SQLite driver.
 	_ "github.com/mattn/go-sqlite3"
 
+	"github.com/tum-zulip/go-campusbot/internal/sqlitemigrate"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/audit"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/command"
 	storagedb "github.com/tum-zulip/go-campusbot/internal/zulipbot/storage/db"
@@ -126,32 +127,14 @@ func (repo *Repository) DB() *sql.DB {
 }
 
 func (repo *Repository) Migrate(ctx context.Context) error {
-	if _, err := repo.db.ExecContext(ctx, schemaSQL); err != nil {
-		return fmt.Errorf("apply development SQLite schema: %w", err)
-	}
-	version, err := repo.SchemaVersion(ctx)
-	if err != nil {
-		return err
-	}
-	if version != currentSchemaVersion {
-		return fmt.Errorf(
-			"database schema version %d does not match development schema version %d; reset the database or add a migration policy",
-			version,
-			currentSchemaVersion,
-		)
-	}
-	name, err := repo.queries.SchemaMigrationName(ctx, int64(currentSchemaVersion))
-	if err != nil {
-		return fmt.Errorf("read schema baseline name: %w", err)
-	}
-	if name != schemaBaselineName {
-		return fmt.Errorf(
-			"database schema baseline %q is not compatible with the current development schema %q; reset the database or add a migration policy",
-			name,
-			schemaBaselineName,
-		)
-	}
-	return nil
+	return sqlitemigrate.Apply(ctx, sqlitemigrate.Config{
+		PackageName:    "zulipbot storage",
+		DB:             repo.db,
+		SchemaSQL:      schemaSQL,
+		MigrationTable: "schema_migrations",
+		CurrentVersion: currentSchemaVersion,
+		BaselineName:   schemaBaselineName,
+	})
 }
 
 func (repo *Repository) SchemaVersion(ctx context.Context) (int, error) {
@@ -543,7 +526,6 @@ func parseTime(value string) (time.Time, error) {
 type EmojiGroupMapping struct {
 	ID             int64
 	ShortName      string
-	DisplayName    string
 	ChannelGroupID int64
 	EmojiName      string
 	EmojiCode      string
@@ -566,7 +548,6 @@ func emojiGroupMappingFromRow(row storagedb.EmojiGroupMapping) (EmojiGroupMappin
 	return EmojiGroupMapping{
 		ID:             row.ID,
 		ShortName:      row.ShortName,
-		DisplayName:    row.DisplayName,
 		ChannelGroupID: row.ChannelGroupID,
 		EmojiName:      row.EmojiName,
 		EmojiCode:      row.EmojiCode,
@@ -591,7 +572,6 @@ func (repo *Repository) UpsertEmojiGroupMapping(ctx context.Context, m EmojiGrou
 	}
 	if err := repo.queries.UpsertEmojiGroupMapping(ctx, storagedb.UpsertEmojiGroupMappingParams{
 		ShortName:      m.ShortName,
-		DisplayName:    m.DisplayName,
 		ChannelGroupID: m.ChannelGroupID,
 		EmojiName:      m.EmojiName,
 		EmojiCode:      m.EmojiCode,
@@ -602,6 +582,14 @@ func (repo *Repository) UpsertEmojiGroupMapping(ctx context.Context, m EmojiGrou
 		UpdatedAt:      formatTime(now),
 	}); err != nil {
 		return fmt.Errorf("upsert emoji group mapping %q: %w", m.ShortName, err)
+	}
+	return nil
+}
+
+// DeleteEmojiGroupMappingByShortName removes an emoji->group mapping.
+func (repo *Repository) DeleteEmojiGroupMappingByShortName(ctx context.Context, shortName string) error {
+	if _, err := repo.db.ExecContext(ctx, "DELETE FROM emoji_group_mappings WHERE short_name = ?", shortName); err != nil {
+		return fmt.Errorf("delete emoji group mapping %q: %w", shortName, err)
 	}
 	return nil
 }

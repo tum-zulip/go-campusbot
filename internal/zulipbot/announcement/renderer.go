@@ -48,7 +48,7 @@ func ContentHash(mappings []storage.EmojiGroupMapping) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// escapeMarkdown escapes Markdown-special characters in display_name values.
+// escapeMarkdown escapes Markdown-special characters in group names.
 func escapeMarkdown(s string) string {
 	s = strings.ReplaceAll(s, "|", `\|`)
 	s = strings.ReplaceAll(s, "*", `\*`)
@@ -84,8 +84,8 @@ func renderTable(mappings []storage.EmojiGroupMapping) string {
 		for col := range cols {
 			m := padded[i+col]
 			var courseName, emojiStr string
-			if m.ShortName != "" || m.DisplayName != "" {
-				courseName = escapeMarkdown(m.DisplayName)
+			if m.ShortName != "" {
+				courseName = escapeMarkdown(m.ShortName)
 				emojiStr = ":" + m.EmojiName + ":"
 			}
 			b.WriteString(" ")

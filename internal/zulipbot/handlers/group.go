@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -33,6 +34,8 @@ type ChannelGroupChecker interface {
 	ChannelGroupExists(ctx context.Context, channelGroupID int64) (bool, error)
 	ListZulipUserGroups(ctx context.Context) ([]channelgroup.ZulipUserGroupSummary, error)
 	ImportZulipUserGroup(ctx context.Context, userGroupID int64) error
+	CreateChannelGroup(ctx context.Context, name string) (int64, error)
+	DeleteChannelGroup(ctx context.Context, channelGroupID int64) error
 }
 
 // GroupMappingReader looks up emoji->group mappings.
@@ -46,6 +49,7 @@ type GroupMappingReader interface {
 type GroupMappingWriter interface {
 	UpsertEmojiGroupMapping(ctx context.Context, m storage.EmojiGroupMapping) error
 	SetEmojiGroupMappingEnabled(ctx context.Context, shortName string, enabled bool) error
+	DeleteEmojiGroupMappingByShortName(ctx context.Context, shortName string) error
 }
 
 // AnnouncementUpdater triggers announcement re-render.
@@ -109,8 +113,9 @@ func (h *GroupHandler) Metadata() command.Metadata {
 		// Normal users only see the public subscribe/unsubscribe form above.
 		AdminUsage: "group subscribe <course_short_name>\n" +
 			"group unsubscribe [-k] <course_short_name>\n" +
+			"group create <short_name> <emoji_name>\n" +
 			"group available                       (user groups visible in Zulip — use the IDs with `group mapping set`)\n" +
-			"group mapping <list|set <short_name> <display_name> <zulip_user_group_id> <emoji_name>|disable <short_name>>\n" +
+			"group mapping <list|set <short_name> <zulip_user_group_id> <emoji_name>|disable <short_name>>\n" +
 			"group announce [set-message <message_id>|inspect]",
 		Permission: command.PermOpen,
 	}
@@ -121,9 +126,10 @@ func (h *GroupHandler) Metadata() command.Metadata {
 //	group subscribe <course_short_name>
 //	group unsubscribe <course_short_name>
 //	group unsubscribe -k <course_short_name>
+//	group create <short_name> <emoji_name> (admin only)
 //	group available                       (admin only — user groups visible in Zulip)
 //	group mapping list                    (admin only)
-//	group mapping set <name> <emoji>      (admin only — auto-imports the Zulip group if needed)
+//	group mapping set <short_name> <zulip_user_group_id> <emoji_name> (admin only — auto-imports the Zulip group if needed)
 //	group mapping disable <name>          (admin only)
 //	group announce                        (admin only)
 func (h *GroupHandler) Handle(ctx context.Context, req command.Request) (command.Result, error) {
@@ -137,6 +143,8 @@ func (h *GroupHandler) Handle(ctx context.Context, req command.Request) (command
 		return h.handleSubscribe(ctx, req, args[1:])
 	case "unsubscribe":
 		return h.handleUnsubscribe(ctx, req, args[1:])
+	case "create":
+		return h.handleCreate(ctx, req, args[1:])
 	case "available":
 		return h.handleAvailable(ctx, req)
 	case "mapping":
@@ -151,6 +159,112 @@ func (h *GroupHandler) Handle(ctx context.Context, req command.Request) (command
 			),
 		)
 	}
+}
+
+//nolint:funlen // Keeps the create flow in one transaction-oriented handler.
+func (h *GroupHandler) handleCreate(
+	ctx context.Context,
+	req command.Request,
+	args []string,
+) (command.Result, error) {
+	if err := h.auth.Check(ctx, req.Actor, command.PermAdmin); err != nil {
+		return command.Result{}, command.NewUserError("permission denied")
+	}
+	if len(args) != 2 { //nolint:mnd // Command requires short name and emoji name.
+		return command.Result{}, command.NewUserError("Usage: `group create <short_name> <emoji_name>`")
+	}
+	shortName := args[0]
+	emojiName := args[1]
+	if strings.TrimSpace(shortName) == "" || strings.TrimSpace(emojiName) == "" {
+		return command.Result{}, command.NewUserError("Usage: `group create <short_name> <emoji_name>`")
+	}
+	if err := h.ensureMappingDoesNotExist(ctx, shortName, emojiName); err != nil {
+		return command.Result{}, err
+	}
+
+	channelGroupID, err := h.groupChecker.CreateChannelGroup(ctx, shortName)
+	if err != nil {
+		if isDuplicateZulipUserGroupError(err) {
+			return command.Result{}, command.NewUserError(
+				fmt.Sprintf(
+					"Zulip user group `%s` already exists. Run `group available` to find its ID, then use that ID with `group mapping set`.",
+					shortName,
+				),
+			)
+		}
+		return command.Result{}, fmt.Errorf("create channel group: %w", err)
+	}
+	createdMapping := false
+	rollback := func(cause error) error {
+		var rollbackErrs []error
+		if createdMapping {
+			if err := h.mappingWriter.DeleteEmojiGroupMappingByShortName(ctx, shortName); err != nil {
+				rollbackErrs = append(rollbackErrs, err)
+			}
+		}
+		if err := h.groupChecker.DeleteChannelGroup(ctx, channelGroupID); err != nil {
+			rollbackErrs = append(rollbackErrs, err)
+		}
+		if len(rollbackErrs) == 0 {
+			return cause
+		}
+		return fmt.Errorf("%w (rollback failed: %w)", cause, errors.Join(rollbackErrs...))
+	}
+
+	now := time.Now().UTC()
+	if err := h.mappingWriter.UpsertEmojiGroupMapping(ctx, storage.EmojiGroupMapping{
+		ShortName:      shortName,
+		ChannelGroupID: channelGroupID,
+		EmojiName:      emojiName,
+		EmojiCode:      "",
+		ReactionType:   "unicode_emoji",
+		Enabled:        true,
+		SortOrder:      0,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}); err != nil {
+		return command.Result{}, rollback(fmt.Errorf("upsert emoji group mapping: %w", err))
+	}
+	createdMapping = true
+
+	h.triggerAnnouncementUpdate(ctx)
+
+	return command.Result{
+		Content: fmt.Sprintf("Created channel group **%s** with Zulip user group ID %d and mapped `%s` → :%s:.",
+			shortName, channelGroupID, shortName, emojiName),
+	}, nil
+}
+
+func (h *GroupHandler) ensureMappingDoesNotExist(ctx context.Context, shortName, emojiName string) error {
+	mappings, err := h.mappingReader.ListAllEmojiGroupMappings(ctx)
+	if err != nil {
+		return err
+	}
+	for _, mapping := range mappings {
+		if mapping.ShortName == shortName {
+			return command.NewUserError(fmt.Sprintf("Mapping `%s` already exists.", shortName))
+		}
+		if mapping.Enabled && mapping.EmojiName == emojiName && mapping.ReactionType == "unicode_emoji" {
+			return command.NewUserError(
+				fmt.Sprintf("Emoji :%s: is already mapped to `%s`.", emojiName, mapping.ShortName),
+			)
+		}
+	}
+	return nil
+}
+
+func isDuplicateZulipUserGroupError(err error) bool {
+	var coded zulip.CodedError
+	if errors.As(err, &coded) && coded.Code == "BAD_REQUEST" &&
+		strings.Contains(coded.Msg, "User group") &&
+		strings.Contains(coded.Msg, "already exists") {
+		return true
+	}
+
+	message := err.Error()
+	return strings.Contains(message, "User group") &&
+		strings.Contains(message, "already exists") &&
+		strings.Contains(message, "BAD_REQUEST")
 }
 
 func (h *GroupHandler) handleSubscribe(
@@ -176,7 +290,7 @@ func (h *GroupHandler) handleSubscribe(
 	}
 
 	return command.Result{
-		Content: fmt.Sprintf("You have been subscribed to **%s**.", mapping.DisplayName),
+		Content: fmt.Sprintf("You have been subscribed to **%s**.", mapping.ShortName),
 	}, nil
 }
 
@@ -211,7 +325,7 @@ func (h *GroupHandler) handleUnsubscribe(
 			return command.Result{}, fmt.Errorf("unsubscribe user from group (keep channels): %w", err)
 		}
 		return command.Result{
-			Content: fmt.Sprintf("You have been unsubscribed from **%s** (channels kept).", mapping.DisplayName),
+			Content: fmt.Sprintf("You have been unsubscribed from **%s** (channels kept).", mapping.ShortName),
 		}, nil
 	}
 
@@ -220,7 +334,7 @@ func (h *GroupHandler) handleUnsubscribe(
 	}
 
 	return command.Result{
-		Content: fmt.Sprintf("You have been unsubscribed from **%s**.", mapping.DisplayName),
+		Content: fmt.Sprintf("You have been unsubscribed from **%s**.", mapping.ShortName),
 	}, nil
 }
 
@@ -319,8 +433,8 @@ func (h *GroupHandler) handleMappingList(ctx context.Context) (command.Result, e
 		} else if !exists {
 			annotation = " [missing channel group]"
 		}
-		b.WriteString(fmt.Sprintf("- `%s`: **%s** :%s: → group %d [%s]%s\n",
-			m.ShortName, m.DisplayName, m.EmojiName, m.ChannelGroupID, status, annotation))
+		b.WriteString(fmt.Sprintf("- `%s`: :%s: → group %d [%s]%s\n",
+			m.ShortName, m.EmojiName, m.ChannelGroupID, status, annotation))
 	}
 	return command.Result{Content: strings.TrimSpace(b.String())}, nil
 }
@@ -347,16 +461,15 @@ func (h *GroupHandler) validateEnabledMappings(ctx context.Context) ([]storage.E
 }
 
 func (h *GroupHandler) handleMappingSet(ctx context.Context, args []string) (command.Result, error) {
-	// Format: group mapping set <short_name> <display_name> <zulip_user_group_id> <emoji_name>
-	if len(args) < 4 {
+	// Format: group mapping set <short_name> <zulip_user_group_id> <emoji_name>
+	if len(args) != 3 { //nolint:mnd // Command requires short name, group ID, and emoji name.
 		return command.Result{}, command.NewUserError(
-			"Usage: `group mapping set <short_name> <display_name> <zulip_user_group_id> <emoji_name>`",
+			"Usage: `group mapping set <short_name> <zulip_user_group_id> <emoji_name>`",
 		)
 	}
 	shortName := args[0]
-	displayName := args[1]
-	channelGroupIDStr := args[2]
-	emojiName := args[3]
+	channelGroupIDStr := args[1]
+	emojiName := args[2]
 
 	channelGroupID, err := strconv.ParseInt(channelGroupIDStr, 10, 64)
 	if err != nil || channelGroupID <= 0 {
@@ -388,7 +501,6 @@ func (h *GroupHandler) handleMappingSet(ctx context.Context, args []string) (com
 
 	mapping := storage.EmojiGroupMapping{
 		ShortName:      shortName,
-		DisplayName:    displayName,
 		ChannelGroupID: channelGroupID,
 		EmojiName:      emojiName,
 		EmojiCode:      "",
@@ -407,13 +519,13 @@ func (h *GroupHandler) handleMappingSet(ctx context.Context, args []string) (com
 
 	if imported {
 		return command.Result{
-			Content: fmt.Sprintf("Imported Zulip group %d and mapped `%s` → **%s** :%s:.",
-				channelGroupID, shortName, displayName, emojiName),
+			Content: fmt.Sprintf("Imported Zulip group %d and mapped `%s` → :%s:.",
+				channelGroupID, shortName, emojiName),
 		}, nil
 	}
 	return command.Result{
-		Content: fmt.Sprintf("Mapped `%s` → **%s** :%s: (group %d).",
-			shortName, displayName, emojiName, channelGroupID),
+		Content: fmt.Sprintf("Mapped `%s` → :%s: (group %d).",
+			shortName, emojiName, channelGroupID),
 	}, nil
 }
 

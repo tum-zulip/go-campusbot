@@ -81,7 +81,6 @@ func seedMapping(t *testing.T, repo *storage.Repository, shortName, emojiName st
 	t.Helper()
 	err := repo.UpsertEmojiGroupMapping(context.Background(), storage.EmojiGroupMapping{
 		ShortName:      shortName,
-		DisplayName:    shortName,
 		ChannelGroupID: channelGroupID,
 		EmojiName:      emojiName,
 		EmojiCode:      "",

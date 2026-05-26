@@ -66,6 +66,11 @@ type fakeChannelGroupChecker struct {
 	imported              []int64
 	importErr             error
 	importSucceedsLocally bool
+	created               []string
+	createID              int64
+	createErr             error
+	deleted               []int64
+	deleteErr             error
 }
 
 func (c *fakeChannelGroupChecker) ChannelGroupExists(_ context.Context, channelGroupID int64) (bool, error) {
@@ -98,6 +103,25 @@ func (c *fakeChannelGroupChecker) ImportZulipUserGroup(_ context.Context, userGr
 		}
 		c.existing[userGroupID] = true
 	}
+	return nil
+}
+
+func (c *fakeChannelGroupChecker) CreateChannelGroup(_ context.Context, name string) (int64, error) {
+	if c.createErr != nil {
+		return 0, c.createErr
+	}
+	c.created = append(c.created, name)
+	if c.createID != 0 {
+		return c.createID, nil
+	}
+	return 1, nil
+}
+
+func (c *fakeChannelGroupChecker) DeleteChannelGroup(_ context.Context, channelGroupID int64) error {
+	if c.deleteErr != nil {
+		return c.deleteErr
+	}
+	c.deleted = append(c.deleted, channelGroupID)
 	return nil
 }
 
@@ -149,6 +173,19 @@ func (r *fakeGroupConfigReader) AnnouncementTopic(_ context.Context) (string, bo
 	return r.topic, r.topicOK, nil
 }
 
+type failingMappingWriter struct {
+	*storage.Repository
+
+	upsertErr error
+}
+
+func (w failingMappingWriter) UpsertEmojiGroupMapping(ctx context.Context, m storage.EmojiGroupMapping) error {
+	if w.upsertErr != nil {
+		return w.upsertErr
+	}
+	return w.Repository.UpsertEmojiGroupMapping(ctx, m)
+}
+
 type allowAll struct{}
 
 func (allowAll) Check(_ context.Context, _ command.Actor, _ z.Role) error { return nil }
@@ -173,7 +210,6 @@ func seedGroupMapping(t *testing.T, repo *storage.Repository, shortName, emojiNa
 	t.Helper()
 	err := repo.UpsertEmojiGroupMapping(context.Background(), storage.EmojiGroupMapping{
 		ShortName:      shortName,
-		DisplayName:    shortName + " display",
 		ChannelGroupID: channelGroupID,
 		EmojiName:      emojiName,
 		ReactionType:   "unicode_emoji",
@@ -425,6 +461,131 @@ func TestGroupListIsNoLongerRecognised(t *testing.T) {
 	}
 }
 
+func TestGroupCreateAdminCreatesChannelGroupAndMapping(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	repo := openGroupTestRepo(t)
+	checker := &fakeChannelGroupChecker{createID: 77}
+	h := handlers.NewGroupHandler(
+		&fakeGroupSubscriber{},
+		checker,
+		repo,
+		repo,
+		&fakeAnnouncer{},
+		&fakeAnnouncementStateAccessor{},
+		&fakeGroupConfigReader{},
+		allowAll{},
+	)
+
+	result, err := h.Handle(ctx, makeGroupRequest("create", "PGDP", "books"))
+	if err != nil {
+		t.Fatalf("Handle() failed: %v", err)
+	}
+	if len(checker.created) != 1 || checker.created[0] != "PGDP" {
+		t.Fatalf("expected CreateChannelGroup(PGDP), got %v", checker.created)
+	}
+	mapping, ok, err := repo.GetEmojiGroupMappingByShortName(ctx, "PGDP")
+	if err != nil || !ok {
+		t.Fatalf("expected created mapping, ok=%v err=%v", ok, err)
+	}
+	if mapping.ChannelGroupID != 77 || mapping.EmojiName != "books" {
+		t.Fatalf("unexpected mapping: %+v", mapping)
+	}
+	if !strings.Contains(result.Content, "77") || !strings.Contains(result.Content, "PGDP") ||
+		!strings.Contains(result.Content, "books") {
+		t.Errorf("expected created group response with name and id, got: %s", result.Content)
+	}
+}
+
+func TestGroupCreateDuplicateZulipUserGroupReturnsUserError(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	repo := openGroupTestRepo(t)
+	checker := &fakeChannelGroupChecker{
+		createErr: z.CodedError{
+			Response: z.Response{Result: z.ResponseError, Msg: "User group 'pgdp2' already exists."},
+			Code:     "BAD_REQUEST",
+		},
+	}
+	h := handlers.NewGroupHandler(
+		&fakeGroupSubscriber{},
+		checker,
+		repo,
+		repo,
+		&fakeAnnouncer{},
+		&fakeAnnouncementStateAccessor{},
+		&fakeGroupConfigReader{},
+		allowAll{},
+	)
+
+	_, err := h.Handle(ctx, makeGroupRequest("create", "pgdp2", "books"))
+	var userErr command.UserError
+	if !errors.As(err, &userErr) {
+		t.Fatalf("expected UserError for duplicate group, got %T: %v", err, err)
+	}
+	if !strings.Contains(userErr.Message, "already exists") || !strings.Contains(userErr.Message, "group available") {
+		t.Fatalf("expected duplicate group guidance, got: %q", userErr.Message)
+	}
+}
+
+func TestGroupCreateRollsBackChannelGroupWhenMappingFails(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	repo := openGroupTestRepo(t)
+	checker := &fakeChannelGroupChecker{createID: 77}
+	h := handlers.NewGroupHandler(
+		&fakeGroupSubscriber{},
+		checker,
+		repo,
+		failingMappingWriter{Repository: repo, upsertErr: errors.New("mapping write failed")},
+		&fakeAnnouncer{},
+		&fakeAnnouncementStateAccessor{},
+		&fakeGroupConfigReader{},
+		allowAll{},
+	)
+
+	_, err := h.Handle(ctx, makeGroupRequest("create", "PGDP", "books"))
+	if err == nil {
+		t.Fatal("expected create error")
+	}
+	if len(checker.deleted) != 1 || checker.deleted[0] != 77 {
+		t.Fatalf("expected DeleteChannelGroup(77), got %v", checker.deleted)
+	}
+	_, ok, getErr := repo.GetEmojiGroupMappingByShortName(ctx, "PGDP")
+	if getErr != nil {
+		t.Fatalf("GetEmojiGroupMappingByShortName() failed: %v", getErr)
+	}
+	if ok {
+		t.Fatal("expected no mapping after rollback")
+	}
+}
+
+func TestGroupCreateDeniedForNoneUser(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	repo := openGroupTestRepo(t)
+	checker := &fakeChannelGroupChecker{}
+	h := handlers.NewGroupHandler(
+		&fakeGroupSubscriber{},
+		checker,
+		repo,
+		repo,
+		&fakeAnnouncer{},
+		&fakeAnnouncementStateAccessor{},
+		&fakeGroupConfigReader{},
+		denyAll{},
+	)
+
+	_, err := h.Handle(ctx, makeGroupRequest("create", "PGDP", "books"))
+	var userErr command.UserError
+	if !errors.As(err, &userErr) {
+		t.Fatalf("expected UserError for denied create, got %T: %v", err, err)
+	}
+	if len(checker.created) != 0 {
+		t.Fatalf("expected no CreateChannelGroup call, got %v", checker.created)
+	}
+}
+
 func TestGroupAvailableAdminListsZulipVisibleGroups(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -553,7 +714,7 @@ func TestGroupMappingSetAutoImportsWhenZulipVisibleButNotLocal(t *testing.T) {
 		allowAll{},
 	)
 
-	result, err := h.Handle(ctx, makeGroupRequest("mapping", "set", "PGDP", "PGDP Display", "30", "math"))
+	result, err := h.Handle(ctx, makeGroupRequest("mapping", "set", "PGDP", "30", "math"))
 	if err != nil {
 		t.Fatalf("Handle() failed: %v", err)
 	}
@@ -599,7 +760,7 @@ func TestGroupMappingSetSkipsAutoImportWhenAlreadyLocal(t *testing.T) {
 
 	result, err := h.Handle(
 		ctx,
-		makeGroupRequest("mapping", "set", "NEWCOURSE", "New Course Display", "55", "newemoji"),
+		makeGroupRequest("mapping", "set", "NEWCOURSE", "55", "newemoji"),
 	)
 	if err != nil {
 		t.Fatalf("Handle() failed: %v", err)
@@ -642,7 +803,7 @@ func TestGroupMappingSetRejectsWhenZulipDoesNotKnowGroup(t *testing.T) {
 		allowAll{},
 	)
 
-	_, err := h.Handle(ctx, makeGroupRequest("mapping", "set", "PGDP", "PGDP Display", "30", "math"))
+	_, err := h.Handle(ctx, makeGroupRequest("mapping", "set", "PGDP", "30", "math"))
 	var userErr command.UserError
 	if !errors.As(err, &userErr) {
 		t.Fatalf("expected UserError for invisible Zulip group, got %T: %v", err, err)
@@ -690,7 +851,7 @@ func TestGroupMappingSetFailedImportLeavesNoMapping(t *testing.T) {
 		allowAll{},
 	)
 
-	_, err := h.Handle(ctx, makeGroupRequest("mapping", "set", "PGDP", "PGDP Display", "30", "math"))
+	_, err := h.Handle(ctx, makeGroupRequest("mapping", "set", "PGDP", "30", "math"))
 	if err == nil {
 		t.Fatal("expected error when ImportZulipUserGroup fails")
 	}
@@ -724,7 +885,7 @@ func TestGroupMappingSetAcceptsExistingChannelGroup(t *testing.T) {
 		allowAll{},
 	)
 
-	_, err := h.Handle(ctx, makeGroupRequest("mapping", "set", "NEWCOURSE", "New Course Display", "55", "newemoji"))
+	_, err := h.Handle(ctx, makeGroupRequest("mapping", "set", "NEWCOURSE", "55", "newemoji"))
 	if err != nil {
 		t.Fatalf("Handle() failed: %v", err)
 	}

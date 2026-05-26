@@ -16,7 +16,6 @@ func TestEmojiGroupMappingUpsertAndList(t *testing.T) {
 
 	m1 := storage.EmojiGroupMapping{
 		ShortName:      "WI",
-		DisplayName:    "Wirtschaftsinformatik",
 		ChannelGroupID: 10,
 		EmojiName:      "wi",
 		EmojiCode:      "",
@@ -32,7 +31,6 @@ func TestEmojiGroupMappingUpsertAndList(t *testing.T) {
 
 	m2 := storage.EmojiGroupMapping{
 		ShortName:      "CS",
-		DisplayName:    "Computer Science",
 		ChannelGroupID: 20,
 		EmojiName:      "cs",
 		EmojiCode:      "",
@@ -71,7 +69,6 @@ func TestEmojiGroupMappingGetByShortName(t *testing.T) {
 
 	m := storage.EmojiGroupMapping{
 		ShortName:      "WI",
-		DisplayName:    "WI",
 		ChannelGroupID: 10,
 		EmojiName:      "wi",
 		ReactionType:   "unicode_emoji",
@@ -106,7 +103,6 @@ func TestEmojiGroupMappingGetByEmoji(t *testing.T) {
 
 	m := storage.EmojiGroupMapping{
 		ShortName:      "WI",
-		DisplayName:    "WI",
 		ChannelGroupID: 10,
 		EmojiName:      "wi",
 		ReactionType:   "unicode_emoji",
@@ -141,7 +137,6 @@ func TestEmojiGroupMappingDisabledNotReturned(t *testing.T) {
 
 	m := storage.EmojiGroupMapping{
 		ShortName:      "WI",
-		DisplayName:    "WI",
 		ChannelGroupID: 10,
 		EmojiName:      "wi",
 		ReactionType:   "unicode_emoji",

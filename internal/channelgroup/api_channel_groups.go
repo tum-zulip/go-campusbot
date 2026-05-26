@@ -37,7 +37,10 @@ const (
 	originUnsubscribe    = "UnsubscribeFromChannelGroup"
 )
 
-const deleteQueueTimeout = 5 * time.Second
+const (
+	deleteQueueTimeout                 = 5 * time.Second
+	zulipAdministratorsSystemGroupName = "role:administrators"
+)
 
 // Client is the campusbot Zulip client. It is a drop-in replacement for
 // client.Client and additionally exposes channel-group endpoints.
@@ -116,8 +119,6 @@ func newChannelGroups(base client.Client, database *sql.DB, opts ...ClientOption
 }
 
 var _ APIChannelGroups = (*channelGroups)(nil)
-
-const zulipAdministratorsSystemGroupID int64 = 2
 
 func (s *channelGroups) initializeChannelGroups(ctx context.Context) error {
 	groups, err := s.getGroups(ctx)
@@ -339,21 +340,45 @@ func (s *channelGroups) CreateChannelGroupExecute(
 		group.ChannelIDs = uniqueInt64s(*r.channelIDs)
 	}
 
+	adminsGroupSetting, err := s.administratorsGroupSetting(r.ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+
 	userGroupResp, _, err := s.base.CreateUserGroup(r.ctx).
 		Name(group.Name).
 		Description("").
 		Members(initialMembers).
-		CanAddMembersGroup(administratorsOnlyGroupSetting()).
-		CanJoinGroup(administratorsOnlyGroupSetting()).
-		CanLeaveGroup(administratorsOnlyGroupSetting()).
-		CanManageGroup(administratorsOnlyGroupSetting()).
-		CanMentionGroup(administratorsOnlyGroupSetting()).
-		CanRemoveMembersGroup(administratorsOnlyGroupSetting()).
+		CanAddMembersGroup(adminsGroupSetting).
+		CanJoinGroup(adminsGroupSetting).
+		CanLeaveGroup(adminsGroupSetting).
+		CanManageGroup(adminsGroupSetting).
+		CanMentionGroup(adminsGroupSetting).
+		CanRemoveMembersGroup(adminsGroupSetting).
 		Execute()
 	if err != nil {
 		return nil, nil, err
 	}
 	group.ID = userGroupResp.GroupID
+	createdUserGroup := true
+	dbGroupCreated := false
+	rollback := func(cause error) error {
+		var rollbackErrs []error
+		if dbGroupCreated {
+			if err := s.queries.DeleteChannelGroup(r.ctx, group.ID); err != nil {
+				rollbackErrs = append(rollbackErrs, fmt.Errorf("delete local channel group %d: %w", group.ID, err))
+			}
+		}
+		if createdUserGroup {
+			if _, _, err := s.base.DeactivateUserGroup(r.ctx, group.ID).Execute(); err != nil {
+				rollbackErrs = append(rollbackErrs, fmt.Errorf("deactivate user group %d: %w", group.ID, err))
+			}
+		}
+		if len(rollbackErrs) == 0 {
+			return cause
+		}
+		return fmt.Errorf("%w (rollback failed: %w)", cause, errors.Join(rollbackErrs...))
+	}
 
 	var channelFolderID sql.NullInt64
 	if r.createChannelFolder {
@@ -362,7 +387,7 @@ func (s *channelGroups) CreateChannelGroupExecute(
 			Description("").
 			Execute()
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, rollback(err)
 		}
 		channelFolderID = sql.NullInt64{Int64: folderResp.ChannelFolderID, Valid: true}
 		group.ChannelFolderID = &channelFolderID.Int64 //nolint:govet // is currently not used, but the values in the struct should be consistent
@@ -370,12 +395,12 @@ func (s *channelGroups) CreateChannelGroupExecute(
 
 	if len(group.ChannelIDs) > 0 && len(initialMembers) > 0 {
 		if err = s.subscribeUsersToChannels(r.ctx, group.ChannelIDs, initialMembers); err != nil {
-			return nil, nil, err
+			return nil, nil, rollback(err)
 		}
 	}
 	if channelFolderID.Valid {
 		if err = s.addChannelsToFolder(r.ctx, group.ChannelIDs, channelFolderID.Int64); err != nil {
-			return nil, nil, err
+			return nil, nil, rollback(err)
 		}
 	}
 
@@ -384,15 +409,16 @@ func (s *channelGroups) CreateChannelGroupExecute(
 		ChannelFolderID: channelFolderID,
 	})
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, rollback(err)
 	}
 	dbGroupID := dbGroup.ID
+	dbGroupCreated = true
 	for _, channelID := range group.ChannelIDs {
 		if err = s.queries.AddChannelGroupChannel(r.ctx, channelgroupdb.AddChannelGroupChannelParams{
 			ChannelGroupID: dbGroupID,
 			ChannelID:      channelID,
 		}); err != nil {
-			return nil, nil, err
+			return nil, nil, rollback(err)
 		}
 	}
 
@@ -476,6 +502,16 @@ func (s *channelGroups) GetChannelGroupExecute(
 		Response:     successResponse(),
 		ChannelGroup: group,
 	}, nil, nil
+}
+
+func (s *channelGroups) DeleteChannelGroup(ctx context.Context, channelGroupID int64) error {
+	if err := s.queries.DeleteChannelGroup(ctx, channelGroupID); err != nil {
+		return fmt.Errorf("delete local channel group %d: %w", channelGroupID, err)
+	}
+	if _, _, err := s.base.DeactivateUserGroup(ctx, channelGroupID).Execute(); err != nil {
+		return fmt.Errorf("deactivate user group %d: %w", channelGroupID, err)
+	}
+	return nil
 }
 
 func (s *channelGroups) GetChannelGroupChannels(
@@ -1059,11 +1095,6 @@ func successResponse() zulip.Response {
 	return zulip.Response{Result: zulip.ResponseSuccess}
 }
 
-func administratorsOnlyGroupSetting() zulip.GroupSettingValue {
-	groupID := zulipAdministratorsSystemGroupID
-	return zulip.GroupSettingValue{GroupID: &groupID}
-}
-
 func ptrResponse(r zulip.Response) *zulip.Response {
 	return &r
 }
@@ -1081,15 +1112,35 @@ func cloneChannelGroup(group ChannelGroup) ChannelGroup {
 	return group
 }
 
+func (s *channelGroups) administratorsGroupSetting(ctx context.Context) (zulip.GroupSettingValue, error) {
+	resp, _, err := s.base.GetUserGroups(ctx).IncludeDeactivatedGroups(false).Execute()
+	if err != nil {
+		return zulip.GroupSettingValue{}, fmt.Errorf("resolve Zulip administrators system group: %w", err)
+	}
+	if resp == nil {
+		return zulip.GroupSettingValue{}, errors.New("resolve Zulip administrators system group: empty response")
+	}
+	for _, group := range resp.UserGroups {
+		if group.IsSystemGroup && group.Name == zulipAdministratorsSystemGroupName && !group.Deactivated {
+			groupID := group.ID
+			return zulip.GroupSettingValue{GroupID: &groupID}, nil
+		}
+	}
+	return zulip.GroupSettingValue{}, fmt.Errorf(
+		"resolve Zulip administrators system group: %s not found",
+		zulipAdministratorsSystemGroupName,
+	)
+}
+
 func userIDPrincipals(principals *zulip.Principals) ([]int64, error) {
 	if principals == nil {
-		return nil, nil
+		return []int64{}, nil
 	}
 	if principals.UserEmails != nil && len(*principals.UserEmails) > 0 {
 		return nil, errors.New("channel group operations only support user ID principals")
 	}
 	if principals.UserIDs == nil {
-		return nil, nil
+		return []int64{}, nil
 	}
 	return uniqueInt64s(*principals.UserIDs), nil
 }
@@ -1187,6 +1238,7 @@ type APIChannelGroups interface {
 	// GetChannelGroup fetches a single channel group by ID.
 	GetChannelGroup(ctx context.Context, channelGroupID int64) GetChannelGroupRequest
 	GetChannelGroupExecute(r GetChannelGroupRequest) (*GetChannelGroupResponse, *http.Response, error)
+	DeleteChannelGroup(ctx context.Context, channelGroupID int64) error
 
 	// --- Channel membership inside a group --------------------------------
 	// "Members" of a channel group are channels. Subscribers are tracked

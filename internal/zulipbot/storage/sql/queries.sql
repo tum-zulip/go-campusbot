@@ -142,10 +142,9 @@ INSERT INTO audit_log(
 -- emoji_group_mappings
 
 -- name: UpsertEmojiGroupMapping :exec
-INSERT INTO emoji_group_mappings (short_name, display_name, channel_group_id, emoji_name, emoji_code, reaction_type, enabled, sort_order, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO emoji_group_mappings (short_name, channel_group_id, emoji_name, emoji_code, reaction_type, enabled, sort_order, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(short_name) DO UPDATE SET
-  display_name = excluded.display_name,
   channel_group_id = excluded.channel_group_id,
   emoji_name = excluded.emoji_name,
   emoji_code = excluded.emoji_code,
@@ -155,23 +154,23 @@ ON CONFLICT(short_name) DO UPDATE SET
   updated_at = excluded.updated_at;
 
 -- name: ListEnabledEmojiGroupMappings :many
-SELECT id, short_name, display_name, channel_group_id, emoji_name, emoji_code, reaction_type, enabled, sort_order, created_at, updated_at
+SELECT id, short_name, channel_group_id, emoji_name, emoji_code, reaction_type, enabled, sort_order, created_at, updated_at
 FROM emoji_group_mappings
 WHERE enabled = 1
 ORDER BY sort_order, short_name;
 
 -- name: ListAllEmojiGroupMappings :many
-SELECT id, short_name, display_name, channel_group_id, emoji_name, emoji_code, reaction_type, enabled, sort_order, created_at, updated_at
+SELECT id, short_name, channel_group_id, emoji_name, emoji_code, reaction_type, enabled, sort_order, created_at, updated_at
 FROM emoji_group_mappings
 ORDER BY sort_order, short_name;
 
 -- name: GetEmojiGroupMappingByShortName :one
-SELECT id, short_name, display_name, channel_group_id, emoji_name, emoji_code, reaction_type, enabled, sort_order, created_at, updated_at
+SELECT id, short_name, channel_group_id, emoji_name, emoji_code, reaction_type, enabled, sort_order, created_at, updated_at
 FROM emoji_group_mappings
 WHERE short_name = ? AND enabled = 1;
 
 -- name: GetEmojiGroupMappingByEmoji :one
-SELECT id, short_name, display_name, channel_group_id, emoji_name, emoji_code, reaction_type, enabled, sort_order, created_at, updated_at
+SELECT id, short_name, channel_group_id, emoji_name, emoji_code, reaction_type, enabled, sort_order, created_at, updated_at
 FROM emoji_group_mappings
 WHERE emoji_name = ? AND reaction_type = ? AND enabled = 1;
 
