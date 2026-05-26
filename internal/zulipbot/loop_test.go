@@ -412,7 +412,7 @@ func (source *fakeSource) Poll(_ context.Context, state zulipbot.QueueState) ([]
 	return nil, context.Canceled
 }
 
-func (source *fakeSource) Delete(ctx context.Context, queueID string) error {
+func (source *fakeSource) Delete(_ context.Context, _ string) error {
 	return nil
 }
 
@@ -549,7 +549,7 @@ func TestLoopPollTimeoutRetriesWithoutBackoff(t *testing.T) {
 			// Second call: parent context canceled - loop should exit.
 			return nil, context.Canceled
 		},
-		deleteFn: func(ctx context.Context, queueID string) error { return nil },
+		deleteFn: func(_ context.Context, _ string) error { return nil },
 	}
 
 	loop, err := zulipbot.NewLoop(zulipbot.LoopConfig{

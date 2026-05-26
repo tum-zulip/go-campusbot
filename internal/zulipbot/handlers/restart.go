@@ -35,7 +35,7 @@ func (handler *RestartHandler) Metadata() command.Metadata {
 	}
 }
 
-func (handler *RestartHandler) Handle(ctx context.Context, req command.Request) (command.Result, error) {
+func (handler *RestartHandler) Handle(_ context.Context, req command.Request) (command.Result, error) {
 	if len(req.Invocation.Args) != 0 {
 		return command.Result{}, command.NewUserError("Usage: `restart`")
 	}

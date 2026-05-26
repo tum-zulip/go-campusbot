@@ -18,6 +18,7 @@ const (
 	KeyRestartStartupNotification = "restart_startup_notification"
 )
 
+// ErrUnknownKey is returned when a requested configuration key is not defined.
 var ErrUnknownKey = errors.New("unknown config key")
 
 type Definition struct {

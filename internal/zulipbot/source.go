@@ -14,6 +14,7 @@ import (
 	"github.com/tum-zulip/go-zulip/zulip/events"
 )
 
+// ErrBadEventQueueID is returned when Zulip rejects the stored event queue ID.
 var ErrBadEventQueueID = errors.New("bad Zulip event queue ID")
 
 type QueueState struct {

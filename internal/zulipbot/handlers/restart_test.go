@@ -11,6 +11,8 @@ import (
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/handlers"
 )
 
+const permissionDenied = "permission denied"
+
 func TestRestartHandlerSchedulesOnlyAfterAcknowledgementHook(t *testing.T) {
 	t.Parallel()
 
@@ -115,7 +117,7 @@ func TestRestartRouterOwnerCanRun(t *testing.T) {
 		Invocation: command.Invocation{Name: "restart"},
 		Actor:      command.Actor{UserID: 3},
 	})
-	if result.Content == "permission denied" {
+	if result.Content == permissionDenied {
 		t.Fatal("owner should be able to run restart")
 	}
 	if strings.Contains(result.Content, "not authorized") {
@@ -147,7 +149,7 @@ func TestRestartRouterAdminCannotRun(t *testing.T) {
 		Invocation: command.Invocation{Name: "restart"},
 		Actor:      command.Actor{UserID: 2},
 	})
-	if result.Content != "permission denied" {
+	if result.Content != permissionDenied {
 		t.Fatalf("admin should be denied restart, got: %q", result.Content)
 	}
 }
@@ -175,7 +177,7 @@ func TestRestartRouterNoneUserCannotRun(t *testing.T) {
 		Invocation: command.Invocation{Name: "restart"},
 		Actor:      command.Actor{UserID: 1},
 	})
-	if result.Content != "permission denied" {
+	if result.Content != permissionDenied {
 		t.Fatalf("member should be denied restart, got: %q", result.Content)
 	}
 }

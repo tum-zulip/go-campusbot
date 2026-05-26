@@ -25,13 +25,13 @@ type fakeStatusProvider struct {
 
 func (p *fakeStatusProvider) UptimeSeconds() int64 { return p.uptimeSeconds }
 
-func (p *fakeStatusProvider) QueueStatus(ctx context.Context) (string, int64, bool, error) {
+func (p *fakeStatusProvider) QueueStatus(_ context.Context) (string, int64, bool, error) {
 	return p.queueID, p.lastEventID, p.queueOK, p.queueErr
 }
 
-func (p *fakeStatusProvider) DBReachable(ctx context.Context) error { return p.dbErr }
+func (p *fakeStatusProvider) DBReachable(_ context.Context) error { return p.dbErr }
 
-func (p *fakeStatusProvider) RestartPending(ctx context.Context) (bool, error) {
+func (p *fakeStatusProvider) RestartPending(_ context.Context) (bool, error) {
 	return p.restartPending, p.restartErr
 }
 

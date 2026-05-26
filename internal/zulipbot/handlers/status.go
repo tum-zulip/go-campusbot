@@ -77,28 +77,43 @@ func (handler *StatusHandler) Handle(ctx context.Context, req command.Request) (
 	// Admin-only details.
 	isAdmin := handler.adminAuth.Check(ctx, req.Actor, zulip.RoleAdmin) == nil
 	if isAdmin {
-		queueID, lastEventID, ok, err := handler.provider.QueueStatus(ctx)
-		if err != nil {
-			fmt.Fprintf(&sb, "\nqueue_status: error (%v)", err)
-		} else if ok {
-			fmt.Fprintf(&sb, "\nqueue_id: %s, last_event_id: %d", queueID, lastEventID)
-		} else {
-			fmt.Fprintf(&sb, "\nqueue_status: not registered")
-		}
-
-		if err := handler.provider.DBReachable(ctx); err != nil {
-			fmt.Fprintf(&sb, "\ndb_reachable: no (%v)", err)
-		} else {
-			fmt.Fprintf(&sb, "\ndb_reachable: yes")
-		}
-
-		pending, err := handler.provider.RestartPending(ctx)
-		if err != nil {
-			fmt.Fprintf(&sb, "\nrestart_pending: error (%v)", err)
-		} else {
-			fmt.Fprintf(&sb, "\nrestart_pending: %v", pending)
-		}
+		handler.writeAdminStatus(ctx, &sb)
 	}
 
 	return command.Result{Content: sb.String()}, nil
+}
+
+func (handler *StatusHandler) writeAdminStatus(ctx context.Context, sb *strings.Builder) {
+	handler.writeQueueStatus(ctx, sb)
+	handler.writeDBStatus(ctx, sb)
+	handler.writeRestartStatus(ctx, sb)
+}
+
+func (handler *StatusHandler) writeQueueStatus(ctx context.Context, sb *strings.Builder) {
+	queueID, lastEventID, ok, err := handler.provider.QueueStatus(ctx)
+	switch {
+	case err != nil:
+		fmt.Fprintf(sb, "\nqueue_status: error (%v)", err)
+	case ok:
+		fmt.Fprintf(sb, "\nqueue_id: %s, last_event_id: %d", queueID, lastEventID)
+	default:
+		fmt.Fprintf(sb, "\nqueue_status: not registered")
+	}
+}
+
+func (handler *StatusHandler) writeDBStatus(ctx context.Context, sb *strings.Builder) {
+	if err := handler.provider.DBReachable(ctx); err != nil {
+		fmt.Fprintf(sb, "\ndb_reachable: no (%v)", err)
+		return
+	}
+	fmt.Fprintf(sb, "\ndb_reachable: yes")
+}
+
+func (handler *StatusHandler) writeRestartStatus(ctx context.Context, sb *strings.Builder) {
+	pending, err := handler.provider.RestartPending(ctx)
+	if err != nil {
+		fmt.Fprintf(sb, "\nrestart_pending: error (%v)", err)
+		return
+	}
+	fmt.Fprintf(sb, "\nrestart_pending: %v", pending)
 }
