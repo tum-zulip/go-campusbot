@@ -22,6 +22,11 @@ import (
 type RuntimeConfig struct {
 	Logger      *slog.Logger
 	PollTimeout time.Duration
+	// RunContext is the context used for background goroutines (e.g. the
+	// channel-group event listener). It should be tied to the application
+	// lifetime, not to the startup timeout. If nil, the ctx passed to NewApp
+	// is used as a fallback.
+	RunContext context.Context
 }
 
 type App struct {
@@ -80,7 +85,14 @@ func NewApp(ctx context.Context, cfg RuntimeConfig, client zulipclient.Client, r
 	if err := channelgroup.Migrate(ctx, repo.DB()); err != nil {
 		return nil, err
 	}
-	channelGroupClient := channelgroup.NewClient(bot.Client(), repo.DB())
+	var channelGroupOpts []channelgroup.ClientOption
+	if cfg.RunContext != nil {
+		channelGroupOpts = append(channelGroupOpts, channelgroup.WithRunContext(cfg.RunContext))
+	}
+	channelGroupClient, err := channelgroup.NewClient(ctx, bot.Client(), repo.DB(), channelGroupOpts...)
+	if err != nil {
+		return nil, fmt.Errorf("initialize channel group client: %w", err)
+	}
 	groupService := channelgroup.NewGroupService(channelGroupClient)
 
 	// Set up announcement manager.
@@ -168,7 +180,7 @@ func (app *App) initCommands(
 			app.repo,
 			groupConfigReader,
 			app.bot,
-		)); err != nil {
+		).WithChannelManager(groupService)); err != nil {
 			return nil, err
 		}
 	}

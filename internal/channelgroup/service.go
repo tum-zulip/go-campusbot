@@ -40,7 +40,7 @@ type ZulipUserGroupSummary struct {
 // channel group. If a later step fails after the user group is created, the
 // lower-level API rolls back the created resources where Zulip exposes a
 // reversal operation.
-func (s *GroupService) CreateChannelGroup(ctx context.Context, name string) (int64, error) {
+func (s *GroupService) CreateChannelGroup(ctx context.Context, name string, createChannelFolder bool) (int64, error) {
 	ownUserResp, _, err := s.client.GetOwnUser(ctx).Execute()
 	if err != nil {
 		return 0, fmt.Errorf("get own Zulip user for channel group %q: %w", name, err)
@@ -50,6 +50,7 @@ func (s *GroupService) CreateChannelGroup(ctx context.Context, name string) (int
 	}
 
 	resp, _, err := s.client.CreateChannelGroup(ctx).
+		CreateChannelFolder(createChannelFolder).
 		Name(name).
 		InitialSubscribers(zulip.UserIDsAsPrincipals(ownUserResp.User.UserID)).
 		Execute()
@@ -156,6 +157,58 @@ func (s *GroupService) ListZulipUserGroups(ctx context.Context) ([]ZulipUserGrou
 // re-validate visibility itself.
 func (s *GroupService) ImportZulipUserGroup(ctx context.Context, userGroupID int64) error {
 	return s.client.ImportZulipUserGroup(ctx, userGroupID)
+}
+
+// CreateChannelAndAddToGroup creates a new Zulip channel with the given name,
+// subscribes the bot account to it, and adds the channel to the specified group.
+// Returns the new channel's ID on success.
+func (s *GroupService) CreateChannelAndAddToGroup(
+	ctx context.Context,
+	channelName string,
+	channelGroupID int64,
+) (int64, error) {
+	ownUserResp, _, err := s.client.GetOwnUser(ctx).Execute()
+	if err != nil {
+		return 0, fmt.Errorf("get own Zulip user for channel creation: %w", err)
+	}
+	if ownUserResp == nil || ownUserResp.User.UserID <= 0 {
+		return 0, errors.New("get own Zulip user for channel creation: missing user ID")
+	}
+
+	channelResp, _, err := s.client.CreateChannel(ctx).
+		Name(channelName).
+		Subscribers([]int64{ownUserResp.User.UserID}).
+		Execute()
+	if err != nil {
+		return 0, fmt.Errorf("create channel %q: %w", channelName, err)
+	}
+
+	if err := s.AddChannelToGroup(ctx, channelGroupID, channelResp.ID); err != nil {
+		return 0, fmt.Errorf("add channel %d to group %d: %w", channelResp.ID, channelGroupID, err)
+	}
+	return channelResp.ID, nil
+}
+
+// AddChannelToGroup adds a channel to a channel group, subscribing all current group members to it.
+func (s *GroupService) AddChannelToGroup(ctx context.Context, channelGroupID int64, channelID int64) error {
+	_, _, err := s.client.UpdateChannelGroupChannels(ctx, channelGroupID).
+		Add([]int64{channelID}).
+		Execute()
+	if err != nil {
+		return fmt.Errorf("add channel %d to channel group %d: %w", channelID, channelGroupID, err)
+	}
+	return nil
+}
+
+// RemoveChannelFromGroup removes a channel from a channel group.
+func (s *GroupService) RemoveChannelFromGroup(ctx context.Context, channelGroupID int64, channelID int64) error {
+	_, _, err := s.client.UpdateChannelGroupChannels(ctx, channelGroupID).
+		Delete([]int64{channelID}).
+		Execute()
+	if err != nil {
+		return fmt.Errorf("remove channel %d from channel group %d: %w", channelID, channelGroupID, err)
+	}
+	return nil
 }
 
 // UnsubscribeUserKeepChannels removes a user from the channel group future updates

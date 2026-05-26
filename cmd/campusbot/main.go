@@ -97,6 +97,7 @@ func main() {
 		zulipbot.RuntimeConfig{
 			Logger:      logger,
 			PollTimeout: pollTimeout,
+			RunContext:  runCtx,
 		},
 		client,
 		repo,

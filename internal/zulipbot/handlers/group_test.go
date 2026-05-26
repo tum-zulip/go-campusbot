@@ -2,7 +2,10 @@ package handlers_test
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"io"
+	"log/slog"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -15,6 +18,7 @@ import (
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/command"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/handlers"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/storage"
+	"github.com/tum-zulip/go-campusbot/internal/zulipmock"
 )
 
 // --- Fakes ---
@@ -106,7 +110,7 @@ func (c *fakeChannelGroupChecker) ImportZulipUserGroup(_ context.Context, userGr
 	return nil
 }
 
-func (c *fakeChannelGroupChecker) CreateChannelGroup(_ context.Context, name string) (int64, error) {
+func (c *fakeChannelGroupChecker) CreateChannelGroup(_ context.Context, name string, _ bool) (int64, error) {
 	if c.createErr != nil {
 		return 0, c.createErr
 	}
@@ -1520,5 +1524,218 @@ func TestGroupAnnounceInspect(t *testing.T) {
 	// Should mention message_id
 	if !strings.Contains(result.Content, "999") {
 		t.Errorf("expected inspect output to contain message_id 999, got: %s", result.Content)
+	}
+}
+
+func newGroupTestChannelGroupClient(t *testing.T) channelgroup.Client {
+	t.Helper()
+	db, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatalf("open in-memory sqlite database: %v", err)
+	}
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = db.Close() })
+	if err := channelgroup.Migrate(context.Background(), db); err != nil {
+		t.Fatalf("migrate channelgroup schema: %v", err)
+	}
+	client, err := channelgroup.NewClient(
+		context.Background(),
+		zulipmock.NewClient(),
+		db,
+		channelgroup.WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
+	)
+	if err != nil {
+		t.Fatalf("channelgroup.NewClient: %v", err)
+	}
+	return client
+}
+
+func buildCourseHandler(
+	t *testing.T,
+	auth command.Authorizer,
+) (*handlers.GroupHandler, channelgroup.Client) {
+	t.Helper()
+	repo := openGroupTestRepo(t)
+	seedGroupMapping(t, repo, "WI", "wi", 42)
+
+	client := newGroupTestChannelGroupClient(t)
+	if err := client.ImportZulipUserGroup(context.Background(), 42); err != nil {
+		t.Fatalf("ImportZulipUserGroup: %v", err)
+	}
+
+	svc := channelgroup.NewGroupService(client)
+	h := handlers.NewGroupHandler(
+		svc,
+		svc,
+		repo, repo,
+		&fakeAnnouncer{},
+		&fakeAnnouncementStateAccessor{},
+		&fakeGroupConfigReader{},
+		auth,
+	).WithChannelManager(svc)
+	return h, client
+}
+
+func TestGroupCourseAdd(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	h, client := buildCourseHandler(t, allowAll{})
+
+	result, err := h.Handle(ctx, makeGroupRequest("course", "add", "99", "WI"))
+	if err != nil {
+		t.Fatalf("Handle() failed: %v", err)
+	}
+	if result.Content == "" {
+		t.Error("expected non-empty result content")
+	}
+	resp, _, err := client.GetIsChannelInChannelGroup(ctx, 42, 99).Execute()
+	if err != nil {
+		t.Fatalf("GetIsChannelInChannelGroup: %v", err)
+	}
+	if !resp.IsChannelGroupMember {
+		t.Error("expected channel 99 to be in group 42 after add")
+	}
+}
+
+func TestGroupCourseRemove(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	h, client := buildCourseHandler(t, allowAll{})
+
+	if _, _, err := client.UpdateChannelGroupChannels(ctx, 42).Add([]int64{99}).Execute(); err != nil {
+		t.Fatalf("pre-add channel 99 to group 42: %v", err)
+	}
+
+	result, err := h.Handle(ctx, makeGroupRequest("course", "remove", "99", "WI"))
+	if err != nil {
+		t.Fatalf("Handle() failed: %v", err)
+	}
+	if result.Content == "" {
+		t.Error("expected non-empty result content")
+	}
+	resp, _, err := client.GetIsChannelInChannelGroup(ctx, 42, 99).Execute()
+	if err != nil {
+		t.Fatalf("GetIsChannelInChannelGroup: %v", err)
+	}
+	if resp.IsChannelGroupMember {
+		t.Error("expected channel 99 to not be in group 42 after remove")
+	}
+}
+
+func TestGroupCoursePermissionDenied(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	h, _ := buildCourseHandler(t, denyAll{})
+
+	_, err := h.Handle(ctx, makeGroupRequest("course", "add", "99", "WI"))
+	if err == nil {
+		t.Fatal("expected error for non-admin user")
+	}
+}
+
+func TestGroupCourseUnknownGroup(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	h, _ := buildCourseHandler(t, allowAll{})
+
+	_, err := h.Handle(ctx, makeGroupRequest("course", "add", "99", "UNKNOWN"))
+	if err == nil {
+		t.Fatal("expected error for unknown group")
+	}
+}
+
+func TestGroupCourseInvalidChannelID(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	h, _ := buildCourseHandler(t, allowAll{})
+
+	_, err := h.Handle(ctx, makeGroupRequest("course", "add", "notanint", "WI"))
+	if err == nil {
+		t.Fatal("expected error for invalid channel_id")
+	}
+}
+
+func TestGroupCourseNotConfigured(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	repo := openGroupTestRepo(t)
+	seedGroupMapping(t, repo, "WI", "wi", 42)
+	h := handlers.NewGroupHandler(
+		&fakeGroupSubscriber{},
+		allExist(),
+		repo, repo,
+		&fakeAnnouncer{},
+		&fakeAnnouncementStateAccessor{},
+		&fakeGroupConfigReader{},
+		allowAll{},
+	)
+
+	_, err := h.Handle(ctx, makeGroupRequest("course", "add", "99", "WI"))
+	if err == nil {
+		t.Fatal("expected error when channel manager is not configured")
+	}
+}
+
+func TestGroupChannelCreate(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	h, client := buildCourseHandler(t, allowAll{})
+
+	result, err := h.Handle(ctx, makeGroupRequest("channel", "create", "new-channel", "WI"))
+	if err != nil {
+		t.Fatalf("Handle() failed: %v", err)
+	}
+	if !strings.Contains(result.Content, "new-channel") {
+		t.Errorf("expected result to mention channel name, got: %s", result.Content)
+	}
+	resp, _, err := client.GetChannelGroupChannels(ctx, 42).Execute()
+	if err != nil {
+		t.Fatalf("GetChannelGroupChannels: %v", err)
+	}
+	if len(resp.ChannelIDs) != 1 {
+		t.Errorf("expected 1 channel in group 42, got %d", len(resp.ChannelIDs))
+	}
+}
+
+func TestGroupChannelCreateCourseAlias(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	h, client := buildCourseHandler(t, allowAll{})
+
+	result, err := h.Handle(ctx, makeGroupRequest("course", "create", "new-channel", "WI"))
+	if err != nil {
+		t.Fatalf("Handle() failed via course alias: %v", err)
+	}
+	if !strings.Contains(result.Content, "new-channel") {
+		t.Errorf("expected result to mention channel name, got: %s", result.Content)
+	}
+	resp, _, err := client.GetChannelGroupChannels(ctx, 42).Execute()
+	if err != nil {
+		t.Fatalf("GetChannelGroupChannels: %v", err)
+	}
+	if len(resp.ChannelIDs) != 1 {
+		t.Errorf("expected 1 channel in group 42, got %d", len(resp.ChannelIDs))
+	}
+}
+
+func TestGroupChannelCreateUnknownGroup(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	h, _ := buildCourseHandler(t, allowAll{})
+
+	_, err := h.Handle(ctx, makeGroupRequest("channel", "create", "new-channel", "UNKNOWN"))
+	if err == nil {
+		t.Fatal("expected error for unknown group")
+	}
+}
+
+func TestGroupChannelCreatePermissionDenied(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	h, _ := buildCourseHandler(t, denyAll{})
+
+	_, err := h.Handle(ctx, makeGroupRequest("channel", "create", "new-channel", "WI"))
+	if err == nil {
+		t.Fatal("expected error for non-admin user")
 	}
 }

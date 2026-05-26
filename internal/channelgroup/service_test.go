@@ -50,7 +50,7 @@ func TestGroupServiceCreateChannelGroupAddsBotUser(t *testing.T) {
 	client := newTestClient(t, base)
 	svc := channelgroup.NewGroupService(client)
 
-	groupID, err := svc.CreateChannelGroup(ctx, "test-group")
+	groupID, err := svc.CreateChannelGroup(ctx, "test-group", false)
 	if err != nil {
 		t.Fatalf("CreateChannelGroup() failed: %v", err)
 	}

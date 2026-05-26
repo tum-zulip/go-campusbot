@@ -36,6 +36,7 @@ type Client struct {
 type Operation string
 
 const (
+	OperationCreateChannel          Operation = "CreateChannel"
 	OperationCreateUserGroup        Operation = "CreateUserGroup"
 	OperationDeactivateUserGroup    Operation = "DeactivateUserGroup"
 	OperationGetChannelByID         Operation = "GetChannelByID"
@@ -654,11 +655,59 @@ func (Client) CreateBigBlueButtonVideoCall(_ context.Context) channels.CreateBig
 func (Client) CreateBigBlueButtonVideoCallExecute(_ channels.CreateBigBlueButtonVideoCallRequest) (*channels.CreateBigBlueButtonVideoCallResponse, *http.Response, error) {
 	return nil, nil, nil
 }
-func (Client) CreateChannel(_ context.Context) channels.CreateChannelRequest {
-	return withAPIService(channels.CreateChannelRequest{}, Client{})
+func (c Client) CreateChannel(ctx context.Context) channels.CreateChannelRequest {
+	return withContext(withAPIService(channels.CreateChannelRequest{}, c), ctx)
 }
-func (Client) CreateChannelExecute(_ channels.CreateChannelRequest) (*channels.CreateChannelResponse, *http.Response, error) {
-	return nil, nil, nil
+func (c Client) CreateChannelExecute(r channels.CreateChannelRequest) (*channels.CreateChannelResponse, *http.Response, error) {
+	state := c.ensureState()
+	if err := state.waitForTurn(requestContext(r), OperationCreateChannel, ""); err != nil {
+		return nil, nil, err
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if err := state.failLocked(OperationCreateChannel); err != nil {
+		return nil, nil, err
+	}
+
+	name := ""
+	if v := requestStringPtr(r, "name"); v != nil {
+		name = *v
+	}
+	if name == "" {
+		return nil, nil, fmt.Errorf("name is required")
+	}
+	description := ""
+	if v := requestStringPtr(r, "description"); v != nil {
+		description = *v
+	}
+
+	channelID, ok := state.channelIDs[name]
+	if !ok {
+		channelID = state.nextChannelID
+		state.nextChannelID++
+		state.channels[channelID] = channelState{
+			channel: zulip.Channel{
+				ChannelID:   channelID,
+				Name:        name,
+				Description: description,
+			},
+			subscribers: map[int64]bool{},
+		}
+		state.channelIDs[name] = channelID
+	}
+
+	if subscribers := requestInt64SlicePtr(r, "subscribers"); subscribers != nil {
+		channel := state.channels[channelID]
+		for _, userID := range *subscribers {
+			channel.subscribers[userID] = true
+		}
+		state.channels[channelID] = channel
+	}
+
+	return &channels.CreateChannelResponse{
+		Response: successResponse(),
+		ID:       channelID,
+	}, nil, nil
 }
 func (c Client) CreateChannelFolder(ctx context.Context) channels.CreateChannelFolderRequest {
 	return withContext(withAPIService(channels.CreateChannelFolderRequest{}, c), ctx)

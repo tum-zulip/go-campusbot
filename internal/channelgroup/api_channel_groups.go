@@ -67,17 +67,26 @@ func WithLogger(logger *slog.Logger) ClientOption {
 	}
 }
 
-// NewClient wraps an existing upstream client.Client with channel-group
-// endpoints backed by database. The wrapper does not own either lifecycle.
-func NewClient(base client.Client, database *sql.DB, opts ...ClientOption) Client {
-	service := newChannelGroups(base, database, opts...)
-	return newClientWithService(base, service)
+// WithRunContext sets the context used for the background event-listener
+// goroutine. Use this when the context passed to NewClient is a short-lived
+// startup context: the goroutine must survive until the application shuts
+// down, so it needs a context tied to the application lifetime, not to
+// initialization.
+func WithRunContext(ctx context.Context) ClientOption {
+	return func(s *channelGroups) {
+		if ctx != nil {
+			s.runCtx = ctx
+		}
+	}
 }
 
-// NewInitializedClient wraps an upstream client, reconciles persisted
-// channel-group metadata against Zulip state, and starts the channel-group
-// event listener before returning it.
-func NewInitializedClient(
+// NewClient wraps an upstream client, reconciles persisted channel-group
+// metadata against Zulip state, and starts the channel-group event listener
+// before returning it.
+//
+// Use [WithRunContext] to supply a long-lived context for the background
+// event-listener goroutine when ctx is a short-lived startup context.
+func NewClient(
 	ctx context.Context,
 	base client.Client,
 	database *sql.DB,
@@ -104,6 +113,7 @@ type channelGroups struct {
 	base    client.Client
 	queries *channelgroupdb.Queries
 	logger  *slog.Logger
+	runCtx  context.Context // overrides the ctx passed to startChannelGroupEventListener
 }
 
 func newChannelGroups(base client.Client, database *sql.DB, opts ...ClientOption) *channelGroups {
@@ -179,7 +189,11 @@ func (s *channelGroups) startChannelGroupEventListener(ctx context.Context) erro
 	if err != nil {
 		return err
 	}
-	go s.runChannelGroupEventListener(ctx, queueID, lastEventID)
+	goroutineCtx := ctx
+	if s.runCtx != nil {
+		goroutineCtx = s.runCtx
+	}
+	go s.runChannelGroupEventListener(goroutineCtx, queueID, lastEventID)
 	return nil
 }
 
@@ -189,6 +203,7 @@ func (s *channelGroups) registerChannelGroupEventQueue(ctx context.Context) (str
 		ApplyMarkdown(false).
 		EventTypes([]events.EventType{events.EventTypeChannel, events.EventTypeUserGroup}).
 		ClientCapabilities(map[string]interface{}{
+			"notification_settings_null": true,
 			"include_deactivated_groups": false,
 		}).
 		Execute()

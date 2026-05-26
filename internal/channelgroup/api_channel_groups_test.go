@@ -103,29 +103,14 @@ func newTestClient(t *testing.T, base zulipmock.Client) channelgroup.Client {
 	t.Helper()
 
 	database := newTestDatabase(t)
-	return channelgroup.NewClient(
-		base,
-		database,
-		channelgroup.WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
-	)
-}
-
-func newInitializedTestClient(
-	t *testing.T,
-	ctx context.Context,
-	base zulipmock.Client,
-	database *sql.DB,
-) channelgroup.Client {
-	t.Helper()
-
-	client, err := channelgroup.NewInitializedClient(
-		ctx,
+	client, err := channelgroup.NewClient(
+		context.Background(),
 		base,
 		database,
 		channelgroup.WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
 	)
 	if err != nil {
-		t.Fatalf("NewInitializedClient error = %v", err)
+		t.Fatalf("NewClient error = %v", err)
 	}
 	return client
 }
@@ -279,11 +264,16 @@ func TestInitializeChannelGroupsRemovesChannelsMissingFromBotSubscriptions(t *te
 	ctx := context.Background()
 	base := zulipmock.NewClient()
 	database := newTestDatabase(t)
-	client := channelgroup.NewClient(
+	client, err := channelgroup.NewClient(
+		context.Background(),
 		base,
 		database,
 		channelgroup.WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
 	)
+	if err != nil {
+		t.Fatalf("NewClient error = %v", err)
+	}
+
 	channelIDs := createMockBotSubscribedChannels(t, ctx, base, 2)
 
 	created, _, err := client.CreateChannelGroup(ctx).
@@ -303,7 +293,12 @@ func TestInitializeChannelGroupsRemovesChannelsMissingFromBotSubscriptions(t *te
 	}
 
 	base.FailNext(zulipmock.OperationUnsubscribe, errors.New("initialization must not unsubscribe users"))
-	client = newInitializedTestClient(t, ctx, base, database)
+	client, err = channelgroup.NewClient(ctx, base, database,
+		channelgroup.WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
+	)
+	if err != nil {
+		t.Fatalf("NewClient (re-init) error = %v", err)
+	}
 
 	group, _, err := client.GetChannelGroup(ctx, created.ChannelGroupID).Execute()
 	if err != nil {
@@ -321,11 +316,15 @@ func TestInitializeChannelGroupsRemovesGroupWhenBackingUserGroupMissing(t *testi
 	ctx := context.Background()
 	base := zulipmock.NewClient()
 	database := newTestDatabase(t)
-	client := channelgroup.NewClient(
+	client, err := channelgroup.NewClient(
+		context.Background(),
 		base,
 		database,
 		channelgroup.WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
 	)
+	if err != nil {
+		t.Fatalf("NewClient error = %v", err)
+	}
 	channelIDs := createMockBotSubscribedChannels(t, ctx, base, 1)
 
 	created, _, err := client.CreateChannelGroup(ctx).
@@ -339,7 +338,12 @@ func TestInitializeChannelGroupsRemovesGroupWhenBackingUserGroupMissing(t *testi
 
 	base.DeleteUserGroupForTest(created.ChannelGroupID)
 	base.FailNext(zulipmock.OperationUnsubscribe, errors.New("initialization must not unsubscribe users"))
-	client = newInitializedTestClient(t, ctx, base, database)
+	client, err = channelgroup.NewClient(ctx, base, database,
+		channelgroup.WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
+	)
+	if err != nil {
+		t.Fatalf("NewClient (re-init) error = %v", err)
+	}
 
 	_, _, err = client.GetChannelGroup(ctx, created.ChannelGroupID).Execute()
 	if err == nil {
@@ -1582,5 +1586,116 @@ func assertAdminGroupSettingValue(t *testing.T, name string, got zulip.GroupSett
 	}
 	if *got.GroupID != 42 {
 		t.Fatalf("%s.GroupID = %d, want administrators system group ID 42", name, *got.GroupID)
+	}
+}
+
+// TestUnsubscribeFromChannelGroupKeepsSharedChannelWhenUserStillInOtherGroup verifies
+// that a user is only unsubscribed from a channel when none of the channel groups they
+// belong to still contain that channel. If a channel is shared between two groups and the
+// user unsubscribes from only one, they must remain in the channel.
+func TestUnsubscribeFromChannelGroupKeepsSharedChannelWhenUserStillInOtherGroup(t *testing.T) {
+	ctx := context.Background()
+	base := zulipmock.NewClient()
+	client := newTestClient(t, base)
+
+	// Channel 1 is shared between group A and group B.
+	// Channel 2 is exclusive to group B.
+	channelIDs := createMockChannels(t, ctx, base, 2)
+	sharedChannelID := channelIDs[0]
+	exclusiveChannelID := channelIDs[1]
+
+	groupA, _, err := client.CreateChannelGroup(ctx).
+		Name("group-a").
+		ChannelIDs([]int64{sharedChannelID}).
+		InitialSubscribers(zulip.UserIDsAsPrincipals(101)).
+		Execute()
+	if err != nil {
+		t.Fatalf("CreateChannelGroup(A) error = %v", err)
+	}
+
+	groupB, _, err := client.CreateChannelGroup(ctx).
+		Name("group-b").
+		ChannelIDs([]int64{sharedChannelID, exclusiveChannelID}).
+		InitialSubscribers(zulip.UserIDsAsPrincipals(101)).
+		Execute()
+	if err != nil {
+		t.Fatalf("CreateChannelGroup(B) error = %v", err)
+	}
+
+	// Subscribe user 202 to both groups.
+	if _, _, err = client.SubscribeToChannelGroup(ctx, groupA.ChannelGroupID).
+		Principals(zulip.UserIDsAsPrincipals(202)).
+		Execute(); err != nil {
+		t.Fatalf("SubscribeToChannelGroup(A, 202) error = %v", err)
+	}
+	if _, _, err = client.SubscribeToChannelGroup(ctx, groupB.ChannelGroupID).
+		Principals(zulip.UserIDsAsPrincipals(202)).
+		Execute(); err != nil {
+		t.Fatalf("SubscribeToChannelGroup(B, 202) error = %v", err)
+	}
+
+	// Unsubscribe user 202 from group A only.
+	if _, _, err = client.UnsubscribeFromChannelGroup(ctx, groupA.ChannelGroupID).
+		Principals(zulip.UserIDsAsPrincipals(202)).
+		Execute(); err != nil {
+		t.Fatalf("UnsubscribeFromChannelGroup(A, 202) error = %v", err)
+	}
+
+	// User 202 must no longer be a member of group A.
+	subA, _, err := client.GetIsChannelGroupSubscriber(ctx, groupA.ChannelGroupID, 202).Execute()
+	if err != nil {
+		t.Fatalf("GetIsChannelGroupSubscriber(A, 202) error = %v", err)
+	}
+	if subA.IsSubscriber {
+		t.Error("expected user 202 to be removed from group A")
+	}
+
+	// User 202 must still be a member of group B.
+	subB, _, err := client.GetIsChannelGroupSubscriber(ctx, groupB.ChannelGroupID, 202).Execute()
+	if err != nil {
+		t.Fatalf("GetIsChannelGroupSubscriber(B, 202) error = %v", err)
+	}
+	if !subB.IsSubscriber {
+		t.Error("expected user 202 to remain in group B")
+	}
+
+	// User 202 must still be subscribed to the shared channel because they are still in group B.
+	if got, want := channelSubscribers(t, ctx, base, sharedChannelID), []int64{101, 202, mockBootstrapUserID}; !equalInt64s(
+		got,
+		want,
+	) {
+		t.Errorf(
+			"shared channel subscribers after unsubscribe from A = %v, want %v (user 202 still in group B)",
+			got,
+			want,
+		)
+	}
+
+	// User 202 must still be subscribed to the exclusive group B channel.
+	if got, want := channelSubscribers(t, ctx, base, exclusiveChannelID), []int64{101, 202, mockBootstrapUserID}; !equalInt64s(
+		got,
+		want,
+	) {
+		t.Errorf("exclusive channel B subscribers after unsubscribe from A = %v, want %v", got, want)
+	}
+
+	// After also unsubscribing from group B, user 202 must be removed from both channels.
+	if _, _, err = client.UnsubscribeFromChannelGroup(ctx, groupB.ChannelGroupID).
+		Principals(zulip.UserIDsAsPrincipals(202)).
+		Execute(); err != nil {
+		t.Fatalf("UnsubscribeFromChannelGroup(B, 202) error = %v", err)
+	}
+
+	if got, want := channelSubscribers(t, ctx, base, sharedChannelID), []int64{101, mockBootstrapUserID}; !equalInt64s(
+		got,
+		want,
+	) {
+		t.Errorf("shared channel subscribers after full unsubscribe = %v, want %v", got, want)
+	}
+	if got, want := channelSubscribers(t, ctx, base, exclusiveChannelID), []int64{101, mockBootstrapUserID}; !equalInt64s(
+		got,
+		want,
+	) {
+		t.Errorf("exclusive channel B subscribers after full unsubscribe = %v, want %v", got, want)
 	}
 }

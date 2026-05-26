@@ -34,7 +34,7 @@ type ChannelGroupChecker interface {
 	ChannelGroupExists(ctx context.Context, channelGroupID int64) (bool, error)
 	ListZulipUserGroups(ctx context.Context) ([]channelgroup.ZulipUserGroupSummary, error)
 	ImportZulipUserGroup(ctx context.Context, userGroupID int64) error
-	CreateChannelGroup(ctx context.Context, name string) (int64, error)
+	CreateChannelGroup(ctx context.Context, name string, createChannelFolder bool) (int64, error)
 	DeleteChannelGroup(ctx context.Context, channelGroupID int64) error
 }
 
@@ -50,6 +50,13 @@ type GroupMappingWriter interface {
 	UpsertEmojiGroupMapping(ctx context.Context, m storage.EmojiGroupMapping) error
 	SetEmojiGroupMappingEnabled(ctx context.Context, shortName string, enabled bool) error
 	DeleteEmojiGroupMappingByShortName(ctx context.Context, shortName string) error
+}
+
+// ChannelGroupChannelManager adds, removes, and creates channels in a channel group.
+type ChannelGroupChannelManager interface {
+	AddChannelToGroup(ctx context.Context, channelGroupID int64, channelID int64) error
+	RemoveChannelFromGroup(ctx context.Context, channelGroupID int64, channelID int64) error
+	CreateChannelAndAddToGroup(ctx context.Context, channelName string, channelGroupID int64) (int64, error)
 }
 
 // AnnouncementUpdater triggers announcement re-render.
@@ -71,14 +78,15 @@ type GroupConfigReader interface {
 
 // GroupHandler handles the "group" command.
 type GroupHandler struct {
-	subscriber    GroupSubscriber
-	groupChecker  ChannelGroupChecker
-	mappingReader GroupMappingReader
-	mappingWriter GroupMappingWriter
-	announcer     AnnouncementUpdater
-	stateAccessor AnnouncementStateAccessor
-	configReader  GroupConfigReader
-	auth          command.Authorizer
+	subscriber     GroupSubscriber
+	groupChecker   ChannelGroupChecker
+	mappingReader  GroupMappingReader
+	mappingWriter  GroupMappingWriter
+	announcer      AnnouncementUpdater
+	stateAccessor  AnnouncementStateAccessor
+	configReader   GroupConfigReader
+	auth           command.Authorizer
+	channelManager ChannelGroupChannelManager
 }
 
 // NewGroupHandler creates a new GroupHandler.
@@ -104,6 +112,12 @@ func NewGroupHandler(
 	}
 }
 
+// WithChannelManager sets the channel manager used by the course subcommand.
+func (h *GroupHandler) WithChannelManager(m ChannelGroupChannelManager) *GroupHandler {
+	h.channelManager = m
+	return h
+}
+
 func (h *GroupHandler) Metadata() command.Metadata {
 	return command.Metadata{
 		Name:    "group",
@@ -116,6 +130,7 @@ func (h *GroupHandler) Metadata() command.Metadata {
 			"group create <short_name> <emoji_name>\n" +
 			"group available                       (user groups visible in Zulip — use the IDs with `group mapping set`)\n" +
 			"group mapping <list|set <short_name> <zulip_user_group_id> <emoji_name>|disable <short_name>>\n" +
+			"group channel <add|remove|create> <channel_id_or_name> <short_name>\n" +
 			"group announce [set-message <message_id>|inspect]",
 		Permission: command.PermOpen,
 	}
@@ -131,7 +146,10 @@ func (h *GroupHandler) Metadata() command.Metadata {
 //	group mapping list                    (admin only)
 //	group mapping set <short_name> <zulip_user_group_id> <emoji_name> (admin only — auto-imports the Zulip group if needed)
 //	group mapping disable <name>          (admin only)
-//	group announce                        (admin only)
+//	group channel add <channel_id> <short_name>    (admin only)
+//	group channel remove <channel_id> <short_name> (admin only)
+//	group channel create <channel_name> <short_name> (admin only)
+//	group course ...                      (alias for group channel ...)
 func (h *GroupHandler) Handle(ctx context.Context, req command.Request) (command.Result, error) {
 	args := req.Invocation.Args
 	if len(args) == 0 {
@@ -149,6 +167,8 @@ func (h *GroupHandler) Handle(ctx context.Context, req command.Request) (command
 		return h.handleAvailable(ctx, req)
 	case "mapping":
 		return h.handleMapping(ctx, req, args[1:])
+	case "channel", "course":
+		return h.handleChannel(ctx, req, args[1:])
 	case "announce":
 		return h.handleAnnounce(ctx, req, args[1:])
 	default:
@@ -182,7 +202,7 @@ func (h *GroupHandler) handleCreate(
 		return command.Result{}, err
 	}
 
-	channelGroupID, err := h.groupChecker.CreateChannelGroup(ctx, shortName)
+	channelGroupID, err := h.groupChecker.CreateChannelGroup(ctx, shortName, true)
 	if err != nil {
 		if isDuplicateZulipUserGroupError(err) {
 			return command.Result{}, command.NewUserError(
@@ -702,6 +722,103 @@ func (h *GroupHandler) handleAnnounceInspect(ctx context.Context) (command.Resul
 	}
 
 	return command.Result{Content: strings.TrimSpace(b.String())}, nil
+}
+
+func (h *GroupHandler) handleChannel(ctx context.Context, req command.Request, args []string) (command.Result, error) {
+	if err := h.auth.Check(ctx, req.Actor, command.PermAdmin); err != nil {
+		return command.Result{}, command.NewUserError("permission denied")
+	}
+	if h.channelManager == nil {
+		return command.Result{}, command.NewUserError("channel command not available")
+	}
+	if len(args) == 0 {
+		return command.Result{}, command.NewUserError(
+			"Usage: `group channel <add|remove|create> <channel_id_or_name> <short_name>`",
+		)
+	}
+	switch args[0] {
+	case "add":
+		return h.handleChannelAdd(ctx, args[1:])
+	case "remove":
+		return h.handleChannelRemove(ctx, args[1:])
+	case "create":
+		return h.handleChannelCreate(ctx, args[1:])
+	default:
+		return command.Result{}, command.NewUserError(
+			fmt.Sprintf("Unknown channel subcommand %q. Use: add, remove, create", args[0]),
+		)
+	}
+}
+
+func (h *GroupHandler) handleChannelModify(
+	ctx context.Context,
+	subcommand string,
+	args []string,
+	op func(ctx context.Context, groupID, channelID int64) error,
+	successFmt string,
+) (command.Result, error) {
+	if len(args) != 2 { //nolint:mnd // Requires channel_id and short_name.
+		return command.Result{}, command.NewUserError(
+			fmt.Sprintf("Usage: `group channel %s <channel_id> <short_name>`", subcommand),
+		)
+	}
+	channelID, err := strconv.ParseInt(args[0], 10, 64)
+	if err != nil || channelID <= 0 {
+		return command.Result{}, command.NewUserError("channel_id must be a positive integer")
+	}
+	shortName := args[1]
+
+	mapping, found, err := h.mappingReader.GetEmojiGroupMappingByShortName(ctx, shortName)
+	if err != nil {
+		return command.Result{}, err
+	}
+	if !found {
+		return command.Result{}, command.NewUserError(fmt.Sprintf("Unknown channel group %q.", shortName))
+	}
+
+	if err := op(ctx, mapping.ChannelGroupID, channelID); err != nil {
+		return command.Result{}, fmt.Errorf("%s channel in group: %w", subcommand, err)
+	}
+	return command.Result{Content: fmt.Sprintf(successFmt, channelID, mapping.ShortName)}, nil
+}
+
+func (h *GroupHandler) handleChannelAdd(ctx context.Context, args []string) (command.Result, error) {
+	return h.handleChannelModify(ctx, "add", args, h.channelManager.AddChannelToGroup,
+		"Added channel %d to **%s**.")
+}
+
+func (h *GroupHandler) handleChannelRemove(ctx context.Context, args []string) (command.Result, error) {
+	return h.handleChannelModify(ctx, "remove", args, h.channelManager.RemoveChannelFromGroup,
+		"Removed channel %d from **%s**.")
+}
+
+func (h *GroupHandler) handleChannelCreate(ctx context.Context, args []string) (command.Result, error) {
+	if len(args) != 2 { //nolint:mnd // Requires channel_name and short_name.
+		return command.Result{}, command.NewUserError("Usage: `group channel create <channel_name> <short_name>`")
+	}
+	channelName := args[0]
+	shortName := args[1]
+
+	mapping, found, err := h.mappingReader.GetEmojiGroupMappingByShortName(ctx, shortName)
+	if err != nil {
+		return command.Result{}, err
+	}
+	if !found {
+		return command.Result{}, command.NewUserError(fmt.Sprintf("Unknown channel group %q.", shortName))
+	}
+
+	channelID, err := h.channelManager.CreateChannelAndAddToGroup(ctx, channelName, mapping.ChannelGroupID)
+	if err != nil {
+		return command.Result{}, fmt.Errorf("create channel and add to group: %w", err)
+	}
+	return command.Result{
+		Content: fmt.Sprintf(
+			"Created channel **%s** (id=%d) and added it to **%s**.",
+			channelName,
+			channelID,
+			mapping.ShortName,
+		),
+	}, nil
 }
 
 func (h *GroupHandler) triggerAnnouncementUpdate(ctx context.Context) {
