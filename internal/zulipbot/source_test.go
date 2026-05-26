@@ -68,7 +68,7 @@ func TestZulipSourceRegisterSendsBroadQueueCapabilities(t *testing.T) {
 	}
 	source := zulipbot.NewZulipSource(client)
 
-	state, err := source.Register(context.Background(), zulipbot.RegisterOptions{})
+	state, err := source.Register(context.Background())
 	if err != nil {
 		t.Fatalf("Register() failed: %v", err)
 	}
@@ -146,11 +146,11 @@ func TestZulipSourceRegisterToleratesUnknownResponseFields(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			source := newRegisterTestSource(t, func(w http.ResponseWriter, r *http.Request) {
+			source := newRegisterTestSource(t, func(w http.ResponseWriter, _ *http.Request) {
 				writeSourceTestJSON(t, w, tc.body)
 			})
 
-			state, err := source.Register(context.Background(), zulipbot.RegisterOptions{})
+			state, err := source.Register(context.Background())
 			if err != nil {
 				t.Fatalf("Register() failed: %v", err)
 			}
@@ -169,12 +169,12 @@ func TestZulipSourceRegisterToleratesUnknownResponseFields(t *testing.T) {
 func TestZulipSourceRegisterSurfacesBadRequestErrors(t *testing.T) {
 	t.Parallel()
 
-	source := newRegisterTestSource(t, func(w http.ResponseWriter, r *http.Request) {
+	source := newRegisterTestSource(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		writeSourceTestJSON(t, w, `{"result":"error","code":"BAD_REQUEST","msg":"bad register request"}`)
 	})
 
-	_, err := source.Register(context.Background(), zulipbot.RegisterOptions{})
+	_, err := source.Register(context.Background())
 	if err == nil {
 		t.Fatal("Register() succeeded, want BAD_REQUEST error")
 	}

@@ -12,6 +12,11 @@ import (
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/configsvc"
 )
 
+const (
+	configGetArgCount = 2
+	configSetArgCount = 3
+)
+
 type ConfigHandler struct {
 	service *configsvc.Service
 }
@@ -76,7 +81,7 @@ func (handler *ConfigHandler) list(ctx context.Context, req command.Request) (co
 }
 
 func (handler *ConfigHandler) get(ctx context.Context, req command.Request) (command.Result, error) {
-	if len(req.Invocation.Args) != 2 {
+	if len(req.Invocation.Args) != configGetArgCount {
 		return command.Result{}, command.NewUserError("Usage: `config get <key>`")
 	}
 	value, err := handler.service.Get(ctx, req.Actor, req.Invocation.Args[1])
@@ -89,7 +94,7 @@ func (handler *ConfigHandler) get(ctx context.Context, req command.Request) (com
 }
 
 func (handler *ConfigHandler) set(ctx context.Context, req command.Request) (command.Result, error) {
-	if len(req.Invocation.Args) != 3 {
+	if len(req.Invocation.Args) != configSetArgCount {
 		return command.Result{}, command.NewUserError("Usage: `config set <key> <value>`")
 	}
 	_, newValue, err := handler.service.Set(

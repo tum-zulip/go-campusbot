@@ -21,10 +21,6 @@ type QueueState struct {
 	LastEventID int64
 }
 
-// RegisterOptions holds options for registering a Zulip event queue.
-// It is intentionally empty for now; kept for forward compatibility.
-type RegisterOptions struct{}
-
 type registerQueueSettings struct {
 	AllPublicChannels bool
 	EventTypes        []events.EventType
@@ -47,7 +43,7 @@ func broadQueueRegisterSettings() registerQueueSettings {
 }
 
 type Source interface {
-	Register(ctx context.Context, opts RegisterOptions) (QueueState, error)
+	Register(ctx context.Context) (QueueState, error)
 	Check(ctx context.Context, state QueueState) error
 	Poll(ctx context.Context, state QueueState) ([]events.Event, error)
 	Delete(ctx context.Context, queueID string) error
@@ -64,7 +60,7 @@ func NewZulipSource(client zulipclient.Client) *ZulipSource {
 // Register registers a broad Zulip event queue that subscribes to all public
 // channels. We always use AllPublicChannels(true) so the bot receives events
 // from every public channel without needing to be subscribed to them individually.
-func (source *ZulipSource) Register(ctx context.Context, opts RegisterOptions) (QueueState, error) {
+func (source *ZulipSource) Register(ctx context.Context) (QueueState, error) {
 	settings := broadQueueRegisterSettings()
 	resp, httpResp, err := source.client.RegisterQueue(ctx).
 		ApplyMarkdown(false).
@@ -95,7 +91,7 @@ func queueStateFromRegisterHTTPResponse(httpResp *http.Response) (QueueState, er
 		return QueueState{}, errors.New("missing Zulip register response body")
 	}
 	if httpResp.StatusCode < http.StatusOK || httpResp.StatusCode >= http.StatusMultipleChoices {
-		return QueueState{}, fmt.Errorf("Zulip register returned HTTP %s", httpResp.Status)
+		return QueueState{}, fmt.Errorf("zulip register returned HTTP %s", httpResp.Status)
 	}
 
 	body, err := io.ReadAll(httpResp.Body)

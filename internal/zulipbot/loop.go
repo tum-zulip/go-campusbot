@@ -20,6 +20,8 @@ const (
 	processedMessageMaxRows   = 100000
 	defaultMinBackoff         = time.Second
 	defaultMaxBackoff         = 30 * time.Second
+	defaultPollTimeout        = 90 * time.Second
+	backoffMultiplier         = 2
 )
 
 // Messenger dispatches a reply to a target.
@@ -71,7 +73,7 @@ func NewLoop(cfg LoopConfig) (*Loop, error) {
 		cfg.Logger = slog.Default()
 	}
 	if cfg.PollTimeout == 0 {
-		cfg.PollTimeout = 90 * time.Second
+		cfg.PollTimeout = defaultPollTimeout
 	}
 	return &Loop{
 		source:           cfg.Source,
@@ -225,7 +227,7 @@ func (loop *Loop) ensureQueue(ctx context.Context) (QueueState, error) {
 
 func (loop *Loop) registerQueue(ctx context.Context) (QueueState, error) {
 	// Always register with broad options (all public channels, all event types).
-	state, err := loop.source.Register(ctx, RegisterOptions{})
+	state, err := loop.source.Register(ctx)
 	if err != nil {
 		return QueueState{}, err
 	}
@@ -247,6 +249,7 @@ func (loop *Loop) registerQueue(ctx context.Context) (QueueState, error) {
 }
 
 func (loop *Loop) handleEvent(ctx context.Context, event events.Event, state *QueueState) error {
+	//nolint:exhaustive // unsupported event types intentionally fall through to the default state update
 	switch event.GetType() {
 	case events.EventTypeHeartbeat:
 		// Heartbeats are keepalives only; skip storage, just update state.
@@ -406,10 +409,10 @@ func sleep(ctx context.Context, delay time.Duration) error {
 	}
 }
 
-func nextBackoff(current time.Duration, max time.Duration) time.Duration {
-	next := current * 2
-	if next > max {
-		return max
+func nextBackoff(current time.Duration, maxBackoff time.Duration) time.Duration {
+	next := current * backoffMultiplier
+	if next > maxBackoff {
+		return maxBackoff
 	}
 	return next
 }

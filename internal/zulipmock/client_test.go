@@ -14,9 +14,7 @@ import (
 	"github.com/tum-zulip/go-campusbot/internal/zulipmock"
 )
 
-func TestClientImplementsUpstreamClient(t *testing.T) {
-	var _ client.Client = zulipmock.NewClient()
-}
+var _ client.Client = zulipmock.NewClient()
 
 func TestBuilderExecuteReturnsMessageID(t *testing.T) {
 	resp, httpResp, err := zulipmock.NewClient().SendMessage(context.Background()).Execute()

@@ -383,7 +383,7 @@ type fakeSource struct {
 	pollStates     []zulipbot.QueueState
 }
 
-func (source *fakeSource) Register(_ context.Context, _ zulipbot.RegisterOptions) (zulipbot.QueueState, error) {
+func (source *fakeSource) Register(_ context.Context) (zulipbot.QueueState, error) {
 	source.registerCalls++
 	if len(source.registerStates) == 0 {
 		return zulipbot.QueueState{QueueID: "default", LastEventID: 0}, nil
@@ -536,7 +536,7 @@ func TestLoopPollTimeoutRetriesWithoutBackoff(t *testing.T) {
 	// and then returns context.Canceled (causing the loop to exit).
 	pollCallCount := 0
 	source := &callbackSource{
-		registerFn: func(_ context.Context, _ zulipbot.RegisterOptions) (zulipbot.QueueState, error) {
+		registerFn: func(_ context.Context) (zulipbot.QueueState, error) {
 			return zulipbot.QueueState{QueueID: "q1", LastEventID: 0}, nil
 		},
 		checkFn: func(_ context.Context, _ zulipbot.QueueState) error { return nil },
@@ -605,14 +605,14 @@ func TestLoopPollTimeoutDefaultIs90s(t *testing.T) {
 
 // callbackSource is a test Source backed by function callbacks.
 type callbackSource struct {
-	registerFn func(ctx context.Context, opts zulipbot.RegisterOptions) (zulipbot.QueueState, error)
+	registerFn func(ctx context.Context) (zulipbot.QueueState, error)
 	checkFn    func(ctx context.Context, state zulipbot.QueueState) error
 	pollFn     func(ctx context.Context, state zulipbot.QueueState) ([]events.Event, error)
 	deleteFn   func(ctx context.Context, queueID string) error
 }
 
-func (s *callbackSource) Register(ctx context.Context, opts zulipbot.RegisterOptions) (zulipbot.QueueState, error) {
-	return s.registerFn(ctx, opts)
+func (s *callbackSource) Register(ctx context.Context) (zulipbot.QueueState, error) {
+	return s.registerFn(ctx)
 }
 
 func (s *callbackSource) Check(ctx context.Context, state zulipbot.QueueState) error {

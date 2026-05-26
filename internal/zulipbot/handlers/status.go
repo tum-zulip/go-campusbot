@@ -10,6 +10,11 @@ import (
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/command"
 )
 
+const (
+	secondsPerMinute = 60
+	secondsPerHour   = 60 * secondsPerMinute
+)
+
 // StatusProvider is the interface used by StatusHandler.
 type StatusProvider interface {
 	// UptimeSeconds returns bot uptime in whole seconds.
@@ -56,9 +61,9 @@ func (handler *StatusHandler) Handle(ctx context.Context, req command.Request) (
 	}
 
 	uptimeSec := handler.provider.UptimeSeconds()
-	hours := uptimeSec / 3600
-	minutes := (uptimeSec % 3600) / 60
-	seconds := uptimeSec % 60
+	hours := uptimeSec / secondsPerHour
+	minutes := (uptimeSec % secondsPerHour) / secondsPerMinute
+	seconds := uptimeSec % secondsPerMinute
 
 	accepting := "yes"
 	if !handler.provider.Accepting() {
