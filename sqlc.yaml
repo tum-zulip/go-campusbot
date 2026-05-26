@@ -1,0 +1,11 @@
+version: "2"
+sql:
+  - engine: "sqlite"
+    schema: "internal/zulipbot/storage/sql/schema.sql"
+    queries: "internal/zulipbot/storage/sql/queries.sql"
+    gen:
+      go:
+        package: "db"
+        out: "internal/zulipbot/storage/db"
+        emit_json_tags: false
+        emit_empty_slices: true
