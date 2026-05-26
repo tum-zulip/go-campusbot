@@ -4,7 +4,7 @@ go 1.25.3
 
 require (
 	github.com/mattn/go-sqlite3 v1.14.44
-	github.com/tum-zulip/go-zulip v0.0.0-20251028102634-265e2c9e1a45
+	github.com/tum-zulip/go-zulip v0.0.0-20260526205636-e9da4c8a2816
 )
 
 require (

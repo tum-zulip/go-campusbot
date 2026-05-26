@@ -10,8 +10,8 @@ github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZb
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
 github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu7U=
 github.com/stretchr/testify v1.11.1/go.mod h1:wZwfW3scLgRK+23gO65QZefKpKQRnfz6sD981Nm4B6U=
-github.com/tum-zulip/go-zulip v0.0.0-20251028102634-265e2c9e1a45 h1:4lu+tArZGaQQtskYXJMPjf03klqHTBbwcxFsmKMCb0k=
-github.com/tum-zulip/go-zulip v0.0.0-20251028102634-265e2c9e1a45/go.mod h1:Vb8PqPa8ejnkIg2ZOnkzKmdfvHTd8dZ9fT+o5Cdiahs=
+github.com/tum-zulip/go-zulip v0.0.0-20260526205636-e9da4c8a2816 h1:JZrCHIl34hwHfIbG+YmazQVVwOrQYGax26LfsWwD8cw=
+github.com/tum-zulip/go-zulip v0.0.0-20260526205636-e9da4c8a2816/go.mod h1:Vb8PqPa8ejnkIg2ZOnkzKmdfvHTd8dZ9fT+o5Cdiahs=
 gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c h1:Hei/4ADfdWqJk1ZMxUNpqntNwaWcugrBjAiHlqqRiVk=
 gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c/go.mod h1:JHkPIbrfpd72SG/EVd6muEfDQjcINNoR0C8j2r3qZ4Q=
 gopkg.in/ini.v1 v1.67.0 h1:Dgnx+6+nfE+IfzjUEISNeydPJh9AXNNsWbGP9KzCsOA=
