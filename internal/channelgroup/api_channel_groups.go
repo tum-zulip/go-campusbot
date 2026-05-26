@@ -10,13 +10,14 @@ package channelgroup
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"net/http"
 	"sort"
 	"strconv"
-	"sync"
 
 	"github.com/tum-zulip/go-campusbot/internal/callorigin"
+	channelgroupdb "github.com/tum-zulip/go-campusbot/internal/channelgroup/db"
 	"github.com/tum-zulip/go-zulip/zulip"
 	"github.com/tum-zulip/go-zulip/zulip/api/channels"
 	"github.com/tum-zulip/go-zulip/zulip/client"
@@ -26,11 +27,10 @@ import (
 // via [callorigin] so test doubles can distinguish which logical op issued a
 // low-level call. Unused in production.
 const (
-	originCreate              = "CreateChannelGroup"
-	originDeactivate          = "DeactivateChannelGroup"
-	originUpdateChannels      = "UpdateChannelGroupChannels"
-	originSubscribe           = "SubscribeToChannelGroup"
-	originUnsubscribe         = "UnsubscribeFromChannelGroup"
+	originCreate         = "CreateChannelGroup"
+	originUpdateChannels = "UpdateChannelGroupChannels"
+	originSubscribe      = "SubscribeToChannelGroup"
+	originUnsubscribe    = "UnsubscribeFromChannelGroup"
 )
 
 // Client is the campusbot Zulip client. It is a drop-in replacement for
@@ -48,44 +48,34 @@ type channelGroupClient struct {
 }
 
 // NewClient wraps an existing upstream client.Client with channel-group
-// endpoints. The wrapper does not own the underlying client's lifecycle.
-func NewClient(base client.Client) Client {
-	service := newInMemoryChannelGroups(base)
+// endpoints backed by database. The wrapper does not own either lifecycle.
+func NewClient(base client.Client, database *sql.DB) Client {
+	service := newChannelGroups(base, database)
 	return &channelGroupClient{
 		Client:           base,
 		APIChannelGroups: service,
 	}
 }
 
-type inMemoryChannelGroups struct {
-	base client.Client
-
-	mu     sync.Mutex
-	nextID int64
-	groups map[int64]channelGroupState
+type channelGroups struct {
+	base    client.Client
+	queries *channelgroupdb.Queries
 }
 
-type channelGroupState struct {
-	ChannelGroup
-
-	userGroupID int64
-}
-
-func newInMemoryChannelGroups(base client.Client) *inMemoryChannelGroups {
-	return &inMemoryChannelGroups{
-		base:   base,
-		nextID: 1,
-		groups: make(map[int64]channelGroupState),
+func newChannelGroups(base client.Client, database *sql.DB) *channelGroups {
+	return &channelGroups{
+		base:    base,
+		queries: channelgroupdb.New(database),
 	}
 }
 
-var _ APIChannelGroups = (*inMemoryChannelGroups)(nil)
+var _ APIChannelGroups = (*channelGroups)(nil)
 
-func (s *inMemoryChannelGroups) CreateChannelGroup(ctx context.Context) CreateChannelGroupRequest {
+func (s *channelGroups) CreateChannelGroup(ctx context.Context) CreateChannelGroupRequest {
 	return CreateChannelGroupRequest{ctx: ctx, apiService: s}
 }
 
-func (s *inMemoryChannelGroups) CreateChannelGroupExecute(
+func (s *channelGroups) CreateChannelGroupExecute(
 	r CreateChannelGroupRequest,
 ) (*CreateChannelGroupResponse, *http.Response, error) {
 	r.ctx = callorigin.With(r.ctx, originCreate)
@@ -102,22 +92,19 @@ func (s *inMemoryChannelGroups) CreateChannelGroupExecute(
 		Name:       *r.name,
 		ChannelIDs: nil,
 	}
-	if r.description != nil {
-		group.Description = *r.description
-	}
 	if r.channelIDs != nil {
 		group.ChannelIDs = uniqueInt64s(*r.channelIDs)
 	}
-	group.DirectSubscriberIDs = initialMembers
 
 	userGroupResp, _, err := s.base.CreateUserGroup(r.ctx).
 		Name(group.Name).
-		Description(group.Description).
+		Description("").
 		Members(initialMembers).
 		Execute()
 	if err != nil {
 		return nil, nil, err
 	}
+	group.ID = userGroupResp.GroupID
 
 	if len(group.ChannelIDs) > 0 && len(initialMembers) > 0 {
 		if err = s.subscribeUsersToChannels(r.ctx, group.ChannelIDs, initialMembers); err != nil {
@@ -125,72 +112,39 @@ func (s *inMemoryChannelGroups) CreateChannelGroupExecute(
 		}
 	}
 
-	s.mu.Lock()
-	group.ID = s.nextID
-	s.nextID++
-	s.groups[group.ID] = channelGroupState{
-		ChannelGroup: cloneChannelGroup(group),
-		userGroupID:  userGroupResp.GroupID,
-	}
-	s.mu.Unlock()
-
-	return &CreateChannelGroupResponse{
-		Response:       successResponse(),
-		ChannelGroupID: group.ID,
-	}, nil, nil
-}
-
-func (s *inMemoryChannelGroups) DeactivateChannelGroup(
-	ctx context.Context,
-	channelGroupID int64,
-) DeactivateChannelGroupRequest {
-	return DeactivateChannelGroupRequest{ctx: ctx, apiService: s, channelGroupID: channelGroupID}
-}
-
-func (s *inMemoryChannelGroups) DeactivateChannelGroupExecute(
-	r DeactivateChannelGroupRequest,
-) (*zulip.Response, *http.Response, error) {
-	r.ctx = callorigin.With(r.ctx, originDeactivate)
-	state, err := s.getGroupState(r.channelGroupID)
+	dbGroupID, err := s.queries.CreateChannelGroup(r.ctx, group.ID)
 	if err != nil {
 		return nil, nil, err
 	}
-	if state.Deactivated {
-		return nil, nil, errChannelGroupDeactivated(r.channelGroupID)
-	}
-	if _, _, err := s.base.DeactivateUserGroup(r.ctx, state.userGroupID).Execute(); err != nil {
-		return nil, nil, err
+	for _, channelID := range group.ChannelIDs {
+		if err = s.queries.AddChannelGroupChannel(r.ctx, channelgroupdb.AddChannelGroupChannelParams{
+			ChannelGroupID: dbGroupID,
+			ChannelID:      channelID,
+		}); err != nil {
+			return nil, nil, err
+		}
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	state, ok := s.groups[r.channelGroupID]
-	if !ok {
-		return nil, nil, errChannelGroupNotFound(r.channelGroupID)
-	}
-	state.Deactivated = true
-	s.groups[r.channelGroupID] = state
-	return ptrResponse(successResponse()), nil, nil
+	return &CreateChannelGroupResponse{
+		Response:       successResponse(),
+		ChannelGroupID: dbGroupID,
+	}, nil, nil
 }
 
-func (s *inMemoryChannelGroups) GetChannelGroups(ctx context.Context) GetChannelGroupsRequest {
+func (s *channelGroups) GetChannelGroups(ctx context.Context) GetChannelGroupsRequest {
 	return GetChannelGroupsRequest{ctx: ctx, apiService: s}
 }
 
-func (s *inMemoryChannelGroups) GetChannelGroupsExecute(
+func (s *channelGroups) GetChannelGroupsExecute(
 	r GetChannelGroupsRequest,
 ) (*GetChannelGroupsResponse, *http.Response, error) {
-	includeDeactivated := r.includeDeactivated != nil && *r.includeDeactivated
-	states := s.getGroupStates(includeDeactivated)
-	groups := make([]ChannelGroup, 0, len(states))
-	for _, state := range states {
-		group := cloneChannelGroup(state.ChannelGroup)
-		members, err := s.userGroupMembers(r.ctx, state.userGroupID)
-		if err != nil {
-			return nil, nil, err
-		}
-		group.DirectSubscriberIDs = members
-		groups = append(groups, group)
+	groups, err := s.getGroups(r.ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	groups, err = s.withUserGroupNames(r.ctx, groups)
+	if err != nil {
+		return nil, nil, err
 	}
 
 	sort.Slice(groups, func(i, j int) bool { return groups[i].ID < groups[j].ID })
@@ -200,43 +154,41 @@ func (s *inMemoryChannelGroups) GetChannelGroupsExecute(
 	}, nil, nil
 }
 
-func (s *inMemoryChannelGroups) GetChannelGroup(
+func (s *channelGroups) GetChannelGroup(
 	ctx context.Context,
 	channelGroupID int64,
 ) GetChannelGroupRequest {
 	return GetChannelGroupRequest{ctx: ctx, apiService: s, channelGroupID: channelGroupID}
 }
 
-func (s *inMemoryChannelGroups) GetChannelGroupExecute(
+func (s *channelGroups) GetChannelGroupExecute(
 	r GetChannelGroupRequest,
 ) (*GetChannelGroupResponse, *http.Response, error) {
-	state, err := s.getGroupState(r.channelGroupID)
+	group, err := s.getGroup(r.ctx, r.channelGroupID)
 	if err != nil {
 		return nil, nil, err
 	}
-	group := cloneChannelGroup(state.ChannelGroup)
-	members, err := s.userGroupMembers(r.ctx, state.userGroupID)
+	group, err = s.withUserGroupName(r.ctx, group)
 	if err != nil {
 		return nil, nil, err
 	}
-	group.DirectSubscriberIDs = members
 	return &GetChannelGroupResponse{
 		Response:     successResponse(),
 		ChannelGroup: group,
 	}, nil, nil
 }
 
-func (s *inMemoryChannelGroups) GetChannelGroupChannels(
+func (s *channelGroups) GetChannelGroupChannels(
 	ctx context.Context,
 	channelGroupID int64,
 ) GetChannelGroupChannelsRequest {
 	return GetChannelGroupChannelsRequest{ctx: ctx, apiService: s, channelGroupID: channelGroupID}
 }
 
-func (s *inMemoryChannelGroups) GetChannelGroupChannelsExecute(
+func (s *channelGroups) GetChannelGroupChannelsExecute(
 	r GetChannelGroupChannelsRequest,
 ) (*GetChannelGroupChannelsResponse, *http.Response, error) {
-	group, err := s.getGroup(r.channelGroupID)
+	group, err := s.getGroup(r.ctx, r.channelGroupID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -246,7 +198,7 @@ func (s *inMemoryChannelGroups) GetChannelGroupChannelsExecute(
 	}, nil, nil
 }
 
-func (s *inMemoryChannelGroups) GetIsChannelInChannelGroup(
+func (s *channelGroups) GetIsChannelInChannelGroup(
 	ctx context.Context,
 	channelGroupID int64,
 	channelID int64,
@@ -259,10 +211,10 @@ func (s *inMemoryChannelGroups) GetIsChannelInChannelGroup(
 	}
 }
 
-func (s *inMemoryChannelGroups) GetIsChannelInChannelGroupExecute(
+func (s *channelGroups) GetIsChannelInChannelGroupExecute(
 	r GetIsChannelInChannelGroupRequest,
 ) (*GetIsChannelInChannelGroupResponse, *http.Response, error) {
-	group, err := s.getGroup(r.channelGroupID)
+	group, err := s.getGroup(r.ctx, r.channelGroupID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -272,28 +224,25 @@ func (s *inMemoryChannelGroups) GetIsChannelInChannelGroupExecute(
 	}, nil, nil
 }
 
-func (s *inMemoryChannelGroups) UpdateChannelGroupChannels(
+func (s *channelGroups) UpdateChannelGroupChannels(
 	ctx context.Context,
 	channelGroupID int64,
 ) UpdateChannelGroupChannelsRequest {
 	return UpdateChannelGroupChannelsRequest{ctx: ctx, apiService: s, channelGroupID: channelGroupID}
 }
 
-func (s *inMemoryChannelGroups) UpdateChannelGroupChannelsExecute(
+func (s *channelGroups) UpdateChannelGroupChannelsExecute(
 	r UpdateChannelGroupChannelsRequest,
 ) (*zulip.Response, *http.Response, error) {
 	r.ctx = callorigin.With(r.ctx, originUpdateChannels)
-	state, err := s.getGroupState(r.channelGroupID)
+	group, err := s.getGroup(r.ctx, r.channelGroupID)
 	if err != nil {
 		return nil, nil, err
 	}
-	if state.Deactivated {
-		return nil, nil, errChannelGroupDeactivated(r.channelGroupID)
-	}
 
-	added := idsToAdd(state.ChannelIDs, r.addChannelIDs)
-	deleted := idsToDelete(state.ChannelIDs, r.deleteChannelIDs)
-	members, err := s.userGroupMembersForChannelUpdates(r.ctx, state.userGroupID, added, deleted)
+	added := idsToAdd(group.ChannelIDs, r.addChannelIDs)
+	deleted := idsToDelete(group.ChannelIDs, r.deleteChannelIDs)
+	members, err := s.userGroupMembersForChannelUpdates(r.ctx, group.ID, added, deleted)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -308,14 +257,14 @@ func (s *inMemoryChannelGroups) UpdateChannelGroupChannelsExecute(
 		}
 	}
 
-	finalState, err := s.updateGroupChannels(r.channelGroupID, r.addChannelIDs, r.deleteChannelIDs)
+	finalState, err := s.updateGroupChannels(r.ctx, r.channelGroupID, r.addChannelIDs, r.deleteChannelIDs)
 	if err != nil {
 		return nil, nil, err
 	}
 	if err = s.cleanupDeletedChannels(r.ctx, deleted, members, finalState.ChannelIDs); err != nil {
 		return nil, nil, err
 	}
-	if err = s.cleanupAddedChannels(r.ctx, added, members, state.userGroupID, finalState.ChannelIDs); err != nil {
+	if err = s.cleanupAddedChannels(r.ctx, added, members, group.ID, finalState.ChannelIDs); err != nil {
 		return nil, nil, err
 	}
 	if err = s.reconcileChannelGroup(r.ctx, r.channelGroupID); err != nil {
@@ -325,21 +274,21 @@ func (s *inMemoryChannelGroups) UpdateChannelGroupChannelsExecute(
 	return ptrResponse(successResponse()), nil, nil
 }
 
-func (s *inMemoryChannelGroups) GetChannelGroupSubscribers(
+func (s *channelGroups) GetChannelGroupSubscribers(
 	ctx context.Context,
 	channelGroupID int64,
 ) GetChannelGroupSubscribersRequest {
 	return GetChannelGroupSubscribersRequest{ctx: ctx, apiService: s, channelGroupID: channelGroupID}
 }
 
-func (s *inMemoryChannelGroups) GetChannelGroupSubscribersExecute(
+func (s *channelGroups) GetChannelGroupSubscribersExecute(
 	r GetChannelGroupSubscribersRequest,
 ) (*GetChannelGroupSubscribersResponse, *http.Response, error) {
-	state, err := s.getGroupState(r.channelGroupID)
+	group, err := s.getGroup(r.ctx, r.channelGroupID)
 	if err != nil {
 		return nil, nil, err
 	}
-	members, err := s.userGroupMembers(r.ctx, state.userGroupID)
+	members, err := s.userGroupMembers(r.ctx, group.ID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -349,7 +298,7 @@ func (s *inMemoryChannelGroups) GetChannelGroupSubscribersExecute(
 	}, nil, nil
 }
 
-func (s *inMemoryChannelGroups) GetIsChannelGroupSubscriber(
+func (s *channelGroups) GetIsChannelGroupSubscriber(
 	ctx context.Context,
 	channelGroupID int64,
 	userID int64,
@@ -362,14 +311,14 @@ func (s *inMemoryChannelGroups) GetIsChannelGroupSubscriber(
 	}
 }
 
-func (s *inMemoryChannelGroups) GetIsChannelGroupSubscriberExecute(
+func (s *channelGroups) GetIsChannelGroupSubscriberExecute(
 	r GetIsChannelGroupSubscriberRequest,
 ) (*GetIsChannelGroupSubscriberResponse, *http.Response, error) {
-	state, err := s.getGroupState(r.channelGroupID)
+	group, err := s.getGroup(r.ctx, r.channelGroupID)
 	if err != nil {
 		return nil, nil, err
 	}
-	resp, _, err := s.base.GetIsUserGroupMember(r.ctx, state.userGroupID, r.userID).DirectMemberOnly(true).Execute()
+	resp, _, err := s.base.GetIsUserGroupMember(r.ctx, group.ID, r.userID).DirectMemberOnly(true).Execute()
 	if err != nil {
 		return nil, nil, err
 	}
@@ -379,23 +328,20 @@ func (s *inMemoryChannelGroups) GetIsChannelGroupSubscriberExecute(
 	}, nil, nil
 }
 
-func (s *inMemoryChannelGroups) SubscribeToChannelGroup(
+func (s *channelGroups) SubscribeToChannelGroup(
 	ctx context.Context,
 	channelGroupID int64,
 ) SubscribeToChannelGroupRequest {
 	return SubscribeToChannelGroupRequest{ctx: ctx, apiService: s, channelGroupID: channelGroupID}
 }
 
-func (s *inMemoryChannelGroups) SubscribeToChannelGroupExecute(
+func (s *channelGroups) SubscribeToChannelGroupExecute(
 	r SubscribeToChannelGroupRequest,
 ) (*SubscribeToChannelGroupResponse, *http.Response, error) {
 	r.ctx = callorigin.With(r.ctx, originSubscribe)
-	state, err := s.getGroupState(r.channelGroupID)
+	group, err := s.getGroup(r.ctx, r.channelGroupID)
 	if err != nil {
 		return nil, nil, err
-	}
-	if state.Deactivated {
-		return nil, nil, errChannelGroupDeactivated(r.channelGroupID)
 	}
 
 	userIDs, err := userIDPrincipals(r.principals)
@@ -406,21 +352,21 @@ func (s *inMemoryChannelGroups) SubscribeToChannelGroupExecute(
 		return nil, nil, errors.New("principals with user IDs are required")
 	}
 
-	if len(state.ChannelIDs) > 0 {
-		if err = s.subscribeUsersToChannels(r.ctx, state.ChannelIDs, userIDs); err != nil {
+	if len(group.ChannelIDs) > 0 {
+		if err = s.subscribeUsersToChannels(r.ctx, group.ChannelIDs, userIDs); err != nil {
 			return nil, nil, err
 		}
 	}
-	_, _, err = s.base.UpdateUserGroupMembers(r.ctx, state.userGroupID).Add(userIDs).Execute()
+	_, _, err = s.base.UpdateUserGroupMembers(r.ctx, group.ID).Add(userIDs).Execute()
 	if err != nil {
-		_ = s.unsubscribeUsersFromChannels(r.ctx, state.ChannelIDs, userIDs)
+		_ = s.unsubscribeUsersFromChannels(r.ctx, group.ChannelIDs, userIDs)
 		return nil, nil, err
 	}
-	finalState, err := s.updateDirectSubscribers(r.channelGroupID, userIDs, nil)
+	finalState, err := s.getGroup(r.ctx, r.channelGroupID)
 	if err != nil {
 		return nil, nil, err
 	}
-	staleChannels := removeInt64s(state.ChannelIDs, finalState.ChannelIDs)
+	staleChannels := removeInt64s(group.ChannelIDs, finalState.ChannelIDs)
 	if len(staleChannels) > 0 {
 		if err = s.unsubscribeUsersFromChannels(r.ctx, staleChannels, userIDs); err != nil {
 			return nil, nil, err
@@ -429,29 +375,36 @@ func (s *inMemoryChannelGroups) SubscribeToChannelGroupExecute(
 	if err = s.reconcileChannelGroup(r.ctx, r.channelGroupID); err != nil {
 		return nil, nil, err
 	}
+	latestState, err := s.getGroup(r.ctx, r.channelGroupID)
+	if err != nil {
+		return nil, nil, err
+	}
+	staleChannels = removeInt64s(group.ChannelIDs, latestState.ChannelIDs)
+	if len(staleChannels) > 0 {
+		if err = s.unsubscribeUsersFromChannels(r.ctx, staleChannels, userIDs); err != nil {
+			return nil, nil, err
+		}
+	}
 
 	return &SubscribeToChannelGroupResponse{
 		Response: successResponse(),
 	}, nil, nil
 }
 
-func (s *inMemoryChannelGroups) UnsubscribeFromChannelGroup(
+func (s *channelGroups) UnsubscribeFromChannelGroup(
 	ctx context.Context,
 	channelGroupID int64,
 ) UnsubscribeFromChannelGroupRequest {
 	return UnsubscribeFromChannelGroupRequest{ctx: ctx, apiService: s, channelGroupID: channelGroupID}
 }
 
-func (s *inMemoryChannelGroups) UnsubscribeFromChannelGroupExecute(
+func (s *channelGroups) UnsubscribeFromChannelGroupExecute(
 	r UnsubscribeFromChannelGroupRequest,
 ) (*UnsubscribeFromChannelGroupResponse, *http.Response, error) {
 	r.ctx = callorigin.With(r.ctx, originUnsubscribe)
-	state, err := s.getGroupState(r.channelGroupID)
+	group, err := s.getGroup(r.ctx, r.channelGroupID)
 	if err != nil {
 		return nil, nil, err
-	}
-	if state.Deactivated {
-		return nil, nil, errChannelGroupDeactivated(r.channelGroupID)
 	}
 
 	userIDs, err := userIDPrincipals(r.principals)
@@ -462,21 +415,21 @@ func (s *inMemoryChannelGroups) UnsubscribeFromChannelGroupExecute(
 		return nil, nil, errors.New("principals with user IDs are required")
 	}
 
-	if len(state.ChannelIDs) > 0 {
-		if err = s.unsubscribeUsersFromChannels(r.ctx, state.ChannelIDs, userIDs); err != nil {
+	if len(group.ChannelIDs) > 0 {
+		if err = s.unsubscribeUsersFromChannels(r.ctx, group.ChannelIDs, userIDs); err != nil {
 			return nil, nil, err
 		}
 	}
-	_, _, err = s.base.UpdateUserGroupMembers(r.ctx, state.userGroupID).Delete(userIDs).Execute()
+	_, _, err = s.base.UpdateUserGroupMembers(r.ctx, group.ID).Delete(userIDs).Execute()
 	if err != nil {
-		_ = s.subscribeUsersToChannels(r.ctx, state.ChannelIDs, userIDs)
+		_ = s.subscribeUsersToChannels(r.ctx, group.ChannelIDs, userIDs)
 		return nil, nil, err
 	}
-	finalState, err := s.updateDirectSubscribers(r.channelGroupID, nil, userIDs)
+	finalState, err := s.getGroup(r.ctx, r.channelGroupID)
 	if err != nil {
 		return nil, nil, err
 	}
-	addedWhileUnsubscribing := removeInt64s(finalState.ChannelIDs, state.ChannelIDs)
+	addedWhileUnsubscribing := removeInt64s(finalState.ChannelIDs, group.ChannelIDs)
 	if len(addedWhileUnsubscribing) > 0 {
 		if err = s.unsubscribeUsersFromChannels(r.ctx, addedWhileUnsubscribing, userIDs); err != nil {
 			return nil, nil, err
@@ -488,93 +441,72 @@ func (s *inMemoryChannelGroups) UnsubscribeFromChannelGroupExecute(
 	}, nil, nil
 }
 
-func (s *inMemoryChannelGroups) getGroup(channelGroupID int64) (ChannelGroup, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	state, ok := s.groups[channelGroupID]
-	if !ok {
-		return ChannelGroup{}, errChannelGroupNotFound(channelGroupID)
-	}
-	return cloneChannelGroup(state.ChannelGroup), nil
-}
-
-func (s *inMemoryChannelGroups) getGroupState(channelGroupID int64) (channelGroupState, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	state, ok := s.groups[channelGroupID]
-	if !ok {
-		return channelGroupState{}, errChannelGroupNotFound(channelGroupID)
-	}
-	return cloneChannelGroupState(state), nil
-}
-
-func (s *inMemoryChannelGroups) getGroupStates(includeDeactivated bool) []channelGroupState {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	states := make([]channelGroupState, 0, len(s.groups))
-	for _, state := range s.groups {
-		if state.Deactivated && !includeDeactivated {
-			continue
+func (s *channelGroups) getGroup(ctx context.Context, channelGroupID int64) (ChannelGroup, error) {
+	dbGroupID, err := s.queries.GetChannelGroup(ctx, channelGroupID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ChannelGroup{}, errChannelGroupNotFound(channelGroupID)
 		}
-		states = append(states, cloneChannelGroupState(state))
+		return ChannelGroup{}, err
 	}
-	return states
+	channels, err := s.queries.ListChannelGroupChannels(ctx, channelGroupID)
+	if err != nil {
+		return ChannelGroup{}, err
+	}
+	return channelGroupFromDB(dbGroupID, channels), nil
 }
 
-func (s *inMemoryChannelGroups) updateGroupChannels(
+func (s *channelGroups) getGroups(ctx context.Context) ([]ChannelGroup, error) {
+	dbGroupIDs, err := s.queries.ListChannelGroups(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	groups := make([]ChannelGroup, 0, len(dbGroupIDs))
+	for _, dbGroupID := range dbGroupIDs {
+		var channels []int64
+		channels, err = s.queries.ListChannelGroupChannels(ctx, dbGroupID)
+		if err != nil {
+			return nil, err
+		}
+		groups = append(groups, channelGroupFromDB(dbGroupID, channels))
+	}
+	return groups, nil
+}
+
+func (s *channelGroups) updateGroupChannels(
+	ctx context.Context,
 	channelGroupID int64,
 	addChannelIDs *[]int64,
 	deleteChannelIDs *[]int64,
-) (channelGroupState, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	state, ok := s.groups[channelGroupID]
-	if !ok {
-		return channelGroupState{}, errChannelGroupNotFound(channelGroupID)
-	}
-	if state.Deactivated {
-		return channelGroupState{}, errChannelGroupDeactivated(channelGroupID)
+) (ChannelGroup, error) {
+	if _, err := s.getGroup(ctx, channelGroupID); err != nil {
+		return ChannelGroup{}, err
 	}
 	if deleteChannelIDs != nil {
-		state.ChannelIDs = removeInt64s(state.ChannelIDs, uniqueInt64s(*deleteChannelIDs))
+		for _, channelID := range uniqueInt64s(*deleteChannelIDs) {
+			if err := s.queries.RemoveChannelGroupChannel(ctx, channelgroupdb.RemoveChannelGroupChannelParams{
+				ChannelGroupID: channelGroupID,
+				ChannelID:      channelID,
+			}); err != nil {
+				return ChannelGroup{}, err
+			}
+		}
 	}
 	if addChannelIDs != nil {
-		state.ChannelIDs = uniqueInt64s(append(state.ChannelIDs, uniqueInt64s(*addChannelIDs)...))
+		for _, channelID := range uniqueInt64s(*addChannelIDs) {
+			if err := s.queries.AddChannelGroupChannel(ctx, channelgroupdb.AddChannelGroupChannelParams{
+				ChannelGroupID: channelGroupID,
+				ChannelID:      channelID,
+			}); err != nil {
+				return ChannelGroup{}, err
+			}
+		}
 	}
-	s.groups[channelGroupID] = state
-	return cloneChannelGroupState(state), nil
+	return s.getGroup(ctx, channelGroupID)
 }
 
-func (s *inMemoryChannelGroups) updateDirectSubscribers(
-	channelGroupID int64,
-	addUserIDs []int64,
-	deleteUserIDs []int64,
-) (channelGroupState, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	state, ok := s.groups[channelGroupID]
-	if !ok {
-		return channelGroupState{}, errChannelGroupNotFound(channelGroupID)
-	}
-	if state.Deactivated {
-		return channelGroupState{}, errChannelGroupDeactivated(channelGroupID)
-	}
-	if len(deleteUserIDs) > 0 {
-		state.DirectSubscriberIDs = removeInt64s(state.DirectSubscriberIDs, deleteUserIDs)
-	}
-	if len(addUserIDs) > 0 {
-		state.DirectSubscriberIDs = uniqueInt64s(append(state.DirectSubscriberIDs, addUserIDs...))
-	}
-	s.groups[channelGroupID] = state
-	return cloneChannelGroupState(state), nil
-}
-
-func (s *inMemoryChannelGroups) cleanupDeletedChannels(
+func (s *channelGroups) cleanupDeletedChannels(
 	ctx context.Context,
 	deletedChannelIDs []int64,
 	userIDs []int64,
@@ -587,7 +519,7 @@ func (s *inMemoryChannelGroups) cleanupDeletedChannels(
 	return s.unsubscribeUsersFromChannels(ctx, channelsToClean, userIDs)
 }
 
-func (s *inMemoryChannelGroups) cleanupAddedChannels(
+func (s *channelGroups) cleanupAddedChannels(
 	ctx context.Context,
 	addedChannelIDs []int64,
 	previousUserIDs []int64,
@@ -609,25 +541,25 @@ func (s *inMemoryChannelGroups) cleanupAddedChannels(
 	return s.unsubscribeUsersFromChannels(ctx, channelsToClean, staleUserIDs)
 }
 
-func (s *inMemoryChannelGroups) reconcileChannelGroup(ctx context.Context, channelGroupID int64) error {
-	state, err := s.getGroupState(channelGroupID)
+func (s *channelGroups) reconcileChannelGroup(ctx context.Context, channelGroupID int64) error {
+	group, err := s.getGroup(ctx, channelGroupID)
 	if err != nil {
 		return err
 	}
-	if state.Deactivated || len(state.ChannelIDs) == 0 {
+	if len(group.ChannelIDs) == 0 {
 		return nil
 	}
-	members, err := s.userGroupMembers(ctx, state.userGroupID)
+	members, err := s.userGroupMembers(ctx, group.ID)
 	if err != nil {
 		return err
 	}
 	if len(members) == 0 {
 		return nil
 	}
-	return s.subscribeUsersToChannels(ctx, state.ChannelIDs, members)
+	return s.subscribeUsersToChannels(ctx, group.ChannelIDs, members)
 }
 
-func (s *inMemoryChannelGroups) subscribeUsersToChannels(
+func (s *channelGroups) subscribeUsersToChannels(
 	ctx context.Context,
 	channelIDs []int64,
 	userIDs []int64,
@@ -643,7 +575,7 @@ func (s *inMemoryChannelGroups) subscribeUsersToChannels(
 	return err
 }
 
-func (s *inMemoryChannelGroups) unsubscribeUsersFromChannels(
+func (s *channelGroups) unsubscribeUsersFromChannels(
 	ctx context.Context,
 	channelIDs []int64,
 	userIDs []int64,
@@ -659,7 +591,7 @@ func (s *inMemoryChannelGroups) unsubscribeUsersFromChannels(
 	return err
 }
 
-func (s *inMemoryChannelGroups) userGroupMembersForChannelUpdates(
+func (s *channelGroups) userGroupMembersForChannelUpdates(
 	ctx context.Context,
 	userGroupID int64,
 	added []int64,
@@ -671,7 +603,7 @@ func (s *inMemoryChannelGroups) userGroupMembersForChannelUpdates(
 	return s.userGroupMembers(ctx, userGroupID)
 }
 
-func (s *inMemoryChannelGroups) subscriptionRequests(
+func (s *channelGroups) subscriptionRequests(
 	ctx context.Context,
 	channelIDs []int64,
 ) ([]channels.SubscriptionRequest, error) {
@@ -686,7 +618,7 @@ func (s *inMemoryChannelGroups) subscriptionRequests(
 	return subscriptions, nil
 }
 
-func (s *inMemoryChannelGroups) channelNames(ctx context.Context, channelIDs []int64) ([]string, error) {
+func (s *channelGroups) channelNames(ctx context.Context, channelIDs []int64) ([]string, error) {
 	names := make([]string, 0, len(channelIDs))
 	for _, channelID := range channelIDs {
 		resp, _, err := s.base.GetChannelByID(ctx, channelID).Execute()
@@ -698,12 +630,52 @@ func (s *inMemoryChannelGroups) channelNames(ctx context.Context, channelIDs []i
 	return names, nil
 }
 
-func (s *inMemoryChannelGroups) userGroupMembers(ctx context.Context, userGroupID int64) ([]int64, error) {
+func (s *channelGroups) userGroupMembers(ctx context.Context, userGroupID int64) ([]int64, error) {
 	resp, _, err := s.base.GetUserGroupMembers(ctx, userGroupID).DirectMemberOnly(true).Execute()
 	if err != nil {
 		return nil, err
 	}
 	return uniqueInt64s(resp.Members), nil
+}
+
+func (s *channelGroups) withUserGroupName(ctx context.Context, group ChannelGroup) (ChannelGroup, error) {
+	groups, err := s.withUserGroupNames(ctx, []ChannelGroup{group})
+	if err != nil {
+		return ChannelGroup{}, err
+	}
+	return groups[0], nil
+}
+
+func (s *channelGroups) withUserGroupNames(ctx context.Context, groups []ChannelGroup) ([]ChannelGroup, error) {
+	if len(groups) == 0 {
+		return groups, nil
+	}
+	resp, _, err := s.base.GetUserGroups(ctx).IncludeDeactivatedGroups(true).Execute()
+	if err != nil {
+		return nil, err
+	}
+	names := make(map[int64]string, len(resp.UserGroups))
+	for _, userGroup := range resp.UserGroups {
+		names[userGroup.ID] = userGroup.Name
+	}
+	hydrated := make([]ChannelGroup, 0, len(groups))
+	for _, group := range groups {
+		name, ok := names[group.ID]
+		if !ok {
+			return nil, errChannelGroupNotFound(group.ID)
+		}
+		group = cloneChannelGroup(group)
+		group.Name = name
+		hydrated = append(hydrated, group)
+	}
+	return hydrated, nil
+}
+
+func channelGroupFromDB(id int64, channelIDs []int64) ChannelGroup {
+	return ChannelGroup{
+		ID:         id,
+		ChannelIDs: uniqueInt64s(channelIDs),
+	}
 }
 
 func successResponse() zulip.Response {
@@ -718,19 +690,9 @@ func errChannelGroupNotFound(channelGroupID int64) error {
 	return errors.New("channel group " + strconv.FormatInt(channelGroupID, 10) + " not found")
 }
 
-func errChannelGroupDeactivated(channelGroupID int64) error {
-	return errors.New("channel group " + strconv.FormatInt(channelGroupID, 10) + " is deactivated")
-}
-
 func cloneChannelGroup(group ChannelGroup) ChannelGroup {
 	group.ChannelIDs = append([]int64(nil), group.ChannelIDs...)
-	group.DirectSubscriberIDs = append([]int64(nil), group.DirectSubscriberIDs...)
 	return group
-}
-
-func cloneChannelGroupState(state channelGroupState) channelGroupState {
-	state.ChannelGroup = cloneChannelGroup(state.ChannelGroup)
-	return state
 }
 
 func userIDPrincipals(principals *zulip.Principals) ([]int64, error) {
@@ -818,12 +780,6 @@ type APIChannelGroups interface {
 	CreateChannelGroup(ctx context.Context) CreateChannelGroupRequest
 	CreateChannelGroupExecute(r CreateChannelGroupRequest) (*CreateChannelGroupResponse, *http.Response, error)
 
-	// DeactivateChannelGroup deactivates a channel group. Existing
-	// subscribers retain their direct subscriptions to the channels
-	// that were in the group; the group itself becomes inactive.
-	DeactivateChannelGroup(ctx context.Context, channelGroupID int64) DeactivateChannelGroupRequest
-	DeactivateChannelGroupExecute(r DeactivateChannelGroupRequest) (*zulip.Response, *http.Response, error)
-
 	// GetChannelGroups lists channel groups visible to the acting user.
 	GetChannelGroups(ctx context.Context) GetChannelGroupsRequest
 	GetChannelGroupsExecute(r GetChannelGroupsRequest) (*GetChannelGroupsResponse, *http.Response, error)
@@ -892,17 +848,11 @@ type APIChannelGroups interface {
 // ChannelGroup is the wire representation of a channel group as returned by
 // the server. Field names follow the conventions used by zulip.UserGroup.
 type ChannelGroup struct {
-	ID          int64  `json:"id"`
-	Name        string `json:"name"`
-	Description string `json:"description"`
+	ID   int64  `json:"id"`
+	Name string `json:"name"`
 
 	// ChannelIDs are the channels currently in the group.
 	ChannelIDs []int64 `json:"channel_ids"`
-
-	// DirectSubscriberIDs are mirrored from the backing Zulip user group.
-	DirectSubscriberIDs []int64 `json:"direct_subscriber_ids"`
-
-	Deactivated bool `json:"deactivated"`
 }
 
 // =============================================================================
@@ -919,18 +869,12 @@ type CreateChannelGroupRequest struct {
 	ctx                context.Context
 	apiService         APIChannelGroups
 	name               *string
-	description        *string
 	channelIDs         *[]int64
 	initialSubscribers *zulip.Principals
 }
 
 func (r CreateChannelGroupRequest) Name(name string) CreateChannelGroupRequest {
 	r.name = &name
-	return r
-}
-
-func (r CreateChannelGroupRequest) Description(d string) CreateChannelGroupRequest {
-	r.description = &d
 	return r
 }
 
@@ -954,31 +898,11 @@ type CreateChannelGroupResponse struct {
 	ChannelGroupID int64 `json:"channel_group_id"`
 }
 
-// --- Deactivate -------------------------------------------------------------
-
-type DeactivateChannelGroupRequest struct {
-	ctx            context.Context
-	apiService     APIChannelGroups
-	channelGroupID int64
-}
-
-func (r DeactivateChannelGroupRequest) Execute() (*zulip.Response, *http.Response, error) {
-	return r.apiService.DeactivateChannelGroupExecute(r)
-}
-
 // --- Read -------------------------------------------------------------------
 
 type GetChannelGroupsRequest struct {
-	ctx                context.Context
-	apiService         APIChannelGroups
-	includeDeactivated *bool
-}
-
-// IncludeDeactivated filters in deactivated groups, mirroring upstream
-// "include_deactivated" flags.
-func (r GetChannelGroupsRequest) IncludeDeactivated(b bool) GetChannelGroupsRequest {
-	r.includeDeactivated = &b
-	return r
+	ctx        context.Context
+	apiService APIChannelGroups
 }
 
 func (r GetChannelGroupsRequest) Execute() (*GetChannelGroupsResponse, *http.Response, error) {

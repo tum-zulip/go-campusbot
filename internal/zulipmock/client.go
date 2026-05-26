@@ -41,6 +41,7 @@ const (
 	OperationGetSubscribers         Operation = "GetSubscribers"
 	OperationGetIsUserGroupMember   Operation = "GetIsUserGroupMember"
 	OperationGetUserGroupMembers    Operation = "GetUserGroupMembers"
+	OperationGetUserGroups          Operation = "GetUserGroups"
 	OperationSubscribe              Operation = "Subscribe"
 	OperationUnsubscribe            Operation = "Unsubscribe"
 	OperationUpdateUserGroupMembers Operation = "UpdateUserGroupMembers"
@@ -1046,11 +1047,29 @@ func (Client) GetUserGroupSubgroups(_arg0 context.Context, _arg1 int64) users.Ge
 func (Client) GetUserGroupSubgroupsExecute(_arg0 users.GetUserGroupSubgroupsRequest) (*users.GetUserGroupSubgroupsResponse, *http.Response, error) {
 	return nil, nil, nil
 }
-func (Client) GetUserGroups(_arg0 context.Context) users.GetUserGroupsRequest {
-	return withAPIService(users.GetUserGroupsRequest{}, Client{})
+func (c Client) GetUserGroups(ctx context.Context) users.GetUserGroupsRequest {
+	return withContext(withAPIService(users.GetUserGroupsRequest{}, c), ctx)
 }
-func (Client) GetUserGroupsExecute(_arg0 users.GetUserGroupsRequest) (*users.GetUserGroupsResponse, *http.Response, error) {
-	return nil, nil, nil
+func (c Client) GetUserGroupsExecute(r users.GetUserGroupsRequest) (*users.GetUserGroupsResponse, *http.Response, error) {
+	state := c.ensureState()
+	if err := state.waitForTurn(requestContext(r), OperationGetUserGroups, ""); err != nil {
+		return nil, nil, err
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if err := state.failLocked(OperationGetUserGroups); err != nil {
+		return nil, nil, err
+	}
+
+	groups := make([]zulip.UserGroup, 0, len(state.userGroups))
+	for _, group := range state.userGroups {
+		groups = append(groups, group.group)
+	}
+	sort.Slice(groups, func(i, j int) bool { return groups[i].ID < groups[j].ID })
+	return &users.GetUserGroupsResponse{
+		Response:   successResponse(),
+		UserGroups: groups,
+	}, nil, nil
 }
 func (Client) GetUserPresence(_arg0 context.Context, _arg1 string) users.GetUserPresenceRequest {
 	return withAPIService(users.GetUserPresenceRequest{}, Client{})

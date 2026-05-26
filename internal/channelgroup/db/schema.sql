@@ -1,10 +1,5 @@
 CREATE TABLE channel_groups (
-  id INTEGER PRIMARY KEY,
-  name TEXT NOT NULL,
-  user_group_id INTEGER NOT NULL UNIQUE,
-  deactivated_at TEXT,
-  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  id INTEGER PRIMARY KEY
 );
 
 CREATE TABLE channel_group_channels (
