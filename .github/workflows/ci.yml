@@ -16,6 +16,9 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Generate
+        run: go generate ./...
+
       - name: Test
         run: go test -race ./...
         env:
