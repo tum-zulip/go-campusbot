@@ -92,7 +92,7 @@ func main() {
 		logger.ErrorContext(runCtx, "failed to open database", "error", err)
 		os.Exit(exitFailure)
 	}
-	app, err := zulipbot.NewApp(
+	bot, err := zulipbot.NewBot(
 		startupCtx,
 		zulipbot.RuntimeConfig{
 			Logger:      logger,
@@ -109,19 +109,19 @@ func main() {
 		os.Exit(exitFailure)
 	}
 	defer func() {
-		if err := app.Close(); err != nil {
-			logger.Warn("failed to close app", "error", err)
+		if err := bot.Close(); err != nil {
+			logger.Warn("failed to close bot", "error", err)
 		}
 	}()
 
-	ownUser := app.Bot().OwnUser()
+	ownUser := bot.OwnUser()
 	logger.InfoContext(runCtx, "zulip bot initialized",
 		"user_id", ownUser.UserID,
 		"email", ownUser.Email,
 		"full_name", ownUser.FullName,
 	)
 
-	restartRequested, err := app.Run(runCtx)
+	restartRequested, err := bot.Run(runCtx)
 	if err != nil {
 		logger.ErrorContext(runCtx, "bot stopped with error", "error", err)
 		os.Exit(exitFailure)
@@ -131,7 +131,7 @@ func main() {
 	}
 
 	logger.InfoContext(runCtx, "executing requested restart")
-	if restartErr := restartProcess(runCtx, app, restartExec(dryRunRestart)); restartErr != nil {
+	if restartErr := restartProcess(runCtx, bot, restartExec(dryRunRestart)); restartErr != nil {
 		logger.ErrorContext(runCtx, "failed to restart process", "error", restartErr)
 		os.Exit(exitFailure)
 	}
@@ -166,13 +166,13 @@ func openDatabase(path string) (*sql.DB, error) {
 	return db, nil
 }
 
-func restartProcess(ctx context.Context, app *zulipbot.App, exec execFunc) error {
+func restartProcess(ctx context.Context, bot *zulipbot.Bot, exec execFunc) error {
 	markCtx, cancel := context.WithTimeout(ctx, restartMarkTimeout)
 	defer cancel()
-	if err := app.MarkRestartInProgress(markCtx); err != nil {
+	if err := bot.MarkRestartInProgress(markCtx); err != nil {
 		return err
 	}
-	if err := app.Close(); err != nil {
+	if err := bot.Close(); err != nil {
 		return err
 	}
 	return execRestart(exec)

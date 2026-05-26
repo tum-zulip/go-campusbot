@@ -54,6 +54,11 @@ type Handler interface {
 	Handle(ctx context.Context, req Request) (Result, error)
 }
 
+// Authorizer checks whether an actor has at least the given Zulip role.
+type Authorizer interface {
+	Check(ctx context.Context, actor Actor, minRole zulip.Role) error
+}
+
 type HandlerFunc struct {
 	Meta Metadata
 	Fn   func(ctx context.Context, req Request) (Result, error)

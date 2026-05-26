@@ -19,13 +19,13 @@ func TestScheduleRestartStopsAcceptingCommands(t *testing.T) {
 
 	ctx := context.Background()
 	dbPath := restartTestDBPath(t)
-	app, _ := openRestartTestApp(t, dbPath)
+	bot, _ := openRestartTestBot(t, dbPath)
 
-	if !app.Accepting() {
+	if !bot.Accepting() {
 		t.Fatal("app should be accepting before restart is scheduled")
 	}
 
-	_, _, err := app.ScheduleRestart(
+	_, _, err := bot.ScheduleRestart(
 		ctx,
 		command.Actor{UserID: 1},
 		10,
@@ -35,10 +35,10 @@ func TestScheduleRestartStopsAcceptingCommands(t *testing.T) {
 		t.Fatalf("ScheduleRestart() failed: %v", err)
 	}
 
-	if app.Accepting() {
+	if bot.Accepting() {
 		t.Fatal("app should stop accepting after restart is scheduled")
 	}
-	if !app.RestartRequested() {
+	if !bot.RestartRequested() {
 		t.Fatal("restart should be requested")
 	}
 }
@@ -48,10 +48,10 @@ func TestDoubleScheduleRestartIsIdempotent(t *testing.T) {
 
 	ctx := context.Background()
 	dbPath := restartTestDBPath(t)
-	app, _ := openRestartTestApp(t, dbPath)
+	bot, _ := openRestartTestBot(t, dbPath)
 	target := command.ReplyTarget{Kind: command.ReplyKindDirect, UserIDs: []int64{1}}
 
-	_, first, err := app.ScheduleRestart(ctx, command.Actor{UserID: 1}, 1, target)
+	_, first, err := bot.ScheduleRestart(ctx, command.Actor{UserID: 1}, 1, target)
 	if err != nil {
 		t.Fatalf("first ScheduleRestart() failed: %v", err)
 	}
@@ -59,7 +59,7 @@ func TestDoubleScheduleRestartIsIdempotent(t *testing.T) {
 		t.Fatal("first ScheduleRestart() should return scheduled=true")
 	}
 
-	_, second, err := app.ScheduleRestart(ctx, command.Actor{UserID: 1}, 2, target)
+	_, second, err := bot.ScheduleRestart(ctx, command.Actor{UserID: 1}, 2, target)
 	if err != nil {
 		t.Fatalf("second ScheduleRestart() failed: %v", err)
 	}
@@ -75,27 +75,27 @@ func TestNotifyRestartCompleteCompletesPendingRestart(t *testing.T) {
 	target := command.ReplyTarget{Kind: command.ReplyKindDirect, UserIDs: []int64{10}}
 
 	dbPath := restartTestDBPath(t)
-	app, _ := openRestartTestApp(t, dbPath)
-	id, _, err := app.ScheduleRestart(ctx, command.Actor{UserID: 10}, 55, target)
+	bot, _ := openRestartTestBot(t, dbPath)
+	id, _, err := bot.ScheduleRestart(ctx, command.Actor{UserID: 10}, 55, target)
 	if err != nil {
 		t.Fatalf("ScheduleRestart() failed: %v", err)
 	}
 
-	app, client := openRestartTestApp(t, dbPath)
-	if notifyErr := app.NotifyRestartComplete(ctx); notifyErr != nil {
+	bot, client := openRestartTestBot(t, dbPath)
+	if notifyErr := bot.NotifyRestartComplete(ctx); notifyErr != nil {
 		t.Fatalf("NotifyRestartComplete() failed: %v", notifyErr)
 	}
 	if got := client.LastSentMessage(); got == nil || len(got.Recipient.Users) == 0 || got.Recipient.Users[0] != 10 {
 		t.Fatalf("sent target = %#v", got)
 	}
-	if ok, err := app.RestartPending(ctx); err != nil {
+	if ok, err := bot.RestartPending(ctx); err != nil {
 		t.Fatalf("RestartPending() failed: %v", err)
 	} else if ok {
 		t.Fatalf("restart request %d should be completed", id)
 	}
 }
 
-func openRestartTestApp(t *testing.T, dbPath string) (*zulipbot.App, zulipmock.Client) {
+func openRestartTestBot(t *testing.T, dbPath string) (*zulipbot.Bot, zulipmock.Client) {
 	t.Helper()
 
 	client := zulipmock.NewClient()
@@ -107,7 +107,7 @@ func openRestartTestApp(t *testing.T, dbPath string) (*zulipbot.App, zulipmock.C
 		t.Fatalf("storage.Open() failed: %v", err)
 	}
 
-	app, err := zulipbot.NewApp(
+	bot, err := zulipbot.NewBot(
 		context.Background(),
 		zulipbot.RuntimeConfig{Logger: slog.Default()},
 		client,
@@ -115,10 +115,10 @@ func openRestartTestApp(t *testing.T, dbPath string) (*zulipbot.App, zulipmock.C
 	)
 	if err != nil {
 		_ = repo.Close()
-		t.Fatalf("NewApp() failed: %v", err)
+		t.Fatalf("NewBot() failed: %v", err)
 	}
-	t.Cleanup(func() { _ = app.Close() })
-	return app, client
+	t.Cleanup(func() { _ = bot.Close() })
+	return bot, client
 }
 
 func restartTestDBPath(t *testing.T) string {
