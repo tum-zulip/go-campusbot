@@ -514,9 +514,6 @@ func (s *channelGroups) UpdateChannelGroupChannelsExecute(
 	if err = s.cleanupAddedChannels(r.ctx, added, members, group.ID, finalState.ChannelIDs); err != nil {
 		return nil, nil, err
 	}
-	if err = s.reconcileChannelGroup(r.ctx, r.channelGroupID); err != nil {
-		return nil, nil, err
-	}
 
 	s.logger.InfoContext(r.ctx, "updated channel group channels",
 		"channel_group_id", r.channelGroupID,
@@ -607,21 +604,15 @@ func (s *channelGroups) SubscribeToChannelGroupExecute(
 		return nil, nil, errors.New("principals with user IDs are required")
 	}
 
-	if len(group.ChannelIDs) > 0 {
-		if err = s.subscribeUsersToChannels(r.ctx, group.ChannelIDs, userIDs); err != nil {
-			return nil, nil, err
-		}
-	}
 	_, _, err = s.base.UpdateUserGroupMembers(r.ctx, group.ID).Add(userIDs).Execute()
 	if err != nil {
-		_ = s.unsubscribeUsersFromChannels(r.ctx, group.ChannelIDs, userIDs)
 		return nil, nil, err
 	}
-	if err = s.reconcileChannelGroup(r.ctx, r.channelGroupID); err != nil {
-		return nil, nil, err
-	}
-	latestState, err := s.getGroup(r.ctx, r.channelGroupID)
+
+	latestState, touchedChannels, err := s.subscribeUsersToCurrentChannelGroupChannels(r.ctx, r.channelGroupID, userIDs)
 	if err != nil {
+		_, _, _ = s.base.UpdateUserGroupMembers(r.ctx, group.ID).Delete(userIDs).Execute()
+		_ = s.unsubscribeUsersFromChannels(r.ctx, touchedChannels, userIDs)
 		return nil, nil, err
 	}
 
@@ -788,28 +779,62 @@ func (s *channelGroups) cleanupAddedChannels(
 	return s.unsubscribeUsersFromChannels(ctx, channelsToClean, staleUserIDs)
 }
 
-func (s *channelGroups) reconcileChannelGroup(ctx context.Context, channelGroupID int64) error {
-	group, err := s.getGroup(ctx, channelGroupID)
-	if err != nil {
-		return err
+func (s *channelGroups) subscribeUsersToCurrentChannelGroupChannels(
+	ctx context.Context,
+	channelGroupID int64,
+	userIDs []int64,
+) (ChannelGroup, []int64, error) {
+	var group ChannelGroup
+	activeUserIDs := userIDs
+	touched := []int64{}
+	attempted := map[int64]struct{}{}
+
+	for {
+		var err error
+		group, err = s.getGroup(ctx, channelGroupID)
+		if err != nil {
+			return ChannelGroup{}, touched, err
+		}
+
+		channelIDs := removeAttemptedInt64s(group.ChannelIDs, attempted)
+		if len(channelIDs) == 0 {
+			return group, touched, nil
+		}
+
+		s.logger.DebugContext(ctx, "subscribing users to channel group channels",
+			"channel_group_id", channelGroupID,
+			"channel_ids", channelIDs,
+			"user_ids", activeUserIDs,
+		)
+		if err = s.subscribeUsersToChannels(ctx, channelIDs, activeUserIDs); err != nil {
+			return ChannelGroup{}, touched, err
+		}
+		touched = uniqueInt64s(append(touched, channelIDs...))
+		for _, channelID := range channelIDs {
+			attempted[channelID] = struct{}{}
+		}
+
+		currentUserIDs, err := s.userGroupMembers(ctx, group.ID)
+		if err != nil {
+			return ChannelGroup{}, touched, err
+		}
+		staleUserIDs := removeInt64s(activeUserIDs, currentUserIDs)
+		if len(staleUserIDs) == 0 {
+			continue
+		}
+		s.logger.DebugContext(ctx, "cleaning users removed during channel group subscribe",
+			"channel_group_id", channelGroupID,
+			"channel_ids", touched,
+			"user_ids", staleUserIDs,
+		)
+		if err = s.unsubscribeUsersFromChannels(ctx, touched, staleUserIDs); err != nil {
+			return ChannelGroup{}, touched, err
+		}
+		activeUserIDs = removeInt64s(activeUserIDs, staleUserIDs)
+		if len(activeUserIDs) == 0 {
+			return group, touched, nil
+		}
 	}
-	if len(group.ChannelIDs) == 0 {
-		return nil
-	}
-	members, err := s.userGroupMembers(ctx, group.ID)
-	if err != nil {
-		return err
-	}
-	if len(members) == 0 {
-		return nil
-	}
-	s.logger.DebugContext(ctx, "reconciling channel group subscriptions",
-		"channel_group_id", channelGroupID,
-		"user_group_id", group.ID,
-		"channel_count", len(group.ChannelIDs),
-		"subscriber_count", len(members),
-	)
-	return s.subscribeUsersToChannels(ctx, group.ChannelIDs, members)
 }
 
 func (s *channelGroups) subscribeUsersToChannels(
@@ -1038,6 +1063,16 @@ func removeInt64s(values []int64, remove []int64) []int64 {
 	remaining := make([]int64, 0, len(values))
 	for _, value := range values {
 		if _, ok := removeSet[value]; !ok {
+			remaining = append(remaining, value)
+		}
+	}
+	return uniqueInt64s(remaining)
+}
+
+func removeAttemptedInt64s(values []int64, attempted map[int64]struct{}) []int64 {
+	remaining := make([]int64, 0, len(values))
+	for _, value := range values {
+		if _, ok := attempted[value]; !ok {
 			remaining = append(remaining, value)
 		}
 	}

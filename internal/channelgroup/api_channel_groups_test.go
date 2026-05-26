@@ -234,13 +234,24 @@ func TestConcurrentSubscribeAndAddChannelMaterializesSubscriberOnNewChannel(t *t
 
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
+	const (
+		addOrigin = "UpdateChannelGroupChannels"
+		subOrigin = "SubscribeToChannelGroup"
+	)
 	serialization := base.SerializeRequestSteps(
-		zulipmock.OperationRequest(zulipmock.OperationGetUserGroupMembers),
-		zulipmock.ChannelRequest(zulipmock.OperationGetChannelByID, channelIDs[0]),
-		zulipmock.SubscriptionRequest(zulipmock.OperationSubscribe, []string{mockChannelName(1)}, []int64{202}),
-		zulipmock.OperationRequest(zulipmock.OperationUpdateUserGroupMembers),
-		zulipmock.ChannelRequest(zulipmock.OperationGetChannelByID, channelIDs[1]),
-		zulipmock.OperationRequest(zulipmock.OperationSubscribe),
+		zulipmock.OperationRequest(zulipmock.OperationGetUserGroupMembers).From(addOrigin),
+		zulipmock.ChannelRequest(zulipmock.OperationGetChannelByID, channelIDs[1]).From(addOrigin),
+		zulipmock.SubscriptionRequest(zulipmock.OperationSubscribe, []string{mockChannelName(2)}, []int64{101}).
+			From(addOrigin),
+		zulipmock.OperationRequest(zulipmock.OperationGetUserGroupMembers).From(addOrigin),
+		zulipmock.OperationRequest(zulipmock.OperationUpdateUserGroupMembers).From(subOrigin),
+		zulipmock.ChannelRequest(zulipmock.OperationGetChannelByID, channelIDs[0]).From(subOrigin),
+		zulipmock.ChannelRequest(zulipmock.OperationGetChannelByID, channelIDs[1]).From(subOrigin),
+		zulipmock.SubscriptionRequest(
+			zulipmock.OperationSubscribe,
+			[]string{mockChannelName(1), mockChannelName(2)},
+			[]int64{202},
+		).From(subOrigin),
 	)
 	defer base.ClearRequestSerialization()
 
@@ -356,15 +367,15 @@ func TestConcurrentSubscribeAndDeleteChannelDoesNotLeaveSubscriberOnRemovedChann
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 	serialization := base.SerializeRequestSteps(
-		zulipmock.ChannelRequest(zulipmock.OperationGetChannelByID, channelIDs[0]),
+		zulipmock.OperationRequest(zulipmock.OperationUpdateUserGroupMembers),
 		zulipmock.OperationRequest(zulipmock.OperationGetUserGroupMembers),
+		zulipmock.ChannelRequest(zulipmock.OperationGetChannelByID, channelIDs[0]),
 		zulipmock.ChannelRequest(zulipmock.OperationGetChannelByID, channelIDs[1]),
 		zulipmock.SubscriptionRequest(
 			zulipmock.OperationSubscribe,
 			[]string{mockChannelName(1), mockChannelName(2)},
 			[]int64{202},
 		),
-		zulipmock.OperationRequest(zulipmock.OperationUpdateUserGroupMembers),
 	)
 	defer base.ClearRequestSerialization()
 
@@ -415,13 +426,23 @@ func TestConcurrentSubscribeAndUnsubscribeSameUserDeleteWins(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
+	const (
+		subOrigin   = "SubscribeToChannelGroup"
+		unsubOrigin = "UnsubscribeFromChannelGroup"
+	)
 	serialization := base.SerializeRequestSteps(
-		zulipmock.ChannelRequest(zulipmock.OperationGetChannelByID, channelIDs[0]),
-		zulipmock.SubscriptionRequest(zulipmock.OperationSubscribe, []string{mockChannelName(1)}, []int64{202}),
-		zulipmock.OperationRequest(zulipmock.OperationUpdateUserGroupMembers),
-		zulipmock.ChannelRequest(zulipmock.OperationGetChannelByID, channelIDs[0]),
-		zulipmock.SubscriptionRequest(zulipmock.OperationUnsubscribe, []string{mockChannelName(1)}, []int64{202}),
-		zulipmock.OperationRequest(zulipmock.OperationUpdateUserGroupMembers),
+		zulipmock.OperationRequest(zulipmock.OperationUpdateUserGroupMembers).From(subOrigin),
+		zulipmock.ChannelRequest(zulipmock.OperationGetChannelByID, channelIDs[0]).From(unsubOrigin),
+		zulipmock.SubscriptionRequest(zulipmock.OperationUnsubscribe, []string{mockChannelName(1)}, []int64{202}).
+			From(unsubOrigin),
+		zulipmock.OperationRequest(zulipmock.OperationUpdateUserGroupMembers).From(unsubOrigin),
+		zulipmock.ChannelRequest(zulipmock.OperationGetChannelByID, channelIDs[0]).From(subOrigin),
+		zulipmock.SubscriptionRequest(zulipmock.OperationSubscribe, []string{mockChannelName(1)}, []int64{202}).
+			From(subOrigin),
+		zulipmock.OperationRequest(zulipmock.OperationGetUserGroupMembers).From(subOrigin),
+		zulipmock.ChannelRequest(zulipmock.OperationGetChannelByID, channelIDs[0]).From(subOrigin),
+		zulipmock.SubscriptionRequest(zulipmock.OperationUnsubscribe, []string{mockChannelName(1)}, []int64{202}).
+			From(subOrigin),
 	)
 	defer base.ClearRequestSerialization()
 
@@ -476,9 +497,9 @@ func TestConcurrentUnsubscribeAndSubscribeSameUserAddWins(t *testing.T) {
 		zulipmock.ChannelRequest(zulipmock.OperationGetChannelByID, channelIDs[0]),
 		zulipmock.SubscriptionRequest(zulipmock.OperationUnsubscribe, []string{mockChannelName(1)}, []int64{202}),
 		zulipmock.OperationRequest(zulipmock.OperationUpdateUserGroupMembers),
+		zulipmock.OperationRequest(zulipmock.OperationUpdateUserGroupMembers),
 		zulipmock.ChannelRequest(zulipmock.OperationGetChannelByID, channelIDs[0]),
 		zulipmock.SubscriptionRequest(zulipmock.OperationSubscribe, []string{mockChannelName(1)}, []int64{202}),
-		zulipmock.OperationRequest(zulipmock.OperationUpdateUserGroupMembers),
 	)
 	defer base.ClearRequestSerialization()
 
@@ -509,6 +530,111 @@ func TestConcurrentUnsubscribeAndSubscribeSameUserAddWins(t *testing.T) {
 		want,
 	) {
 		t.Fatalf("channel subscribers = %v, want %v", got, want)
+	}
+}
+
+func TestConcurrentSerializedSameUserSubscriptionState(t *testing.T) {
+	tests := []struct {
+		name        string
+		initiallyIn bool
+		operations  []zulipmock.Operation
+		wantMembers []int64
+	}{
+		{
+			name:        "subscribe unsubscribe from absent",
+			initiallyIn: false,
+			operations:  []zulipmock.Operation{zulipmock.OperationSubscribe, zulipmock.OperationUnsubscribe},
+			wantMembers: []int64{101},
+		},
+		{
+			name:        "subscribe unsubscribe from present",
+			initiallyIn: true,
+			operations:  []zulipmock.Operation{zulipmock.OperationSubscribe, zulipmock.OperationUnsubscribe},
+			wantMembers: []int64{101},
+		},
+		{
+			name:        "unsubscribe subscribe unsubscribe subscribe unsubscribe",
+			initiallyIn: true,
+			operations: []zulipmock.Operation{
+				zulipmock.OperationUnsubscribe,
+				zulipmock.OperationSubscribe,
+				zulipmock.OperationUnsubscribe,
+				zulipmock.OperationSubscribe,
+				zulipmock.OperationUnsubscribe,
+			},
+			wantMembers: []int64{101},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			setupCtx := context.Background()
+			base := zulipmock.NewClient()
+			client := newTestClient(t, base)
+			channelIDs := createMockChannels(t, setupCtx, base, 1)
+			initialSubscribers := []int64{101}
+			if tt.initiallyIn {
+				initialSubscribers = append(initialSubscribers, 202)
+			}
+
+			created, _, err := client.CreateChannelGroup(setupCtx).
+				Name(tt.name).
+				ChannelIDs(channelIDs).
+				InitialSubscribers(zulip.UserIDsAsPrincipals(initialSubscribers...)).
+				Execute()
+			if err != nil {
+				t.Fatalf("CreateChannelGroup error = %v", err)
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			steps := sameUserSubscriptionToggleSteps(channelIDs[0], mockChannelName(1), 202, tt.operations)
+			serialization := base.SerializeRequestSteps(steps...)
+			defer base.ClearRequestSerialization()
+
+			ops := make([]func() error, 0, len(tt.operations))
+			startAfterSteps := make([]int, 0, len(tt.operations)-1)
+			stepsBeforeOperation := 0
+			for i, operation := range tt.operations {
+				if i > 0 {
+					startAfterSteps = append(startAfterSteps, stepsBeforeOperation)
+				}
+
+				ops = append(ops, func() error {
+					//nolint:exhaustive // test table only exercises subscribe and unsubscribe operations
+					switch operation {
+					case zulipmock.OperationSubscribe:
+						_, _, err := client.SubscribeToChannelGroup(ctx, created.ChannelGroupID).
+							Principals(zulip.UserIDsAsPrincipals(202)).
+							Execute()
+						return err
+					case zulipmock.OperationUnsubscribe:
+						_, _, err := client.UnsubscribeFromChannelGroup(ctx, created.ChannelGroupID).
+							Principals(zulip.UserIDsAsPrincipals(202)).
+							Execute()
+						return err
+					default:
+						return fmt.Errorf("unsupported operation %q", operation)
+					}
+				})
+				stepsBeforeOperation += sameUserSubscriptionToggleStepCount(operation)
+			}
+
+			runSerializedOperations(t, ctx, serialization, startAfterSteps, ops...)
+
+			subscribers, _, err := client.GetChannelGroupSubscribers(ctx, created.ChannelGroupID).Execute()
+			if err != nil {
+				t.Fatalf("GetChannelGroupSubscribers error = %v", err)
+			}
+			if got := subscribers.SubscriberIDs; !equalInt64s(got, tt.wantMembers) {
+				t.Fatalf("channel group subscribers = %v, want %v", got, tt.wantMembers)
+			}
+			wantChannelSubscribers := append([]int64{}, tt.wantMembers...)
+			wantChannelSubscribers = append(wantChannelSubscribers, mockBootstrapUserID)
+			if got := channelSubscribers(t, ctx, base, channelIDs[0]); !equalInt64s(got, wantChannelSubscribers) {
+				t.Fatalf("channel subscribers = %v, want %v", got, wantChannelSubscribers)
+			}
+		})
 	}
 }
 
@@ -590,16 +716,35 @@ func TestConcurrentTwoSubscribersAndAddChannelMaterializesBothUsers(t *testing.T
 
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
+	const (
+		addOrigin = "UpdateChannelGroupChannels"
+		subOrigin = "SubscribeToChannelGroup"
+	)
 	serialization := base.SerializeRequestSteps(
-		zulipmock.OperationRequest(zulipmock.OperationGetUserGroupMembers),
-		zulipmock.ChannelRequest(zulipmock.OperationGetChannelByID, channelIDs[0]),
-		zulipmock.SubscriptionRequest(zulipmock.OperationSubscribe, []string{mockChannelName(1)}, []int64{202}),
-		zulipmock.OperationRequest(zulipmock.OperationUpdateUserGroupMembers),
-		zulipmock.ChannelRequest(zulipmock.OperationGetChannelByID, channelIDs[0]),
-		zulipmock.SubscriptionRequest(zulipmock.OperationSubscribe, []string{mockChannelName(1)}, []int64{303}),
-		zulipmock.OperationRequest(zulipmock.OperationUpdateUserGroupMembers),
-		zulipmock.ChannelRequest(zulipmock.OperationGetChannelByID, channelIDs[1]),
-		zulipmock.OperationRequest(zulipmock.OperationSubscribe),
+		zulipmock.OperationRequest(zulipmock.OperationGetUserGroupMembers).From(addOrigin),
+		zulipmock.ChannelRequest(zulipmock.OperationGetChannelByID, channelIDs[1]).From(addOrigin),
+		zulipmock.SubscriptionRequest(zulipmock.OperationSubscribe, []string{mockChannelName(2)}, []int64{101}).
+			From(addOrigin),
+		zulipmock.OperationRequest(zulipmock.OperationGetUserGroupMembers).From(addOrigin),
+		zulipmock.OperationRequest(zulipmock.OperationUpdateUserGroupMembers).From(subOrigin),
+		zulipmock.ChannelRequest(zulipmock.OperationGetChannelByID, channelIDs[0]).From(subOrigin),
+		zulipmock.ChannelRequest(zulipmock.OperationGetChannelByID, channelIDs[1]).From(subOrigin),
+		zulipmock.SubscriptionRequest(
+			zulipmock.OperationSubscribe,
+			[]string{mockChannelName(1), mockChannelName(2)},
+			[]int64{202},
+		).From(subOrigin),
+		zulipmock.OperationRequest(zulipmock.OperationGetUserGroupMembers).From(subOrigin),
+		zulipmock.OperationRequest(zulipmock.OperationUpdateUserGroupMembers).From(subOrigin),
+		zulipmock.ChannelRequest(zulipmock.OperationGetChannelByID, channelIDs[0]).From(subOrigin),
+		zulipmock.ChannelRequest(zulipmock.OperationGetChannelByID, channelIDs[1]).From(subOrigin),
+		zulipmock.SubscriptionRequest(
+			zulipmock.OperationSubscribe,
+			[]string{mockChannelName(1), mockChannelName(2)},
+			[]int64{303},
+		).
+			From(subOrigin),
+		zulipmock.OperationRequest(zulipmock.OperationGetUserGroupMembers).From(subOrigin),
 	)
 	defer base.ClearRequestSerialization()
 
@@ -677,14 +822,57 @@ func TestUpdateChannelGroupChannelsDoesNotCommitWhenChannelSubscribeFails(t *tes
 	}
 }
 
-func TestSubscribeToChannelGroupRollsBackChannelsWhenUserGroupUpdateFails(t *testing.T) {
+func TestUpdateChannelGroupChannelsDoesNotResubscribeManualChannelUnsubscribe(t *testing.T) {
+	ctx := context.Background()
+	base := zulipmock.NewClient()
+	client := newTestClient(t, base)
+	channelIDs := createMockChannels(t, ctx, base, 3)
+
+	created, _, err := client.CreateChannelGroup(ctx).
+		Name("preserve manual unsubscribe on channel update").
+		ChannelIDs(channelIDs[:2]).
+		InitialSubscribers(zulip.UserIDsAsPrincipals(101, 202)).
+		Execute()
+	if err != nil {
+		t.Fatalf("CreateChannelGroup error = %v", err)
+	}
+
+	if _, _, err = base.Unsubscribe(ctx).
+		Subscriptions([]string{mockChannelName(1)}).
+		Principals(zulip.UserIDsAsPrincipals(202)).
+		Execute(); err != nil {
+		t.Fatalf("manual unsubscribe from channel: %v", err)
+	}
+
+	_, _, err = client.UpdateChannelGroupChannels(ctx, created.ChannelGroupID).
+		Add([]int64{channelIDs[2]}).
+		Execute()
+	if err != nil {
+		t.Fatalf("UpdateChannelGroupChannels error = %v", err)
+	}
+
+	if got, want := channelSubscribers(t, ctx, base, channelIDs[0]), []int64{101, mockBootstrapUserID}; !equalInt64s(
+		got,
+		want,
+	) {
+		t.Fatalf("manually unsubscribed channel subscribers = %v, want %v", got, want)
+	}
+	if got, want := channelSubscribers(t, ctx, base, channelIDs[2]), []int64{101, 202, mockBootstrapUserID}; !equalInt64s(
+		got,
+		want,
+	) {
+		t.Fatalf("new channel subscribers = %v, want %v", got, want)
+	}
+}
+
+func TestSubscribeToChannelGroupDoesNotResubscribeManualChannelUnsubscribe(t *testing.T) {
 	ctx := context.Background()
 	base := zulipmock.NewClient()
 	client := newTestClient(t, base)
 	channelIDs := createMockChannels(t, ctx, base, 1)
 
 	created, _, err := client.CreateChannelGroup(ctx).
-		Name("failing subscribe").
+		Name("preserve manual unsubscribe on subscribe").
 		ChannelIDs(channelIDs).
 		InitialSubscribers(zulip.UserIDsAsPrincipals(101)).
 		Execute()
@@ -692,7 +880,76 @@ func TestSubscribeToChannelGroupRollsBackChannelsWhenUserGroupUpdateFails(t *tes
 		t.Fatalf("CreateChannelGroup error = %v", err)
 	}
 
-	base.FailNext(zulipmock.OperationUpdateUserGroupMembers, errors.New("user group update failed"))
+	if _, _, err = base.Unsubscribe(ctx).
+		Subscriptions([]string{mockChannelName(1)}).
+		Principals(zulip.UserIDsAsPrincipals(101)).
+		Execute(); err != nil {
+		t.Fatalf("manual unsubscribe from channel: %v", err)
+	}
+
+	_, _, err = client.SubscribeToChannelGroup(ctx, created.ChannelGroupID).
+		Principals(zulip.UserIDsAsPrincipals(202)).
+		Execute()
+	if err != nil {
+		t.Fatalf("SubscribeToChannelGroup error = %v", err)
+	}
+
+	subscribers, _, err := client.GetChannelGroupSubscribers(ctx, created.ChannelGroupID).Execute()
+	if err != nil {
+		t.Fatalf("GetChannelGroupSubscribers error = %v", err)
+	}
+	if got, want := subscribers.SubscriberIDs, []int64{101, 202}; !equalInt64s(got, want) {
+		t.Fatalf("channel group subscribers = %v, want %v", got, want)
+	}
+	if got, want := channelSubscribers(t, ctx, base, channelIDs[0]), []int64{202, mockBootstrapUserID}; !equalInt64s(
+		got,
+		want,
+	) {
+		t.Fatalf("channel subscribers = %v, want %v", got, want)
+	}
+}
+
+func TestSubscribeToChannelGroupRollsBackChannelsWhenUserGroupUpdateFails(t *testing.T) {
+	assertSubscribeToChannelGroupRollback(
+		t,
+		"failing subscribe",
+		zulipmock.OperationUpdateUserGroupMembers,
+		"user group update failed",
+	)
+}
+
+func TestSubscribeToChannelGroupRollsBackUserGroupWhenChannelSubscribeFails(t *testing.T) {
+	assertSubscribeToChannelGroupRollback(
+		t,
+		"failing channel subscribe",
+		zulipmock.OperationSubscribe,
+		"channel subscribe failed",
+	)
+}
+
+func assertSubscribeToChannelGroupRollback(
+	t *testing.T,
+	name string,
+	failingOperation zulipmock.Operation,
+	failureMessage string,
+) {
+	t.Helper()
+
+	ctx := context.Background()
+	base := zulipmock.NewClient()
+	client := newTestClient(t, base)
+	channelIDs := createMockChannels(t, ctx, base, 1)
+
+	created, _, err := client.CreateChannelGroup(ctx).
+		Name(name).
+		ChannelIDs(channelIDs).
+		InitialSubscribers(zulip.UserIDsAsPrincipals(101)).
+		Execute()
+	if err != nil {
+		t.Fatalf("CreateChannelGroup error = %v", err)
+	}
+
+	base.FailNext(failingOperation, errors.New(failureMessage))
 	_, _, err = client.SubscribeToChannelGroup(ctx, created.ChannelGroupID).
 		Principals(zulip.UserIDsAsPrincipals(202)).
 		Execute()
@@ -1031,6 +1288,45 @@ func runSerializedOperations(
 	}
 	if err := serialization.Wait(ctx); err != nil {
 		t.Fatalf("serialization did not observe all requests: %v", err)
+	}
+}
+
+func sameUserSubscriptionToggleSteps(
+	channelID int64,
+	channelName string,
+	userID int64,
+	operations []zulipmock.Operation,
+) []zulipmock.RequestStep {
+	steps := make([]zulipmock.RequestStep, 0, len(operations)*6)
+	for _, operation := range operations {
+		//nolint:exhaustive // serialization steps are only defined for subscribe/unsubscribe toggles
+		switch operation {
+		case zulipmock.OperationSubscribe:
+			steps = append(steps,
+				zulipmock.OperationRequest(zulipmock.OperationUpdateUserGroupMembers),
+				zulipmock.ChannelRequest(zulipmock.OperationGetChannelByID, channelID),
+				zulipmock.OperationRequest(zulipmock.OperationSubscribe),
+			)
+		case zulipmock.OperationUnsubscribe:
+			steps = append(steps,
+				zulipmock.ChannelRequest(zulipmock.OperationGetChannelByID, channelID),
+				zulipmock.SubscriptionRequest(operation, []string{channelName}, []int64{userID}),
+				zulipmock.OperationRequest(zulipmock.OperationUpdateUserGroupMembers),
+			)
+		}
+	}
+	return steps
+}
+
+func sameUserSubscriptionToggleStepCount(operation zulipmock.Operation) int {
+	//nolint:exhaustive // unsupported operations use the default branch
+	switch operation {
+	case zulipmock.OperationSubscribe:
+		return 3
+	case zulipmock.OperationUnsubscribe:
+		return 3
+	default:
+		return 0
 	}
 }
 
