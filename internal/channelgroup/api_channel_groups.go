@@ -1324,7 +1324,7 @@ func (s *channelGroups) UnsubscribeFromChannelGroup(
 	}
 }
 
-//nolint:funlen // unsubscribe rollback/concurrency handling is easier to audit in one flow
+//nolint:funlen,gocognit // unsubscribe rollback/concurrency handling is easier to audit in one flow
 func (s *channelGroups) UnsubscribeFromChannelGroupExecute(
 	r UnsubscribeFromChannelGroupRequest,
 ) (*UnsubscribeFromChannelGroupResponse, *http.Response, error) {
