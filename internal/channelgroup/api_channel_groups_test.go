@@ -1835,13 +1835,13 @@ func TestConcurrentUnsubscribeAndDeleteSameChannelLeavesNoSubscribers(t *testing
 
 	runSerializedPair(t, ctx, serialization,
 		func() error {
-			_, _, err = client.UnsubscribeFromChannelGroup(ctx, created.ChannelGroupID).
+			_, _, err := client.UnsubscribeFromChannelGroup(ctx, created.ChannelGroupID).
 				Principals(zulip.UserIDsAsPrincipals(202)).
 				Execute()
 			return err
 		},
 		func() error {
-			_, _, err = client.UpdateChannelGroupChannels(ctx, created.ChannelGroupID).
+			_, _, err := client.UpdateChannelGroupChannels(ctx, created.ChannelGroupID).
 				Delete([]int64{channelIDs[0]}).
 				Execute()
 			return err

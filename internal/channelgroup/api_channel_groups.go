@@ -149,17 +149,26 @@ type channelGroups struct {
 
 	folderOpsMu sync.Mutex
 
+	memberOpsMu         sync.Mutex
+	memberOpGenerations map[channelGroupMemberKey]uint64
+
 	listenerMu     sync.Mutex
 	listenerCancel context.CancelFunc
 	listenerWG     sync.WaitGroup
 }
 
+type channelGroupMemberKey struct {
+	channelGroupID int64
+	userID         int64
+}
+
 func newChannelGroups(base client.Client, database *sql.DB, opts ...ClientOption) *channelGroups {
 	service := &channelGroups{
-		base:    base,
-		db:      database,
-		queries: channelgroupdb.New(database),
-		logger:  slog.Default(),
+		base:                base,
+		db:                  database,
+		queries:             channelgroupdb.New(database),
+		logger:              slog.Default(),
+		memberOpGenerations: make(map[channelGroupMemberKey]uint64),
 	}
 	for _, opt := range opts {
 		opt(service)
@@ -1280,6 +1289,7 @@ func (s *channelGroups) SubscribeToChannelGroupExecute(
 			return nil, nil, err
 		}
 	}
+	s.bumpMemberOpGenerations(r.channelGroupID, userIDs)
 
 	latestState, touchedChannels, err := s.subscribeUsersToCurrentChannelGroupChannels(
 		r.ctx,
@@ -1332,6 +1342,7 @@ func (s *channelGroups) UnsubscribeFromChannelGroupExecute(
 		return nil, nil, errors.New("principals with user IDs are required")
 	}
 
+	startGenerations := s.memberOpGenerationsFor(r.channelGroupID, userIDs)
 	if !r.keepChannels && len(group.ChannelIDs) > 0 {
 		if err = s.unsubscribeUsersFromChannelGroupChannels(
 			r.ctx,
@@ -1342,20 +1353,32 @@ func (s *channelGroups) UnsubscribeFromChannelGroupExecute(
 			return nil, nil, err
 		}
 	}
-	_, _, err = s.base.UpdateUserGroupMembers(r.ctx, group.ID).Delete(userIDs).Execute()
+	userIDsToDelete := s.memberIDsUnchangedSince(r.channelGroupID, userIDs, startGenerations)
+	if len(userIDsToDelete) == 0 {
+		s.logger.InfoContext(r.ctx, "skipped stale channel group unsubscribe",
+			"channel_group_id", r.channelGroupID,
+			"user_group_id", group.ID,
+			"user_ids", userIDs,
+		)
+		return &UnsubscribeFromChannelGroupResponse{
+			Response: successResponse(),
+		}, nil, nil
+	}
+
+	_, _, err = s.base.UpdateUserGroupMembers(r.ctx, group.ID).Delete(userIDsToDelete).Execute()
 	if err != nil {
 		if isNotChannelGroupMemberError(err) {
 			s.logger.InfoContext(r.ctx, "users already absent from channel group",
 				"channel_group_id", r.channelGroupID,
 				"user_group_id", group.ID,
-				"user_ids", userIDs,
+				"user_ids", userIDsToDelete,
 			)
 			return &UnsubscribeFromChannelGroupResponse{
 				Response: successResponse(),
 			}, nil, nil
 		}
 		if !r.keepChannels {
-			_ = s.subscribeUsersToChannels(r.ctx, group.ChannelIDs, userIDs)
+			_ = s.subscribeUsersToChannels(r.ctx, group.ChannelIDs, userIDsToDelete)
 		}
 		return nil, nil, err
 	}
@@ -1375,13 +1398,13 @@ func (s *channelGroups) UnsubscribeFromChannelGroupExecute(
 				"channel_ids",
 				addedWhileUnsubscribing,
 				"user_ids",
-				userIDs,
+				userIDsToDelete,
 			)
 			if err = s.unsubscribeUsersFromChannelGroupChannels(
 				r.ctx,
 				r.channelGroupID,
 				addedWhileUnsubscribing,
-				userIDs,
+				userIDsToDelete,
 			); err != nil {
 				return nil, nil, err
 			}
@@ -1391,7 +1414,7 @@ func (s *channelGroups) UnsubscribeFromChannelGroupExecute(
 	s.logger.InfoContext(r.ctx, "unsubscribed users from channel group",
 		"channel_group_id", r.channelGroupID,
 		"user_group_id", group.ID,
-		"user_ids", userIDs,
+		"user_ids", userIDsToDelete,
 		"channel_count", len(finalState.ChannelIDs),
 	)
 	return &UnsubscribeFromChannelGroupResponse{
@@ -1407,6 +1430,46 @@ func (s *channelGroups) getGroup(ctx context.Context, channelGroupID int64) (Cha
 		return err
 	})
 	return group, err
+}
+
+func (s *channelGroups) bumpMemberOpGenerations(channelGroupID int64, userIDs []int64) {
+	s.memberOpsMu.Lock()
+	defer s.memberOpsMu.Unlock()
+	for _, userID := range uniqueInt64s(userIDs) {
+		key := channelGroupMemberKey{channelGroupID: channelGroupID, userID: userID}
+		s.memberOpGenerations[key]++
+	}
+}
+
+func (s *channelGroups) memberOpGenerationsFor(
+	channelGroupID int64,
+	userIDs []int64,
+) map[int64]uint64 {
+	s.memberOpsMu.Lock()
+	defer s.memberOpsMu.Unlock()
+	generations := make(map[int64]uint64, len(userIDs))
+	for _, userID := range uniqueInt64s(userIDs) {
+		key := channelGroupMemberKey{channelGroupID: channelGroupID, userID: userID}
+		generations[userID] = s.memberOpGenerations[key]
+	}
+	return generations
+}
+
+func (s *channelGroups) memberIDsUnchangedSince(
+	channelGroupID int64,
+	userIDs []int64,
+	startGenerations map[int64]uint64,
+) []int64 {
+	s.memberOpsMu.Lock()
+	defer s.memberOpsMu.Unlock()
+	unchanged := make([]int64, 0, len(userIDs))
+	for _, userID := range uniqueInt64s(userIDs) {
+		key := channelGroupMemberKey{channelGroupID: channelGroupID, userID: userID}
+		if s.memberOpGenerations[key] == startGenerations[userID] {
+			unchanged = append(unchanged, userID)
+		}
+	}
+	return unchanged
 }
 
 func getGroup(
