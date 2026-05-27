@@ -685,6 +685,21 @@ func (s *channelGroups) removeDeletedUserGroupChannelGroup(
 	ctx context.Context,
 	userGroupID int64,
 ) error {
+	userGroups, err := s.userGroupsByID(ctx)
+	if err != nil {
+		return fmt.Errorf("verify deleted user group %d is still missing: %w", userGroupID, err)
+	}
+	if group, ok := userGroups[userGroupID]; ok && !group.Deactivated {
+		s.logger.WarnContext(
+			ctx,
+			"ignored stale deleted user group event for active channel group",
+			"channel_group_id",
+			userGroupID,
+			"name",
+			group.Name,
+		)
+		return nil
+	}
 	if err := s.deleteChannelGroup(ctx, userGroupID); err != nil {
 		return err
 	}

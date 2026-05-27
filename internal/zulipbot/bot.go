@@ -309,6 +309,14 @@ func (bot *Bot) consumeQueue(ctx context.Context, state QueueState) (bool, bool,
 				bot.logger.WarnContext(ctx, "received nil Zulip event")
 				continue
 			}
+			bot.logger.DebugContext(
+				ctx,
+				"received Zulip event",
+				"event_id",
+				event.GetID(),
+				"event_type",
+				event.GetType(),
+			)
 			if err := bot.handleEvent(ctx, event, &state, queue); err != nil {
 				bot.logger.ErrorContext(ctx, "failed to handle Zulip event",
 					"event_id", event.GetID(),
@@ -537,7 +545,7 @@ var (
 	restartMeta = command.Metadata{
 		Name:       "restart",
 		Summary:    "Gracefully restart the bot process.",
-		Usage:      "restart",
+		Usage:      "restart [--new-queue]",
 		Permission: zulip.RoleOwner,
 		Privileged: true,
 	}
@@ -632,13 +640,44 @@ func (bot *Bot) writeRestartStatus(ctx context.Context, sb *strings.Builder) {
 }
 
 func (bot *Bot) handleRestart(_ context.Context, req command.Request) command.Result {
+	newQueue, err := parseRestartArgs(req.Invocation.Args)
+	if err != nil {
+		return command.Result{Content: err.Error()}
+	}
+
+	content := "Restarting now. I will resume the current Zulip event queue after the process comes back; Zulip normally retains queued events for about 10 minutes."
+	if newQueue {
+		content = "Restarting now. I will clear the current Zulip event queue and register a new one before the process comes back."
+	}
+
 	return command.Result{
-		Content: "Restarting now. I will resume the current Zulip event queue after the process comes back; Zulip normally retains queued events for about 10 minutes.",
+		Content: content,
 		AfterResponse: func(ctx context.Context) error {
+			if newQueue {
+				if err := bot.replaceMainEventQueue(ctx); err != nil {
+					return err
+				}
+			}
 			_, _, err := bot.ScheduleRestart(ctx, req.Actor, req.MessageID, req.Target)
 			return err
 		},
 	}
+}
+
+func parseRestartArgs(args []string) (bool, error) {
+	var newQueue bool
+	for _, arg := range args {
+		switch strings.ToLower(arg) {
+		case "--new-queue", "--reset-queue", "--clear-queue":
+			newQueue = true
+		default:
+			return false, command.NewUserError(fmt.Sprintf(
+				"Unknown restart option %q. Usage: `restart [--new-queue]`.",
+				arg,
+			))
+		}
+	}
+	return newQueue, nil
 }
 
 // --- Help formatting ------------------------------------------------------
@@ -1103,50 +1142,10 @@ func (bot *Bot) announcementState(ctx context.Context) (storagedb.AnnouncementSt
 	return row, true, nil
 }
 
-func (bot *Bot) reactionProcessed(
-	ctx context.Context,
-	messageID, userID int64,
-	emojiName, op string,
-) (bool, error) {
-	_, err := bot.queries.IsReactionProcessed(ctx, storagedb.IsReactionProcessedParams{
-		MessageID: messageID,
-		UserID:    userID,
-		EmojiName: emojiName,
-		Op:        op,
-	})
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("check processed reaction: %w", err)
-	}
-	return true, nil
-}
-
-func (bot *Bot) markReactionProcessed(
-	ctx context.Context,
-	messageID, userID int64,
-	emojiName, op string,
-) error {
-	if err := bot.queries.MarkReactionProcessed(ctx, storagedb.MarkReactionProcessedParams{
-		MessageID:   messageID,
-		UserID:      userID,
-		EmojiName:   emojiName,
-		Op:          op,
-		ProcessedAt: formatTime(time.Now()),
-	}); err != nil {
-		return fmt.Errorf("mark reaction processed: %w", err)
-	}
-	return nil
-}
-
 func (bot *Bot) emojiGroupMappingByEmoji(
 	ctx context.Context,
-	emojiName, reactionType string,
+	emojiName string,
 ) (storagedb.EmojiGroupMapping, bool, error) {
-	if reactionType != "unicode_emoji" {
-		return storagedb.EmojiGroupMapping{}, false, nil
-	}
 	row, err := bot.queries.GetEmojiGroupMappingByEmoji(ctx, emojiName)
 	if errors.Is(err, sql.ErrNoRows) {
 		return storagedb.EmojiGroupMapping{}, false, nil
@@ -1211,11 +1210,33 @@ func (bot *Bot) deregisterStoredQueue(ctx context.Context) error {
 	return bot.queries.ClearEventQueueState(ctx)
 }
 
+func (bot *Bot) replaceMainEventQueue(ctx context.Context) error {
+	stored, ok, err := bot.eventQueueState(ctx)
+	if err != nil {
+		return err
+	}
+	if ok {
+		if err := bot.deleteQueue(ctx, stored.QueueID); err != nil {
+			return err
+		}
+		if err := bot.queries.ClearEventQueueState(ctx); err != nil {
+			return fmt.Errorf("clear event queue state: %w", err)
+		}
+	}
+	_, err = bot.registerAndSaveQueue(ctx)
+	return err
+}
+
 // registerQueue registers a broad Zulip event queue subscribed to all public channels.
 func (bot *Bot) registerQueue(ctx context.Context) (QueueState, error) {
 	resp, httpResp, err := bot.client.RegisterQueue(ctx).
 		ApplyMarkdown(false).
 		AllPublicChannels(true).
+		EventTypes([]events.EventType{
+			events.EventTypeHeartbeat,
+			events.EventTypeMessage,
+			events.EventTypeReaction,
+		}).
 		ClientCapabilities(map[string]interface{}{
 			"empty_topic_name":           true,
 			"notification_settings_null": true,
@@ -1454,30 +1475,15 @@ func (bot *Bot) handleReaction(ctx context.Context, event events.ReactionEvent) 
 	}
 	opStr := string(op)
 
-	processed, err := bot.reactionProcessed(
-		ctx,
-		event.MessageID,
-		event.UserID,
-		event.EmojiName,
-		opStr,
-	)
-	if err != nil {
-		return err
-	}
-	if processed {
-		return nil
-	}
-
 	mapping, found, err := bot.emojiGroupMappingByEmoji(
 		ctx,
 		event.EmojiName,
-		string(event.ReactionType),
 	)
 	if err != nil {
 		return err
 	}
 	if !found {
-		return bot.markReactionProcessed(ctx, event.MessageID, event.UserID, event.EmojiName, opStr)
+		return nil
 	}
 
 	var opErr error
@@ -1488,7 +1494,7 @@ func (bot *Bot) handleReaction(ctx context.Context, event events.ReactionEvent) 
 	case events.EventOpRemove:
 		opErr = bot.groupSubscriber.UnsubscribeUser(ctx, event.UserID, mapping.ChannelGroupID)
 	default:
-		return bot.markReactionProcessed(ctx, event.MessageID, event.UserID, event.EmojiName, opStr)
+		return nil
 	}
 
 	groupShortName, nameErr := bot.groupSubscriber.ChannelGroupName(ctx, mapping.ChannelGroupID)
@@ -1517,15 +1523,6 @@ func (bot *Bot) handleReaction(ctx context.Context, event events.ReactionEvent) 
 				"error",
 				opErr,
 			)
-			if markErr := bot.markReactionProcessed(
-				ctx,
-				event.MessageID,
-				event.UserID,
-				event.EmojiName,
-				opStr,
-			); markErr != nil {
-				return markErr
-			}
 			return nil
 		}
 		bot.logger.ErrorContext(ctx, "reaction group operation failed",
@@ -1544,7 +1541,7 @@ func (bot *Bot) handleReaction(ctx context.Context, event events.ReactionEvent) 
 		"op", opStr,
 		"message_id", event.MessageID)
 
-	return bot.markReactionProcessed(ctx, event.MessageID, event.UserID, event.EmojiName, opStr)
+	return nil
 }
 
 func (bot *Bot) send(ctx context.Context, target command.ReplyTarget, content string) error {

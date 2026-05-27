@@ -153,13 +153,3 @@ ON CONFLICT(id) DO UPDATE SET
   message_id = excluded.message_id,
   content_hash = excluded.content_hash,
   updated_at = excluded.updated_at;
-
--- processed_reactions
-
--- name: IsReactionProcessed :one
-SELECT id FROM processed_reactions
-WHERE message_id = ? AND user_id = ? AND emoji_name = ? AND op = ?;
-
--- name: MarkReactionProcessed :exec
-INSERT OR IGNORE INTO processed_reactions (message_id, user_id, emoji_name, op, processed_at)
-VALUES (?, ?, ?, ?, ?);

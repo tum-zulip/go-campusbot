@@ -1642,7 +1642,7 @@ func (h *GroupHandler) triggerAnnouncementUpdate(ctx context.Context) {
 //   - If a message_id is stored: edit the message when the rendered content has
 //     changed; otherwise leave it alone.
 //
-// After a send or edit, the bot's reactions for every enabled mapping are added.
+// After a send or edit, the bot's reactions are reconciled with the enabled mappings.
 // Reaction errors are logged but never propagated.
 //
 //nolint:nestif // send-vs-edit branches share state and are clearer than extracting partial flows
@@ -1704,16 +1704,79 @@ func (h *GroupHandler) ensureAnnouncement(ctx context.Context, target *announceT
 		}
 	}
 
-	h.addAnnouncementReactions(ctx, messageID, mappings)
+	h.syncAnnouncementReactions(ctx, messageID, mappings)
 	return nil
 }
 
-func (h *GroupHandler) addAnnouncementReactions(
+//nolint:gocognit,funlen // reaction reconciliation is necessarily complex due to Zulip's reaction model and the need to minimize API calls
+func (h *GroupHandler) syncAnnouncementReactions(
 	ctx context.Context,
 	messageID int64,
 	mappings []storagedb.EmojiGroupMapping,
 ) {
+	messageResp, _, err := h.client.GetMessage(ctx, messageID).Execute()
+	if err != nil {
+		h.logger.WarnContext(ctx, "failed to read announcement reactions",
+			"message_id", messageID,
+			"error", err)
+		return
+	}
+	if messageResp == nil {
+		h.logger.WarnContext(ctx, "failed to read announcement reactions",
+			"message_id", messageID,
+			"error", "empty response")
+		return
+	}
+
+	ownUser, _, err := h.client.GetOwnUser(ctx).Execute()
+	if err != nil {
+		h.logger.WarnContext(ctx, "failed to read own user before syncing announcement reactions",
+			"message_id", messageID,
+			"error", err)
+		return
+	}
+	if ownUser == nil {
+		h.logger.WarnContext(ctx, "failed to read own user before syncing announcement reactions",
+			"message_id", messageID,
+			"error", "empty response")
+		return
+	}
+
+	expected := make(map[string]struct{}, len(mappings))
 	for _, mapping := range mappings {
+		expected[mapping.EmojiName] = struct{}{}
+	}
+
+	actual := make(map[string]struct{}, len(mappings))
+	for _, reaction := range messageResp.Message.Reactions {
+		if reaction.UserID != ownUser.UserID {
+			continue
+		}
+		if _, ok := expected[reaction.EmojiName]; ok {
+			actual[reaction.EmojiName] = struct{}{}
+			continue
+		}
+
+		req := h.client.RemoveReaction(ctx, messageID).
+			EmojiName(reaction.EmojiName)
+		if reaction.EmojiCode != "" {
+			req = req.EmojiCode(reaction.EmojiCode)
+		}
+		if reaction.ReactionType != zulip.ReactionTypeEmpty {
+			req = req.ReactionType(reaction.ReactionType)
+		}
+		if _, _, err := req.Execute(); err != nil {
+			h.logger.WarnContext(ctx, "failed to remove stale bot reaction from announcement",
+				"message_id", messageID,
+				"emoji_name", reaction.EmojiName,
+				"error", err)
+		}
+	}
+
+	for _, mapping := range mappings {
+		if _, ok := actual[mapping.EmojiName]; ok {
+			continue
+		}
 		req := h.client.AddReaction(ctx, messageID).EmojiName(mapping.EmojiName)
 		if _, _, err := req.Execute(); err != nil {
 			h.logger.WarnContext(ctx, "failed to add bot reaction to announcement",

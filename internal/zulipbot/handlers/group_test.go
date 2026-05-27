@@ -159,6 +159,15 @@ func containsInt64(values []int64, needle int64) bool {
 	return false
 }
 
+func hasReaction(reactions []z.EmojiReaction, emojiName string, userID int64) bool {
+	for _, reaction := range reactions {
+		if reaction.EmojiName == emojiName && reaction.UserID == userID {
+			return true
+		}
+	}
+	return false
+}
+
 // newChannelGroupClient builds a channelgroup.Client backed by a fresh
 // zulipmock base. The returned base may be used to seed user groups, set the
 // bot's own user, or inject failures (FailNext).
@@ -1215,6 +1224,38 @@ func TestGroupAnnounceAllValidMappings(t *testing.T) {
 	}
 	if announcementHash(t, env.queries) == "" {
 		t.Error("expected announcement message to be updated for valid mappings")
+	}
+}
+
+func TestGroupAnnounceSyncsBotReactions(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env := newGroupTestEnv(t)
+	groupID := seedChannelGroup(t, env.client, env.base, "WI")
+	seedGroupMapping(t, env.queries, "WI", "wi", groupID)
+	msgID := int64(555)
+	if err := saveAnnouncementState(ctx, env.queries, &msgID); err != nil {
+		t.Fatalf("SaveAnnouncementState: %v", err)
+	}
+	env.base.SetMessageReactions(msgID, []z.EmojiReaction{
+		{EmojiName: "old", UserID: 77},
+		{EmojiName: "old", UserID: 123},
+	})
+
+	h := env.handler(allowAll{})
+	if _, err := h.Handle(ctx, makeGroupRequest(handlers.GroupAnnounceArgs{})); err != nil {
+		t.Fatalf("Handle() failed: %v", err)
+	}
+
+	reactions := env.base.MessageReactions(msgID)
+	if !hasReaction(reactions, "wi", 77) {
+		t.Fatalf("expected bot reaction :wi: to be added, got %#v", reactions)
+	}
+	if hasReaction(reactions, "old", 77) {
+		t.Fatalf("expected stale bot reaction :old: to be removed, got %#v", reactions)
+	}
+	if !hasReaction(reactions, "old", 123) {
+		t.Fatalf("expected other user's :old: reaction to remain, got %#v", reactions)
 	}
 }
 

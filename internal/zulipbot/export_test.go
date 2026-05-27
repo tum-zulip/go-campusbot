@@ -22,6 +22,26 @@ func (bot *Bot) HandleMessage(ctx context.Context, event events.MessageEvent) er
 	return bot.handleMessage(ctx, event, realtimeevents.NewEventQueue(bot.client))
 }
 
+func (bot *Bot) HandleReaction(ctx context.Context, event events.ReactionEvent) error {
+	return bot.handleReaction(ctx, event)
+}
+
+func (bot *Bot) RegisterQueueForTest(ctx context.Context) (QueueState, error) {
+	return bot.registerQueue(ctx)
+}
+
+func (bot *Bot) EventQueueStateForTest(ctx context.Context) (QueueState, bool, error) {
+	return bot.eventQueueState(ctx)
+}
+
+func (bot *Bot) SaveEventQueueStateForTest(ctx context.Context, state QueueState) error {
+	return bot.saveEventQueueState(ctx, state)
+}
+
+func (bot *Bot) SetGroupSubscriberForTest(subscriber GroupSubscriber) {
+	bot.groupSubscriber = subscriber
+}
+
 func (bot *Bot) SetStartedAtForTest(t time.Time) {
 	bot.startedAt = t
 }

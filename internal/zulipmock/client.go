@@ -28,6 +28,7 @@ import (
 	"github.com/tum-zulip/go-zulip/zulip/api/users"
 	"github.com/tum-zulip/go-zulip/zulip/client"
 	"github.com/tum-zulip/go-zulip/zulip/client/statistics"
+	"github.com/tum-zulip/go-zulip/zulip/events"
 )
 
 type Client struct {
@@ -59,21 +60,23 @@ const (
 )
 
 type state struct {
-	mu              sync.Mutex
-	nextChannelID   int64
-	nextFolderID    int64
-	nextUserGroupID int64
-	nextMessageID   int64
-	ownUser         zulip.User
-	users           map[int64]zulip.User
-	lastMessage     *SentMessage
-	typingStatuses  []TypingStatus
-	channels        map[int64]channelState
-	channelIDs      map[string]int64
-	channelFolders  map[int64]zulip.ChannelFolder
-	userGroups      map[int64]userGroupState
-	failures        map[Operation][]error
-	serialization   *RequestSerialization
+	mu                 sync.Mutex
+	nextChannelID      int64
+	nextFolderID       int64
+	nextUserGroupID    int64
+	nextMessageID      int64
+	ownUser            zulip.User
+	users              map[int64]zulip.User
+	lastMessage        *SentMessage
+	messages           map[int64]zulip.Message
+	typingStatuses     []TypingStatus
+	registerEventTypes []events.EventType
+	channels           map[int64]channelState
+	channelIDs         map[string]int64
+	channelFolders     map[int64]zulip.ChannelFolder
+	userGroups         map[int64]userGroupState
+	failures           map[Operation][]error
+	serialization      *RequestSerialization
 }
 
 type RequestSerialization struct {
@@ -221,6 +224,7 @@ func NewClient() Client {
 				IsBot:    true,
 			},
 		},
+		messages:       map[int64]zulip.Message{},
 		channels:       map[int64]channelState{},
 		channelIDs:     map[string]int64{},
 		channelFolders: map[int64]zulip.ChannelFolder{},
@@ -319,6 +323,28 @@ func (c Client) LastSentMessage() *SentMessage {
 	return &copy
 }
 
+func (c Client) SetMessageReactions(messageID int64, reactions []zulip.EmojiReaction) {
+	state := c.ensureState()
+	state.mu.Lock()
+	defer state.mu.Unlock()
+
+	message := state.messages[messageID]
+	message.ID = messageID
+	message.Reactions = append([]zulip.EmojiReaction(nil), reactions...)
+	state.messages[messageID] = message
+}
+
+func (c Client) MessageReactions(messageID int64) []zulip.EmojiReaction {
+	state := c.ensureState()
+	state.mu.Lock()
+	defer state.mu.Unlock()
+
+	reactions := state.messages[messageID].Reactions
+	reactionCopy := make([]zulip.EmojiReaction, len(reactions))
+	copy(reactionCopy, reactions)
+	return reactionCopy
+}
+
 func (c Client) TypingStatuses() []TypingStatus {
 	state := c.ensureState()
 	state.mu.Lock()
@@ -327,6 +353,16 @@ func (c Client) TypingStatuses() []TypingStatus {
 	statuses := make([]TypingStatus, len(state.typingStatuses))
 	copy(statuses, state.typingStatuses)
 	return statuses
+}
+
+func (c Client) RegisterEventTypes() []events.EventType {
+	state := c.ensureState()
+	state.mu.Lock()
+	defer state.mu.Unlock()
+
+	eventTypes := make([]events.EventType, len(state.registerEventTypes))
+	copy(eventTypes, state.registerEventTypes)
+	return eventTypes
 }
 
 func (c Client) DeleteUserGroupForTest(userGroupID int64) {
@@ -532,6 +568,17 @@ func withContext[T any](request T, ctx context.Context) T {
 	return request
 }
 
+func requestEventTypesPtr(request realtimeevents.RegisterQueueRequest) *[]events.EventType {
+	v := reflect.ValueOf(&request).Elem()
+	field := v.FieldByName("eventTypes")
+	if !field.IsValid() || field.IsNil() {
+		return nil
+	}
+	return reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).
+		Elem().
+		Interface().(*[]events.EventType)
+}
+
 func withInt64Field[T any](request T, name string, value int64) T {
 	v := reflect.ValueOf(&request).Elem()
 	field := v.FieldByName(name)
@@ -732,11 +779,34 @@ func (Client) AddNavigationView(_ context.Context) navigationviews.AddNavigation
 func (Client) AddNavigationViewExecute(_ navigationviews.AddNavigationViewRequest) (*zulip.Response, *http.Response, error) {
 	return nil, nil, nil
 }
-func (Client) AddReaction(_ context.Context, _arg1 int64) messages.AddReactionRequest {
-	return withAPIService(messages.AddReactionRequest{}, Client{})
+func (c Client) AddReaction(ctx context.Context, messageID int64) messages.AddReactionRequest {
+	return withInt64Field(withContext(withAPIService(messages.AddReactionRequest{}, c), ctx), "messageID", messageID)
 }
-func (Client) AddReactionExecute(_ messages.AddReactionRequest) (*zulip.Response, *http.Response, error) {
-	return nil, nil, nil
+func (Client) AddReactionExecute(r messages.AddReactionRequest) (*zulip.Response, *http.Response, error) {
+	client := requestClient(r)
+	state := client.ensureState()
+	state.mu.Lock()
+	defer state.mu.Unlock()
+
+	messageID := requestInt64(r, "messageID")
+	emojiName := ""
+	if value := requestStringPtr(r, "emojiName"); value != nil {
+		emojiName = *value
+	}
+	message := state.messages[messageID]
+	message.ID = messageID
+	for _, reaction := range message.Reactions {
+		if reaction.UserID == state.ownUser.UserID && reaction.EmojiName == emojiName {
+			state.messages[messageID] = message
+			return &zulip.Response{Result: "success"}, nil, nil
+		}
+	}
+	message.Reactions = append(message.Reactions, zulip.EmojiReaction{
+		EmojiName: emojiName,
+		UserID:    state.ownUser.UserID,
+	})
+	state.messages[messageID] = message
+	return &zulip.Response{Result: "success"}, nil, nil
 }
 func (c Client) ArchiveChannel(ctx context.Context, channelID int64) channels.ArchiveChannelRequest {
 	return withInt64Field(withContext(withAPIService(channels.ArchiveChannelRequest{}, c), ctx), "channelID", channelID)
@@ -1303,11 +1373,23 @@ func (Client) GetLinkifiers(_ context.Context) serverandorganizations.GetLinkifi
 func (Client) GetLinkifiersExecute(_ serverandorganizations.GetLinkifiersRequest) (*serverandorganizations.GetLinkifiersResponse, *http.Response, error) {
 	return nil, nil, nil
 }
-func (Client) GetMessage(_ context.Context, _arg1 int64) messages.GetMessageRequest {
-	return withAPIService(messages.GetMessageRequest{}, Client{})
+func (c Client) GetMessage(ctx context.Context, messageID int64) messages.GetMessageRequest {
+	return withInt64Field(withContext(withAPIService(messages.GetMessageRequest{}, c), ctx), "messageID", messageID)
 }
-func (Client) GetMessageExecute(_ messages.GetMessageRequest) (*messages.GetMessageResponse, *http.Response, error) {
-	return nil, nil, nil
+func (Client) GetMessageExecute(r messages.GetMessageRequest) (*messages.GetMessageResponse, *http.Response, error) {
+	client := requestClient(r)
+	state := client.ensureState()
+	state.mu.Lock()
+	defer state.mu.Unlock()
+
+	messageID := requestInt64(r, "messageID")
+	message := state.messages[messageID]
+	message.ID = messageID
+	message.Reactions = append([]zulip.EmojiReaction(nil), message.Reactions...)
+	return &messages.GetMessageResponse{
+		Response: successResponse(),
+		Message:  message,
+	}, nil, nil
 }
 func (Client) GetMessageHistory(_ context.Context, _arg1 int64) messages.GetMessageHistoryRequest {
 	return withAPIService(messages.GetMessageHistoryRequest{}, Client{})
@@ -1615,6 +1697,12 @@ func (c Client) RegisterQueueExecute(r realtimeevents.RegisterQueueRequest) (*re
 		return nil, nil, err
 	}
 
+	if eventTypes := requestEventTypesPtr(r); eventTypes != nil {
+		state.registerEventTypes = append([]events.EventType(nil), (*eventTypes)...)
+	} else {
+		state.registerEventTypes = nil
+	}
+
 	queueID := "mock-channelgroup-queue"
 	channelList := make([]zulip.Channel, 0, len(state.channels))
 	for _, channel := range state.channels {
@@ -1676,11 +1764,31 @@ func (Client) RemoveNavigationView(_ context.Context, _arg1 string) navigationvi
 func (Client) RemoveNavigationViewExecute(_ navigationviews.RemoveNavigationViewRequest) (*zulip.Response, *http.Response, error) {
 	return nil, nil, nil
 }
-func (Client) RemoveReaction(_ context.Context, _arg1 int64) messages.RemoveReactionRequest {
-	return withAPIService(messages.RemoveReactionRequest{}, Client{})
+func (c Client) RemoveReaction(ctx context.Context, messageID int64) messages.RemoveReactionRequest {
+	return withInt64Field(withContext(withAPIService(messages.RemoveReactionRequest{}, c), ctx), "messageID", messageID)
 }
-func (Client) RemoveReactionExecute(_ messages.RemoveReactionRequest) (*zulip.Response, *http.Response, error) {
-	return nil, nil, nil
+func (Client) RemoveReactionExecute(r messages.RemoveReactionRequest) (*zulip.Response, *http.Response, error) {
+	client := requestClient(r)
+	state := client.ensureState()
+	state.mu.Lock()
+	defer state.mu.Unlock()
+
+	messageID := requestInt64(r, "messageID")
+	emojiName := ""
+	if value := requestStringPtr(r, "emojiName"); value != nil {
+		emojiName = *value
+	}
+	message := state.messages[messageID]
+	filtered := message.Reactions[:0]
+	for _, reaction := range message.Reactions {
+		if reaction.UserID == state.ownUser.UserID && reaction.EmojiName == emojiName {
+			continue
+		}
+		filtered = append(filtered, reaction)
+	}
+	message.Reactions = filtered
+	state.messages[messageID] = message
+	return &zulip.Response{Result: "success"}, nil, nil
 }
 func (c Client) RenderMessage(ctx context.Context) messages.RenderMessageRequest {
 	return withContext(withAPIService(messages.RenderMessageRequest{}, c), ctx)
@@ -1783,6 +1891,11 @@ func (Client) SendMessageExecute(r messages.SendMessageRequest) (*messages.SendM
 		messageID = 1
 	}
 	state.nextMessageID = messageID + 1
+	state.messages[messageID] = zulip.Message{
+		ID:      messageID,
+		Content: content,
+		Subject: topic,
+	}
 	return &messages.SendMessageResponse{Response: successResponse(), ID: messageID}, nil, nil
 }
 func (c Client) SetTypingStatus(ctx context.Context) users.SetTypingStatusRequest {
@@ -2029,11 +2142,23 @@ func (Client) UpdateLinkifier(_ context.Context, _arg1 int64) serverandorganizat
 func (Client) UpdateLinkifierExecute(_ serverandorganizations.UpdateLinkifierRequest) (*zulip.Response, *http.Response, error) {
 	return nil, nil, nil
 }
-func (Client) UpdateMessage(_ context.Context, _arg1 int64) messages.UpdateMessageRequest {
-	return withAPIService(messages.UpdateMessageRequest{}, Client{})
+func (c Client) UpdateMessage(ctx context.Context, messageID int64) messages.UpdateMessageRequest {
+	return withInt64Field(withContext(withAPIService(messages.UpdateMessageRequest{}, c), ctx), "messageID", messageID)
 }
-func (Client) UpdateMessageExecute(_ messages.UpdateMessageRequest) (*messages.UpdateMessageResponse, *http.Response, error) {
-	return nil, nil, nil
+func (Client) UpdateMessageExecute(r messages.UpdateMessageRequest) (*messages.UpdateMessageResponse, *http.Response, error) {
+	client := requestClient(r)
+	state := client.ensureState()
+	state.mu.Lock()
+	defer state.mu.Unlock()
+
+	messageID := requestInt64(r, "messageID")
+	message := state.messages[messageID]
+	message.ID = messageID
+	if content := requestStringPtr(r, "content"); content != nil {
+		message.Content = *content
+	}
+	state.messages[messageID] = message
+	return &messages.UpdateMessageResponse{Response: successResponse()}, nil, nil
 }
 func (Client) UpdateMessageFlags(_ context.Context) messages.UpdateMessageFlagsRequest {
 	return withAPIService(messages.UpdateMessageFlagsRequest{}, Client{})

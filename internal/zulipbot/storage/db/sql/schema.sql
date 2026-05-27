@@ -51,14 +51,3 @@ CREATE TABLE IF NOT EXISTS announcement_state (
   content_hash TEXT NOT NULL DEFAULT '',
   updated_at TEXT NOT NULL
 );
-
--- reaction event deduplication
-CREATE TABLE IF NOT EXISTS processed_reactions (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  message_id INTEGER NOT NULL,
-  user_id INTEGER NOT NULL,
-  emoji_name TEXT NOT NULL,
-  op TEXT NOT NULL CHECK (op IN ('add', 'remove')),
-  processed_at TEXT NOT NULL,
-  UNIQUE(message_id, user_id, emoji_name, op)
-);
