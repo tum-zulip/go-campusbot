@@ -30,6 +30,13 @@ type GroupRemoveArgs struct {
 
 type GroupMappingListArgs struct{}
 
+// GroupLsArgs covers "group ls" which lists available channel groups.
+type GroupLsArgs struct{}
+
+type GroupShowArgs struct {
+	ShortName string `arg:"short_name" desc:"Group short name to show details for"`
+}
+
 type GroupMappingSetArgs struct {
 	ShortName  string     `desc:"Group short name"`
 	ZulipGroup zulip.User `desc:"Zulip user group mention"                      arg:"zulip_user_group" mention_only:"true"`
@@ -85,6 +92,8 @@ type GroupAnnounceInspectArgs struct{}
 var GroupArgSpec = command.SubcmdSpec{ //nolint:gochecknoglobals // package-level command spec shared across handler methods
 	"subscribe":   GroupSubscribeArgs{},
 	"unsubscribe": GroupUnsubscribeArgs{},
+	"ls":          GroupLsArgs{},
+	"show":        GroupShowArgs{},
 	"create":      GroupCreateArgs{},
 	"remove":      GroupRemoveArgs{},
 	"mapping": command.SubcmdSpec{

@@ -224,9 +224,13 @@ func (h *GroupHandler) Metadata() command.Metadata {
 	return command.Metadata{
 		Name:    "group",
 		Summary: "Subscribe or unsubscribe from a channel group.",
-		Usage:   "group <subscribe|unsubscribe> [-k] <course_short_name>",
+		Usage: "group <subscribe|unsubscribe> [-k] <course_short_name>\n" +
+			"group ls\n" +
+			"group show <short_name>",
 		AdminUsage: "group subscribe <course_short_name>\n" +
 			"group unsubscribe [-k] <course_short_name>\n" +
+			"group ls\n" +
+			"group show <short_name>\n" +
 			"group create <short_name> <:emoji_name:>\n" +
 			"group remove [-f] <short_name>\n" +
 			"group mapping <list|set <short_name> <zulip_user_group> <:emoji_name:>|disable <short_name>>\n" +
@@ -248,6 +252,10 @@ func (h *GroupHandler) Handle(ctx context.Context, req command.Request) (command
 		return h.handleSubscribe(ctx, req, args)
 	case GroupUnsubscribeArgs:
 		return h.handleUnsubscribe(ctx, req, args)
+	case GroupLsArgs:
+		return h.handleLs(ctx)
+	case GroupShowArgs:
+		return h.handleShow(ctx, args)
 	case GroupCreateArgs:
 		return h.handleCreate(ctx, req, args)
 	case GroupRemoveArgs:
@@ -882,6 +890,105 @@ func unknownGroupMessage(
 		"Unknown channel group %q. Use `help group` to see the command format, or ask an admin to check available groups.",
 		shortName,
 	)
+}
+
+func (h *GroupHandler) handleLs(ctx context.Context) (command.Result, error) {
+	mappings, err := h.queries.ListEnabledEmojiGroupMappings(ctx)
+	if err != nil {
+		return command.Result{}, fmt.Errorf("list enabled emoji group mappings: %w", err)
+	}
+	if len(mappings) == 0 {
+		return command.Result{Content: "No channel groups available."}, nil
+	}
+	named, err := h.namedEmojiGroupMappings(ctx, mappings)
+	if err != nil {
+		return command.Result{}, err
+	}
+
+	var b strings.Builder
+	b.WriteString("Available channel groups:\n")
+	for _, m := range named {
+		channelCount := -1
+		groupResp, _, err := h.client.GetChannelGroup(ctx, m.ChannelGroupID).Execute()
+		if err == nil {
+			channelCount = len(groupResp.ChannelGroup.ChannelIDs)
+		}
+		if channelCount >= 0 {
+			fmt.Fprintf(&b, "- `%s` :%s: (%d channel(s))\n", m.ShortName, m.EmojiName, channelCount)
+		} else {
+			fmt.Fprintf(&b, "- `%s` :%s:\n", m.ShortName, m.EmojiName)
+		}
+	}
+	b.WriteString("\nSubscribe with `group subscribe <short_name>`.")
+	return command.Result{Content: strings.TrimSpace(b.String())}, nil
+}
+
+//nolint:funlen // Detailed output formatting.
+func (h *GroupHandler) handleShow(
+	ctx context.Context,
+	args GroupShowArgs,
+) (command.Result, error) {
+	shortName := args.ShortName
+	mapping, found, err := h.emojiGroupMappingByShortName(ctx, shortName)
+	if err != nil {
+		return command.Result{}, err
+	}
+	if !found {
+		return command.Result{}, command.NewUserError(
+			fmt.Sprintf("Unknown channel group %q. Use `group ls` to see available groups.", shortName),
+		)
+	}
+
+	groupResp, _, err := h.client.GetChannelGroup(ctx, mapping.ChannelGroupID).Execute()
+	if err != nil {
+		if errors.Is(err, channelgroup.ErrChannelGroupNotFound) {
+			return command.Result{}, command.NewUserError(
+				fmt.Sprintf("Channel group `%s` is missing in Zulip.", shortName),
+			)
+		}
+		return command.Result{}, fmt.Errorf("get channel group %d: %w", mapping.ChannelGroupID, err)
+	}
+	group := groupResp.ChannelGroup
+
+	subscribersResp, _, subErr := h.client.GetChannelGroupSubscribers(ctx, mapping.ChannelGroupID).Execute()
+	subscriberCount := -1
+	if subErr == nil {
+		subscriberCount = len(subscribersResp.SubscriberIDs)
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "**Channel group `%s`**\n", mapping.ShortName)
+	fmt.Fprintf(&b, "- emoji: :%s:\n", mapping.EmojiName)
+	fmt.Fprintf(&b, "- channel_group_id: %d\n", group.ID)
+	if mapping.Enabled == 0 {
+		b.WriteString("- mapping: disabled\n")
+	} else {
+		b.WriteString("- mapping: enabled\n")
+	}
+	if group.ChannelFolderID != nil {
+		fmt.Fprintf(&b, "- channel_folder_id: %d\n", *group.ChannelFolderID)
+	} else {
+		b.WriteString("- channel_folder_id: (none)\n")
+	}
+	if subscriberCount >= 0 {
+		fmt.Fprintf(&b, "- subscribers: %d\n", subscriberCount)
+	}
+	if len(group.ChannelIDs) == 0 {
+		b.WriteString("- channels: (none)\n")
+	} else {
+		fmt.Fprintf(&b, "- channels (%d):\n", len(group.ChannelIDs))
+		sorted := append([]int64(nil), group.ChannelIDs...)
+		sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+		for _, channelID := range sorted {
+			channelResp, _, err := h.client.GetChannelByID(ctx, channelID).Execute()
+			if err != nil || channelResp == nil {
+				fmt.Fprintf(&b, "  - id=%d\n", channelID)
+				continue
+			}
+			fmt.Fprintf(&b, "  - #**%s** (id=%d)\n", channelResp.Channel.Name, channelID)
+		}
+	}
+	return command.Result{Content: strings.TrimSpace(b.String())}, nil
 }
 
 func (h *GroupHandler) handleMappingList(
