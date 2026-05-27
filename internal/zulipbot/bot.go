@@ -51,6 +51,7 @@ type QueueState struct {
 type GroupSubscriber interface {
 	SubscribeUser(ctx context.Context, userID int64, channelGroupID int64) error
 	UnsubscribeUser(ctx context.Context, userID int64, channelGroupID int64) error
+	ChannelGroupName(ctx context.Context, channelGroupID int64) (string, error)
 }
 
 type RuntimeConfig struct {
@@ -1143,13 +1144,10 @@ func (bot *Bot) emojiGroupMappingByEmoji(
 	ctx context.Context,
 	emojiName, reactionType string,
 ) (storagedb.EmojiGroupMapping, bool, error) {
-	row, err := bot.queries.GetEmojiGroupMappingByEmoji(
-		ctx,
-		storagedb.GetEmojiGroupMappingByEmojiParams{
-			EmojiName:    emojiName,
-			ReactionType: reactionType,
-		},
-	)
+	if reactionType != "unicode_emoji" {
+		return storagedb.EmojiGroupMapping{}, false, nil
+	}
+	row, err := bot.queries.GetEmojiGroupMappingByEmoji(ctx, emojiName)
 	if errors.Is(err, sql.ErrNoRows) {
 		return storagedb.EmojiGroupMapping{}, false, nil
 	}
@@ -1493,6 +1491,14 @@ func (bot *Bot) handleReaction(ctx context.Context, event events.ReactionEvent) 
 		return bot.markReactionProcessed(ctx, event.MessageID, event.UserID, event.EmojiName, opStr)
 	}
 
+	groupShortName, nameErr := bot.groupSubscriber.ChannelGroupName(ctx, mapping.ChannelGroupID)
+	if nameErr != nil {
+		groupShortName = fmt.Sprintf("channel_group_id:%d", mapping.ChannelGroupID)
+		bot.logger.WarnContext(ctx, "failed to fetch channel group name",
+			"channel_group_id", mapping.ChannelGroupID,
+			"error", nameErr)
+	}
+
 	if opErr != nil {
 		if errors.Is(opErr, channelgroup.ErrChannelGroupNotFound) {
 			bot.logger.ErrorContext(
@@ -1501,7 +1507,7 @@ func (bot *Bot) handleReaction(ctx context.Context, event events.ReactionEvent) 
 				"user_id",
 				event.UserID,
 				"group_short_name",
-				mapping.ShortName,
+				groupShortName,
 				"channel_group_id",
 				mapping.ChannelGroupID,
 				"op",
@@ -1524,7 +1530,7 @@ func (bot *Bot) handleReaction(ctx context.Context, event events.ReactionEvent) 
 		}
 		bot.logger.ErrorContext(ctx, "reaction group operation failed",
 			"user_id", event.UserID,
-			"group_short_name", mapping.ShortName,
+			"group_short_name", groupShortName,
 			"channel_group_id", mapping.ChannelGroupID,
 			"op", opStr,
 			"message_id", event.MessageID,
@@ -1534,7 +1540,7 @@ func (bot *Bot) handleReaction(ctx context.Context, event events.ReactionEvent) 
 
 	bot.logger.InfoContext(ctx, "reaction group operation completed",
 		"user_id", event.UserID,
-		"group_short_name", mapping.ShortName,
+		"group_short_name", groupShortName,
 		"op", opStr,
 		"message_id", event.MessageID)
 

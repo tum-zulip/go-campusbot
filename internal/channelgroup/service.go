@@ -2,6 +2,7 @@ package channelgroup
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -104,6 +105,14 @@ func (s *GroupService) ChannelGroupExists(ctx context.Context, channelGroupID in
 	return false, fmt.Errorf("check channel group %d exists: %w", channelGroupID, err)
 }
 
+func (s *GroupService) ChannelGroupName(ctx context.Context, channelGroupID int64) (string, error) {
+	resp, _, err := s.client.GetChannelGroup(ctx, channelGroupID).Execute()
+	if err != nil {
+		return "", fmt.Errorf("get channel group %d: %w", channelGroupID, err)
+	}
+	return resp.ChannelGroup.Name, nil
+}
+
 // ListChannelGroups returns the channel groups currently known to the bot.
 // Names are hydrated from the backing Zulip user groups; a failure to hydrate
 // names is reported as an error so callers can distinguish "no groups imported"
@@ -185,9 +194,12 @@ func (s *GroupService) CreateChannelAndAddToGroup(
 		if !isDuplicateZulipChannelError(err) {
 			return 0, fmt.Errorf("create channel %q: %w", channelName, err)
 		}
-		channelIDResp, _, getErr := s.client.GetChannelID(ctx).Channel(channelName).Execute()
+		channelID, getErr := s.existingChannelID(ctx, channelName)
 		if getErr != nil {
 			return 0, fmt.Errorf("get existing channel %q: %w", channelName, getErr)
+		}
+		if err := s.unarchiveChannel(ctx, channelID); err != nil {
+			return 0, fmt.Errorf("unarchive existing channel %q: %w", channelName, err)
 		}
 		if _, _, subscribeErr := s.client.Subscribe(ctx).
 			Subscriptions([]channels.SubscriptionRequest{{Name: channelName}}).
@@ -195,13 +207,41 @@ func (s *GroupService) CreateChannelAndAddToGroup(
 			Execute(); subscribeErr != nil {
 			return 0, fmt.Errorf("subscribe bot to existing channel %q: %w", channelName, subscribeErr)
 		}
-		channelResp = &channels.CreateChannelResponse{ID: channelIDResp.ChannelID}
+		channelResp = &channels.CreateChannelResponse{ID: channelID}
 	}
 
 	if err := s.AddChannelToGroup(ctx, channelGroupID, channelResp.ID); err != nil {
 		return 0, fmt.Errorf("add channel %d to group %d: %w", channelResp.ID, channelGroupID, err)
 	}
 	return channelResp.ID, nil
+}
+
+func (s *GroupService) existingChannelID(ctx context.Context, channelName string) (int64, error) {
+	channelIDResp, _, err := s.client.GetChannelID(ctx).Channel(channelName).Execute()
+	if err == nil {
+		return channelIDResp.ChannelID, nil
+	}
+	channelsResp, _, listErr := s.client.GetChannels(ctx).
+		IncludeAll(true).
+		ExcludeArchived(false).
+		Execute()
+	if listErr != nil {
+		return 0, fmt.Errorf("list channels after get channel id failed: %w", listErr)
+	}
+	for _, channel := range channelsResp.Channels {
+		if channel.Name == channelName {
+			return channel.ChannelID, nil
+		}
+	}
+	return 0, fmt.Errorf("%w; channel not found in channel list fallback", err)
+}
+
+func (s *GroupService) unarchiveChannel(ctx context.Context, channelID int64) error {
+	_, _, err := s.client.UpdateChannel(ctx, channelID).IsArchived(false).Execute()
+	if err != nil {
+		return fmt.Errorf("update channel %d is_archived=false: %w", channelID, err)
+	}
+	return nil
 }
 
 func isDuplicateZulipChannelError(err error) bool {
@@ -214,10 +254,33 @@ func isDuplicateZulipChannelError(err error) bool {
 			strings.Contains(coded.Msg, "already exists")
 	}
 
+	if code, msg, ok := zulipAPIErrorCodeAndMsg(err); ok {
+		return code == "CHANNEL_ALREADY_EXISTS" ||
+			strings.Contains(msg, "Channel") &&
+				strings.Contains(msg, "already exists")
+	}
+
 	message := err.Error()
 	return strings.Contains(message, "Channel") &&
 		strings.Contains(message, "already exists") &&
 		strings.Contains(message, "CHANNEL_ALREADY_EXISTS")
+}
+
+func zulipAPIErrorCodeAndMsg(err error) (string, string, bool) {
+	var apiErr *zulip.APIError
+	if !errors.As(err, &apiErr) {
+		return "", "", false
+	}
+
+	var body struct {
+		Code string `json:"code"`
+		Msg  string `json:"msg"`
+	}
+	if json.Unmarshal(apiErr.Body(), &body) != nil {
+		return "", "", false
+	}
+
+	return body.Code, body.Msg, true
 }
 
 // AddChannelToGroup adds a channel to a channel group, subscribing all current group members to it.

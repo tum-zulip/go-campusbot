@@ -2,6 +2,7 @@ package channelgroup_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/tum-zulip/go-campusbot/internal/channelgroup"
@@ -61,6 +62,55 @@ func TestGroupServiceCreateChannelGroupAddsBotUser(t *testing.T) {
 	}
 	if !resp.IsSubscriber {
 		t.Fatal("expected bot user to be a channel group subscriber")
+	}
+}
+
+func TestGroupServiceCreateChannelAndAddToGroupUnarchivesExistingChannel(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	base := zulipmock.NewClient()
+	base.SetOwnUser(zulip.User{UserID: 77, Email: "bot@example.com", FullName: "Bot", IsBot: true})
+	channel, _, err := base.CreateChannel(ctx).Name("archived-channel").Execute()
+	if err != nil {
+		t.Fatalf("CreateChannel() failed: %v", err)
+	}
+	if _, _, err := base.ArchiveChannel(ctx, channel.ID).Execute(); err != nil {
+		t.Fatalf("ArchiveChannel() failed: %v", err)
+	}
+	client := newTestClient(t, base)
+	created, _, err := client.CreateChannelGroup(ctx).Name("test-group").Execute()
+	if err != nil {
+		t.Fatalf("CreateChannelGroup() failed: %v", err)
+	}
+	base.FailNext(zulipmock.OperationCreateChannel, zulip.NewAPIError(
+		[]byte(
+			`{"result":"error","msg":"Channel 'archived-channel' already exists","channel_name":"archived-channel","code":"CHANNEL_ALREADY_EXISTS"}`,
+		),
+		errors.New("Conflict"),
+	))
+	base.FailNext(zulipmock.OperationGetChannelID, zulip.CodedError{
+		Response: zulip.Response{
+			Result: zulip.ResponseError,
+			Msg:    "Invalid channel name 'archived-channel'",
+		},
+		Code: "BAD_REQUEST",
+	})
+
+	svc := channelgroup.NewGroupService(client)
+	channelID, err := svc.CreateChannelAndAddToGroup(ctx, "archived-channel", created.ChannelGroupID)
+	if err != nil {
+		t.Fatalf("CreateChannelAndAddToGroup() failed: %v", err)
+	}
+	if channelID != channel.ID {
+		t.Fatalf("channel ID = %d, want %d", channelID, channel.ID)
+	}
+	got, _, err := base.GetChannelByID(ctx, channel.ID).Execute()
+	if err != nil {
+		t.Fatalf("GetChannelByID() failed: %v", err)
+	}
+	if got.Channel.IsArchived {
+		t.Fatal("channel is still archived")
 	}
 }
 

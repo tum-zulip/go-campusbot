@@ -4,8 +4,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"strings"
-
-	storagedb "github.com/tum-zulip/go-campusbot/internal/zulipbot/storage/db"
 )
 
 const preamble = `Hi! :bothappy:
@@ -27,9 +25,14 @@ Have a nice day! :bothappypad:
 
 (2) If your course has changed its emote, remove your reaction of the old emote and react with the new one. Then, you can remove the new reaction again to unsubscribe from the group and its channels.`
 
+type AnnouncementMapping struct {
+	ShortName string
+	EmojiName string
+}
+
 // RenderAnnouncement generates the announcement message markdown from enabled emoji→group mappings.
 // The table uses a 3-column group layout (Course | Emoji pairs, 3 pairs per row).
-func RenderAnnouncement(mappings []storagedb.EmojiGroupMapping) string {
+func RenderAnnouncement(mappings []AnnouncementMapping) string {
 	var b strings.Builder
 
 	b.WriteString(preamble)
@@ -42,7 +45,7 @@ func RenderAnnouncement(mappings []storagedb.EmojiGroupMapping) string {
 }
 
 // AnnouncementContentHash returns a SHA256 hex digest of the rendered content (for change detection).
-func AnnouncementContentHash(mappings []storagedb.EmojiGroupMapping) string {
+func AnnouncementContentHash(mappings []AnnouncementMapping) string {
 	content := RenderAnnouncement(mappings)
 	sum := sha256.Sum256([]byte(content))
 	return hex.EncodeToString(sum[:])
@@ -55,7 +58,7 @@ func escapeMarkdown(s string) string {
 	return s
 }
 
-func renderTable(mappings []storagedb.EmojiGroupMapping) string {
+func renderTable(mappings []AnnouncementMapping) string {
 	const cols = 3
 
 	var b strings.Builder
@@ -67,10 +70,10 @@ func renderTable(mappings []storagedb.EmojiGroupMapping) string {
 		return strings.TrimRight(b.String(), "\n")
 	}
 
-	padded := make([]storagedb.EmojiGroupMapping, 0, len(mappings)+cols-1)
+	padded := make([]AnnouncementMapping, 0, len(mappings)+cols-1)
 	padded = append(padded, mappings...)
 	for len(padded)%cols != 0 {
-		padded = append(padded, storagedb.EmojiGroupMapping{})
+		padded = append(padded, AnnouncementMapping{})
 	}
 
 	for i := 0; i < len(padded); i += cols {

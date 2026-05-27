@@ -37,11 +37,13 @@ type Client struct {
 type Operation string
 
 const (
+	OperationArchiveChannel         Operation = "ArchiveChannel"
 	OperationCreateChannel          Operation = "CreateChannel"
 	OperationCreateChannelFolder    Operation = "CreateChannelFolder"
 	OperationCreateUserGroup        Operation = "CreateUserGroup"
 	OperationDeactivateUserGroup    Operation = "DeactivateUserGroup"
 	OperationGetChannelByID         Operation = "GetChannelByID"
+	OperationGetChannelID           Operation = "GetChannelID"
 	OperationGetChannels            Operation = "GetChannels"
 	OperationGetSubscribers         Operation = "GetSubscribers"
 	OperationGetSubscriptions       Operation = "GetSubscriptions"
@@ -736,11 +738,29 @@ func (Client) AddReaction(_ context.Context, _arg1 int64) messages.AddReactionRe
 func (Client) AddReactionExecute(_ messages.AddReactionRequest) (*zulip.Response, *http.Response, error) {
 	return nil, nil, nil
 }
-func (Client) ArchiveChannel(_ context.Context, _arg1 int64) channels.ArchiveChannelRequest {
-	return withAPIService(channels.ArchiveChannelRequest{}, Client{})
+func (c Client) ArchiveChannel(ctx context.Context, channelID int64) channels.ArchiveChannelRequest {
+	return withInt64Field(withContext(withAPIService(channels.ArchiveChannelRequest{}, c), ctx), "channelID", channelID)
 }
-func (Client) ArchiveChannelExecute(_ channels.ArchiveChannelRequest) (*zulip.Response, *http.Response, error) {
-	return nil, nil, nil
+func (c Client) ArchiveChannelExecute(r channels.ArchiveChannelRequest) (*zulip.Response, *http.Response, error) {
+	state := c.ensureState()
+	channelID := requestInt64(r, "channelID")
+	if err := state.waitForTurn(requestContext(r), OperationArchiveChannel, int64Key(channelID)); err != nil {
+		return nil, nil, err
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if err := state.failLocked(OperationArchiveChannel); err != nil {
+		return nil, nil, err
+	}
+
+	channel, ok := state.channels[channelID]
+	if !ok {
+		return nil, nil, fmt.Errorf("channel %d not found", channelID)
+	}
+	channel.channel.IsArchived = true
+	state.channels[channelID] = channel
+	resp := successResponse()
+	return &resp, nil, nil
 }
 func (Client) CheckMessagesMatchNarrow(_ context.Context) messages.CheckMessagesMatchNarrowRequest {
 	return withAPIService(messages.CheckMessagesMatchNarrowRequest{}, Client{})
@@ -1162,8 +1182,14 @@ func (c Client) GetChannelID(ctx context.Context) channels.GetChannelIDRequest {
 func (Client) GetChannelIDExecute(r channels.GetChannelIDRequest) (*channels.GetChannelIDResponse, *http.Response, error) {
 	client := requestClient(r)
 	state := client.ensureState()
+	if err := state.waitForTurn(requestContext(r), OperationGetChannelID, ""); err != nil {
+		return nil, nil, err
+	}
 	state.mu.Lock()
 	defer state.mu.Unlock()
+	if err := state.failLocked(OperationGetChannelID); err != nil {
+		return nil, nil, err
+	}
 
 	name := ""
 	if value := requestStringPtr(r, "channel"); value != nil {
@@ -1590,10 +1616,16 @@ func (c Client) RegisterQueueExecute(r realtimeevents.RegisterQueueRequest) (*re
 	}
 
 	queueID := "mock-channelgroup-queue"
+	channelList := make([]zulip.Channel, 0, len(state.channels))
+	for _, channel := range state.channels {
+		channelList = append(channelList, channel.channel)
+	}
+	sort.Slice(channelList, func(i, j int) bool { return channelList[i].ChannelID < channelList[j].ChannelID })
 	return &realtimeevents.RegisterQueueResponse{
 		Response:    successResponse(),
 		QueueID:     &queueID,
 		LastEventID: 0,
+		Channels:    channelList,
 	}, nil, nil
 }
 func (Client) RemoveAlertWords(_ context.Context) users.RemoveAlertWordsRequest {

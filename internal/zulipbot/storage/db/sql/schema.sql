@@ -37,14 +37,9 @@ CREATE TABLE IF NOT EXISTS restart_requests (
 
 -- emoji -> channel group mappings
 CREATE TABLE IF NOT EXISTS emoji_group_mappings (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  short_name TEXT NOT NULL UNIQUE,
-  channel_group_id INTEGER NOT NULL,
+  channel_group_id INTEGER PRIMARY KEY,
   emoji_name TEXT NOT NULL,
-  emoji_code TEXT NOT NULL DEFAULT '',
-  reaction_type TEXT NOT NULL DEFAULT 'unicode_emoji',
   enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
-  sort_order INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );

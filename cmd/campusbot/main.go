@@ -32,6 +32,8 @@ const (
 
 	startupTimeout     = 15 * time.Second
 	restartMarkTimeout = 5 * time.Second
+
+	zulipClientMaxRetries = 32
 )
 
 type execFunc func(path string, argv []string, env []string) error
@@ -41,6 +43,7 @@ var (
 	dbPath        = envOrDefault("CAMPUSBOT_DB_PATH", defaultDBPath)
 	dryRunRestart bool
 	logLevel      = envOrDefault("CAMPUSBOT_LOG_LEVEL", "info")
+	logFormat     = envOrDefault("CAMPUSBOT_LOG_FORMAT", "text")
 )
 
 func init() {
@@ -48,6 +51,7 @@ func init() {
 	flag.StringVar(&dbPath, "db", dbPath, "path to SQLite database")
 	flag.BoolVar(&dryRunRestart, "dry-run-restart", false, "log restart exec arguments without exec-ing")
 	flag.StringVar(&logLevel, "log-level", logLevel, "log level: verbose, debug, info, warn, error")
+	flag.StringVar(&logFormat, "log-format", logFormat, "log format: text, json")
 	flag.Usage = func() {
 		fmt.Fprintf(flag.CommandLine.Output(), "Usage: campusbot [run] [flags]\n\n")
 		fmt.Fprintln(flag.CommandLine.Output(), "Start the Zulip campus bot.")
@@ -67,8 +71,13 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	logger := setupLogger(os.Stderr, logConfig.BotLevel)
-	zulipLogger := newLogger(os.Stderr, logConfig.ZulipClientLevel)
+	parsedLogFormat, err := parseLogFormat(logFormat)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	logger := setupLogger(os.Stderr, logConfig.BotLevel, parsedLogFormat)
+	zulipLogger := newLogger(os.Stderr, logConfig.ZulipClientLevel, parsedLogFormat)
 
 	runCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -157,6 +166,7 @@ func newZulipClient(rcPath string, logger *slog.Logger) (zulipclient.Client, err
 		zulipclient.WithClientName(zulipbot.DefaultClientName),
 		zulipclient.WithLogger(logger),
 		zulipclient.WithHTTPClient(newRetryableHTTPClient(rc)),
+		zulipclient.WithMaxRetries(zulipClientMaxRetries),
 		zulipclient.SkipWarnOnInsecureTLS(),
 	)
 	if err != nil {
@@ -255,6 +265,13 @@ type logConfig struct {
 	ZulipClientLevel slog.Level
 }
 
+type logFormatConfig int
+
+const (
+	logFormatText logFormatConfig = iota
+	logFormatJSON
+)
+
 func parseLogLevel(s string) (logConfig, error) {
 	switch strings.ToLower(strings.TrimSpace(s)) {
 	case "verbose":
@@ -272,14 +289,34 @@ func parseLogLevel(s string) (logConfig, error) {
 	}
 }
 
-func setupLogger(w io.Writer, level slog.Level) *slog.Logger {
-	logger := newLogger(w, level)
+func parseLogFormat(s string) (logFormatConfig, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", "text":
+		return logFormatText, nil
+	case "json":
+		return logFormatJSON, nil
+	default:
+		return logFormatText, fmt.Errorf("unknown log format %q (want text or json)", s)
+	}
+}
+
+func setupLogger(w io.Writer, level slog.Level, format logFormatConfig) *slog.Logger {
+	logger := newLogger(w, level, format)
 	slog.SetDefault(logger)
 	return logger
 }
 
-func newLogger(w io.Writer, level slog.Level) *slog.Logger {
-	handler := slog.NewTextHandler(w, &slog.HandlerOptions{Level: level})
+func newLogger(w io.Writer, level slog.Level, format logFormatConfig) *slog.Logger {
+	opts := &slog.HandlerOptions{Level: level}
+	var handler slog.Handler
+	switch format {
+	case logFormatText:
+		handler = slog.NewTextHandler(w, opts)
+	case logFormatJSON:
+		handler = slog.NewJSONHandler(w, opts)
+	default:
+		handler = slog.NewTextHandler(w, opts)
+	}
 	return slog.New(handler)
 }
 

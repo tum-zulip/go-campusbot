@@ -44,6 +44,22 @@ const (
 	originUnsubscribe    = "UnsubscribeFromChannelGroup"
 )
 
+func isAlreadyChannelGroupMemberError(err error) bool {
+	return isZulipBadRequestMessage(err, "already a member")
+}
+
+func isNotChannelGroupMemberError(err error) bool {
+	return isZulipBadRequestMessage(err, "not a member")
+}
+
+func isZulipBadRequestMessage(err error, text string) bool {
+	var coded zulip.CodedError
+	if errors.As(err, &coded) {
+		return coded.Code == "BAD_REQUEST" && strings.Contains(coded.Msg, text)
+	}
+	return strings.Contains(err.Error(), "BAD_REQUEST") && strings.Contains(err.Error(), text)
+}
+
 const zulipAdministratorsSystemGroupName = "role:administrators"
 
 // Client is the campusbot Zulip client. It is a drop-in replacement for
@@ -1239,7 +1255,15 @@ func (s *channelGroups) SubscribeToChannelGroupExecute(
 
 	_, _, err = s.base.UpdateUserGroupMembers(r.ctx, group.ID).Add(userIDs).Execute()
 	if err != nil {
-		return nil, nil, err
+		if isAlreadyChannelGroupMemberError(err) {
+			s.logger.InfoContext(r.ctx, "users already subscribed to channel group",
+				"channel_group_id", r.channelGroupID,
+				"user_group_id", group.ID,
+				"user_ids", userIDs,
+			)
+		} else {
+			return nil, nil, err
+		}
 	}
 
 	latestState, touchedChannels, err := s.subscribeUsersToCurrentChannelGroupChannels(
@@ -1305,6 +1329,16 @@ func (s *channelGroups) UnsubscribeFromChannelGroupExecute(
 	}
 	_, _, err = s.base.UpdateUserGroupMembers(r.ctx, group.ID).Delete(userIDs).Execute()
 	if err != nil {
+		if isNotChannelGroupMemberError(err) {
+			s.logger.InfoContext(r.ctx, "users already absent from channel group",
+				"channel_group_id", r.channelGroupID,
+				"user_group_id", group.ID,
+				"user_ids", userIDs,
+			)
+			return &UnsubscribeFromChannelGroupResponse{
+				Response: successResponse(),
+			}, nil, nil
+		}
 		if !r.keepChannels {
 			_ = s.subscribeUsersToChannels(r.ctx, group.ChannelIDs, userIDs)
 		}

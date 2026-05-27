@@ -95,10 +95,8 @@ func seedGroupMapping(
 	err := queries.UpsertEmojiGroupMapping(
 		context.Background(),
 		storagedb.UpsertEmojiGroupMappingParams{
-			ShortName:      shortName,
 			ChannelGroupID: channelGroupID,
 			EmojiName:      emojiName,
-			ReactionType:   "unicode_emoji",
 			Enabled:        1,
 			CreatedAt:      now,
 			UpdatedAt:      now,
@@ -114,7 +112,14 @@ func getGroupMappingByShortName(
 	queries *storagedb.Queries,
 	shortName string,
 ) (storagedb.EmojiGroupMapping, bool, error) {
-	row, err := queries.GetEmojiGroupMappingByShortName(ctx, shortName)
+	rows, err := queries.ListAllEmojiGroupMappings(ctx)
+	if err != nil {
+		return storagedb.EmojiGroupMapping{}, false, err
+	}
+	if len(rows) == 1 {
+		return rows[0], true, nil
+	}
+	row, err := queries.GetEmojiGroupMappingByChannelGroupID(ctx, 0)
 	if errors.Is(err, sql.ErrNoRows) {
 		return storagedb.EmojiGroupMapping{}, false, nil
 	}
@@ -314,6 +319,27 @@ func TestGroupSubscribe(t *testing.T) {
 	}
 }
 
+func TestGroupSubscribeAlreadySubscribed(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env := newGroupTestEnv(t)
+	groupID := seedChannelGroup(t, env.client, env.base, "WI")
+	seedGroupMapping(t, env.queries, "WI", "wi", groupID)
+	if _, _, err := env.client.SubscribeToChannelGroup(ctx, groupID).
+		Principals(z.Principals{UserIDs: &[]int64{123}}).Execute(); err != nil {
+		t.Fatalf("pre-subscribe: %v", err)
+	}
+
+	h := env.handler(allowAll{})
+	result, err := h.Handle(ctx, makeGroupRequest(handlers.GroupSubscribeArgs{ShortName: "WI"}))
+	if err != nil {
+		t.Fatalf("Handle() failed: %v", err)
+	}
+	if !strings.Contains(result.Content, "already subscribed") {
+		t.Errorf("expected already subscribed message, got: %s", result.Content)
+	}
+}
+
 func TestGroupUnsubscribe(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -340,6 +366,23 @@ func TestGroupUnsubscribe(t *testing.T) {
 	}
 	if resp.IsSubscriber {
 		t.Errorf("expected actor 123 to be unsubscribed from group %d", groupID)
+	}
+}
+
+func TestGroupUnsubscribeNotSubscribed(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env := newGroupTestEnv(t)
+	groupID := seedChannelGroup(t, env.client, env.base, "WI")
+	seedGroupMapping(t, env.queries, "WI", "wi", groupID)
+
+	h := env.handler(allowAll{})
+	result, err := h.Handle(ctx, makeGroupRequest(handlers.GroupUnsubscribeArgs{ShortName: "WI"}))
+	if err != nil {
+		t.Fatalf("Handle() failed: %v", err)
+	}
+	if !strings.Contains(result.Content, "not subscribed") {
+		t.Errorf("expected not subscribed message, got: %s", result.Content)
 	}
 }
 
@@ -575,6 +618,9 @@ func TestGroupRemoveForceArchivesChannelsAndFolder(t *testing.T) {
 	) {
 		t.Fatalf("GetChannelGroup error = %v, want ErrChannelGroupNotFound", err)
 	}
+	if _, found, err := getGroupMappingByShortName(ctx, env.queries, "WI"); err != nil || found {
+		t.Fatalf("mapping found = %t, err = %v; want not found", found, err)
+	}
 	channel, _, err := env.base.GetChannelByID(ctx, channelID).Execute()
 	if err != nil {
 		t.Fatalf("GetChannelByID: %v", err)
@@ -634,6 +680,9 @@ func TestGroupRemoveForceDoesNotArchiveChannelsSharedWithOtherGroups(t *testing.
 	}
 	if !containsInt64(otherGroup.ChannelGroup.ChannelIDs, channelID) {
 		t.Fatalf("shared channel %d was removed from other group %+v", channelID, otherGroup.ChannelGroup)
+	}
+	if _, found, err := getGroupMappingByShortName(ctx, env.queries, "WI"); err != nil || found {
+		t.Fatalf("mapping found = %t, err = %v; want not found", found, err)
 	}
 }
 
@@ -885,11 +934,15 @@ func TestGroupMappingSetRejectsDuplicateEnabledEmoji(t *testing.T) {
 	if !errors.As(err, &userErr) {
 		t.Fatalf("expected UserError for duplicate emoji, got %T: %v", err, err)
 	}
-	if !strings.Contains(userErr.Message, "already mapped to `PGDP`") {
+	if !strings.Contains(userErr.Message, "already mapped to `channel_group_id:100`") {
 		t.Fatalf("expected duplicate emoji guidance, got: %q", userErr.Message)
 	}
-	if _, ok, err := getGroupMappingByShortName(ctx, env.queries, "GAD"); err != nil || ok {
-		t.Fatalf("expected no GAD mapping, ok=%v err=%v", ok, err)
+	mappings, err := env.queries.ListAllEmojiGroupMappings(ctx)
+	if err != nil {
+		t.Fatalf("ListAllEmojiGroupMappings() failed: %v", err)
+	}
+	if len(mappings) != 1 {
+		t.Fatalf("expected no additional GAD mapping, got %d mappings", len(mappings))
 	}
 }
 
@@ -1107,8 +1160,8 @@ func TestGroupAnnounceRejectsInvalidEnabledMapping(t *testing.T) {
 			err,
 		)
 	}
-	if !strings.Contains(userErr.Message, "PGDP") || !strings.Contains(userErr.Message, "9999") {
-		t.Errorf("error should list invalid mapping PGDP/9999, got: %q", userErr.Message)
+	if !strings.Contains(userErr.Message, "channel_group_id:9999") || !strings.Contains(userErr.Message, "9999") {
+		t.Errorf("error should list invalid mapping channel_group_id:9999/9999, got: %q", userErr.Message)
 	}
 	if got := announcementHash(t, env.queries); got != "" {
 		t.Errorf("expected no announcement update when validation fails, got hash %q", got)
@@ -1122,9 +1175,9 @@ func TestGroupAnnounceIgnoresDisabledInvalidMapping(t *testing.T) {
 	wiID := seedChannelGroup(t, env.client, env.base, "WI")
 	seedGroupMapping(t, env.queries, "PGDP", "pgdp", 9999)
 	if err := env.queries.SetEmojiGroupMappingEnabled(ctx, storagedb.SetEmojiGroupMappingEnabledParams{
-		Enabled:   0,
-		UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano),
-		ShortName: "PGDP",
+		Enabled:        0,
+		UpdatedAt:      time.Now().UTC().Format(time.RFC3339Nano),
+		ChannelGroupID: 9999,
 	}); err != nil {
 		t.Fatalf("disable mapping: %v", err)
 	}
@@ -1178,12 +1231,14 @@ func TestGroupMappingListAnnotatesMissingChannelGroups(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Handle() failed: %v", err)
 	}
-	if !strings.Contains(result.Content, "PGDP") ||
+	if !strings.Contains(result.Content, "channel_group_id:9999") ||
 		!strings.Contains(result.Content, "missing channel group") {
-		t.Errorf("expected PGDP to be flagged as missing, got:\n%s", result.Content)
+		t.Errorf("expected missing channel group to be flagged, got:\n%s", result.Content)
 	}
-	if strings.Contains(strings.SplitN(result.Content, "WI", 2)[1], "missing channel group") {
-		t.Errorf("expected WI not to be flagged as missing, got:\n%s", result.Content)
+	for _, line := range strings.Split(result.Content, "\n") {
+		if strings.Contains(line, "`WI`") && strings.Contains(line, "missing channel group") {
+			t.Errorf("expected WI not to be flagged as missing, got:\n%s", result.Content)
+		}
 	}
 }
 
@@ -1781,6 +1836,47 @@ func TestGroupChannelCreateReusesExistingChannel(t *testing.T) {
 	}
 	if len(resp.ChannelIDs) != 1 || resp.ChannelIDs[0] != channelID {
 		t.Fatalf("group channels = %+v, want [%d]", resp.ChannelIDs, channelID)
+	}
+}
+
+func TestGroupChannelCreateUnarchivesExistingChannel(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env, groupID := newCourseTestEnv(t)
+	channelID := seedChannel(t, env.base, "archived-channel")
+	if _, _, err := env.base.ArchiveChannel(ctx, channelID).Execute(); err != nil {
+		t.Fatalf("ArchiveChannel: %v", err)
+	}
+	env.base.FailNext(zulipmock.OperationCreateChannel, z.NewAPIError(
+		[]byte(
+			`{"result":"error","msg":"Channel 'archived-channel' already exists","channel_name":"archived-channel","code":"CHANNEL_ALREADY_EXISTS"}`,
+		),
+		errors.New("Conflict"),
+	))
+	h := env.handler(allowAll{})
+
+	_, err := h.Handle(
+		ctx,
+		makeGroupRequest(
+			handlers.GroupChannelCreateArgs{ChannelName: "archived-channel", ShortName: "WI"},
+		),
+	)
+	if err != nil {
+		t.Fatalf("Handle() failed: %v", err)
+	}
+	resp, _, err := env.client.GetChannelGroupChannels(ctx, groupID).Execute()
+	if err != nil {
+		t.Fatalf("GetChannelGroupChannels: %v", err)
+	}
+	if len(resp.ChannelIDs) != 1 || resp.ChannelIDs[0] != channelID {
+		t.Fatalf("group channels = %+v, want [%d]", resp.ChannelIDs, channelID)
+	}
+	channel, _, err := env.base.GetChannelByID(ctx, channelID).Execute()
+	if err != nil {
+		t.Fatalf("GetChannelByID: %v", err)
+	}
+	if channel.Channel.IsArchived {
+		t.Fatal("channel is still archived")
 	}
 }
 

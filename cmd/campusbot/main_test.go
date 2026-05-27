@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
@@ -57,6 +59,66 @@ func TestParseLogLevel(t *testing.T) {
 func TestParseLogLevelRejectsUnknownLevel(t *testing.T) {
 	if _, err := parseLogLevel("trace"); err == nil {
 		t.Fatal("parseLogLevel(\"trace\") returned nil error")
+	}
+}
+
+func TestParseLogFormat(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  logFormatConfig
+	}{
+		{
+			name:  "text",
+			input: "text",
+			want:  logFormatText,
+		},
+		{
+			name:  "json",
+			input: "json",
+			want:  logFormatJSON,
+		},
+		{
+			name:  "empty defaults to text",
+			input: "",
+			want:  logFormatText,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseLogFormat(tt.input)
+			if err != nil {
+				t.Fatalf("parseLogFormat(%q) returned error: %v", tt.input, err)
+			}
+			if got != tt.want {
+				t.Fatalf("parseLogFormat(%q) = %v, want %v", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseLogFormatRejectsUnknownFormat(t *testing.T) {
+	if _, err := parseLogFormat("console"); err == nil {
+		t.Fatal("parseLogFormat(\"console\") returned nil error")
+	}
+}
+
+func TestNewLoggerSupportsJSONFormat(t *testing.T) {
+	var buf bytes.Buffer
+	logger := newLogger(&buf, slog.LevelInfo, logFormatJSON)
+
+	logger.Info("hello", "answer", 42)
+
+	var entry map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &entry); err != nil {
+		t.Fatalf("log entry is not JSON: %v\nentry: %s", err, buf.String())
+	}
+	if entry["msg"] != "hello" {
+		t.Fatalf("msg = %v, want hello", entry["msg"])
+	}
+	if entry["answer"] != float64(42) {
+		t.Fatalf("answer = %v, want 42", entry["answer"])
 	}
 }
 

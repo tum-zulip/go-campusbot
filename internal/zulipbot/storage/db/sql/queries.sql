@@ -106,44 +106,40 @@ WHERE id = ?;
 -- emoji_group_mappings
 
 -- name: UpsertEmojiGroupMapping :exec
-INSERT INTO emoji_group_mappings (short_name, channel_group_id, emoji_name, emoji_code, reaction_type, enabled, sort_order, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT(short_name) DO UPDATE SET
-  channel_group_id = excluded.channel_group_id,
+INSERT INTO emoji_group_mappings (channel_group_id, emoji_name, enabled, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?)
+ON CONFLICT(channel_group_id) DO UPDATE SET
   emoji_name = excluded.emoji_name,
-  emoji_code = excluded.emoji_code,
-  reaction_type = excluded.reaction_type,
   enabled = excluded.enabled,
-  sort_order = excluded.sort_order,
   updated_at = excluded.updated_at;
 
--- name: DeleteEmojiGroupMappingByShortName :exec
+-- name: DeleteEmojiGroupMappingsByChannelGroupID :exec
 DELETE FROM emoji_group_mappings
-WHERE short_name = ?;
+WHERE channel_group_id = ?;
 
 -- name: ListEnabledEmojiGroupMappings :many
-SELECT id, short_name, channel_group_id, emoji_name, emoji_code, reaction_type, enabled, sort_order, created_at, updated_at
+SELECT channel_group_id, emoji_name, enabled, created_at, updated_at
 FROM emoji_group_mappings
 WHERE enabled = 1
-ORDER BY sort_order, short_name;
+ORDER BY channel_group_id;
 
 -- name: ListAllEmojiGroupMappings :many
-SELECT id, short_name, channel_group_id, emoji_name, emoji_code, reaction_type, enabled, sort_order, created_at, updated_at
+SELECT channel_group_id, emoji_name, enabled, created_at, updated_at
 FROM emoji_group_mappings
-ORDER BY sort_order, short_name;
+ORDER BY channel_group_id;
 
--- name: GetEmojiGroupMappingByShortName :one
-SELECT id, short_name, channel_group_id, emoji_name, emoji_code, reaction_type, enabled, sort_order, created_at, updated_at
+-- name: GetEmojiGroupMappingByChannelGroupID :one
+SELECT channel_group_id, emoji_name, enabled, created_at, updated_at
 FROM emoji_group_mappings
-WHERE short_name = ? AND enabled = 1;
+WHERE channel_group_id = ? AND enabled = 1;
 
 -- name: GetEmojiGroupMappingByEmoji :one
-SELECT id, short_name, channel_group_id, emoji_name, emoji_code, reaction_type, enabled, sort_order, created_at, updated_at
+SELECT channel_group_id, emoji_name, enabled, created_at, updated_at
 FROM emoji_group_mappings
-WHERE emoji_name = ? AND reaction_type = ? AND enabled = 1;
+WHERE emoji_name = ? AND enabled = 1;
 
 -- name: SetEmojiGroupMappingEnabled :exec
-UPDATE emoji_group_mappings SET enabled = ?, updated_at = ? WHERE short_name = ?;
+UPDATE emoji_group_mappings SET enabled = ?, updated_at = ? WHERE channel_group_id = ?;
 
 -- announcement_state
 
