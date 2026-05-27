@@ -160,7 +160,7 @@ func TestCreateChannelGroupWithMockClient(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetChannelGroupSubscribers error = %v", err)
 	}
-	if got, want := subscribers.SubscriberIDs, []int64{10, 20}; !equalInt64s(got, want) {
+	if got, want := subscribers.Subscriber.Members, []int64{10, 20}; !equalInt64s(got, want) {
 		t.Fatalf("subscribers = %v, want %v", got, want)
 	}
 }
@@ -981,7 +981,7 @@ func TestConcurrentSubscribeAndAddChannelMaterializesSubscriberOnNewChannel(t *t
 	if err != nil {
 		t.Fatalf("GetChannelGroupSubscribers error = %v", err)
 	}
-	if got, want := subscribers.SubscriberIDs, []int64{101, 202}; !equalInt64s(got, want) {
+	if got, want := subscribers.Subscriber.Members, []int64{101, 202}; !equalInt64s(got, want) {
 		t.Fatalf("subscribers = %v, want %v", got, want)
 	}
 	if got, want := channelSubscribers(
@@ -1051,7 +1051,7 @@ func TestConcurrentUnsubscribeAndAddChannelDoesNotReintroduceRemovedSubscriber(t
 	if err != nil {
 		t.Fatalf("GetChannelGroupSubscribers error = %v", err)
 	}
-	if got, want := subscribers.SubscriberIDs, []int64{101}; !equalInt64s(got, want) {
+	if got, want := subscribers.Subscriber.Members, []int64{101}; !equalInt64s(got, want) {
 		t.Fatalf("channel group subscribers = %v, want %v", got, want)
 	}
 	if got, want := channelSubscribers(t, ctx, base, channelIDs[1]), []int64{101, mockBootstrapUserID}; !equalInt64s(
@@ -1188,7 +1188,7 @@ func TestConcurrentSubscribeAndUnsubscribeSameUserDeleteWins(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetChannelGroupSubscribers error = %v", err)
 	}
-	if got, want := subscribers.SubscriberIDs, []int64{101}; !equalInt64s(got, want) {
+	if got, want := subscribers.Subscriber.Members, []int64{101}; !equalInt64s(got, want) {
 		t.Fatalf("channel group subscribers = %v, want %v", got, want)
 	}
 	if got, want := channelSubscribers(t, ctx, base, channelIDs[0]), []int64{101, mockBootstrapUserID}; !equalInt64s(
@@ -1253,7 +1253,7 @@ func TestConcurrentUnsubscribeAndSubscribeSameUserAddWins(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetChannelGroupSubscribers error = %v", err)
 	}
-	if got, want := subscribers.SubscriberIDs, []int64{101, 202}; !equalInt64s(got, want) {
+	if got, want := subscribers.Subscriber.Members, []int64{101, 202}; !equalInt64s(got, want) {
 		t.Fatalf("channel group subscribers = %v, want %v", got, want)
 	}
 	if got, want := channelSubscribers(
@@ -1378,7 +1378,7 @@ func TestConcurrentSerializedSameUserSubscriptionState(t *testing.T) {
 			if err != nil {
 				t.Fatalf("GetChannelGroupSubscribers error = %v", err)
 			}
-			if got := subscribers.SubscriberIDs; !equalInt64s(got, tt.wantMembers) {
+			if got := subscribers.Subscriber.Members; !equalInt64s(got, tt.wantMembers) {
 				t.Fatalf("channel group subscribers = %v, want %v", got, tt.wantMembers)
 			}
 			wantChannelSubscribers := append([]int64{}, tt.wantMembers...)
@@ -1537,7 +1537,7 @@ func TestConcurrentTwoSubscribersAndAddChannelMaterializesBothUsers(t *testing.T
 	if err != nil {
 		t.Fatalf("GetChannelGroupSubscribers error = %v", err)
 	}
-	if got, want := subscribers.SubscriberIDs, []int64{101, 202, 303}; !equalInt64s(got, want) {
+	if got, want := subscribers.Subscriber.Members, []int64{101, 202, 303}; !equalInt64s(got, want) {
 		t.Fatalf("channel group subscribers = %v, want %v", got, want)
 	}
 	if got, want := channelSubscribers(
@@ -1681,7 +1681,7 @@ func TestSubscribeToChannelGroupDoesNotResubscribeManualChannelUnsubscribe(t *te
 	if err != nil {
 		t.Fatalf("GetChannelGroupSubscribers error = %v", err)
 	}
-	if got, want := subscribers.SubscriberIDs, []int64{101, 202}; !equalInt64s(got, want) {
+	if got, want := subscribers.Subscriber.Members, []int64{101, 202}; !equalInt64s(got, want) {
 		t.Fatalf("channel group subscribers = %v, want %v", got, want)
 	}
 	if got, want := channelSubscribers(t, ctx, base, channelIDs[0]), []int64{202, mockBootstrapUserID}; !equalInt64s(
@@ -1744,7 +1744,7 @@ func assertSubscribeToChannelGroupRollback(
 	if err != nil {
 		t.Fatalf("GetChannelGroupSubscribers error = %v", err)
 	}
-	if got, want := subscribers.SubscriberIDs, []int64{101}; !equalInt64s(got, want) {
+	if got, want := subscribers.Subscriber.Members, []int64{101}; !equalInt64s(got, want) {
 		t.Fatalf("channel group subscribers after failed subscribe = %v, want %v", got, want)
 	}
 	if got, want := channelSubscribers(t, ctx, base, channelIDs[0]), []int64{101, mockBootstrapUserID}; !equalInt64s(
@@ -1782,7 +1782,7 @@ func TestUnsubscribeFromChannelGroupRollsBackChannelsWhenUserGroupUpdateFails(t 
 	if err != nil {
 		t.Fatalf("GetChannelGroupSubscribers error = %v", err)
 	}
-	if got, want := subscribers.SubscriberIDs, []int64{101, 202}; !equalInt64s(got, want) {
+	if got, want := subscribers.Subscriber.Members, []int64{101, 202}; !equalInt64s(got, want) {
 		t.Fatalf("channel group subscribers after failed unsubscribe = %v, want %v", got, want)
 	}
 	if got, want := channelSubscribers(
@@ -1859,7 +1859,7 @@ func TestConcurrentUnsubscribeAndDeleteSameChannelLeavesNoSubscribers(t *testing
 	if err != nil {
 		t.Fatalf("GetChannelGroupSubscribers error = %v", err)
 	}
-	if got, want := subscribers.SubscriberIDs, []int64{101}; !equalInt64s(got, want) {
+	if got, want := subscribers.Subscriber.Members, []int64{101}; !equalInt64s(got, want) {
 		t.Fatalf("subscribers = %v, want %v", got, want)
 	}
 	if got, want := channelSubscribers(t, ctx, base, channelIDs[0]), []int64{101, mockBootstrapUserID}; !equalInt64s(
@@ -1924,7 +1924,7 @@ func TestConcurrentUnsubscribeThenAddChannelDoesNotReintroduceRemovedSubscriber(
 	if err != nil {
 		t.Fatalf("GetChannelGroupSubscribers error = %v", err)
 	}
-	if got, want := subscribers.SubscriberIDs, []int64{101}; !equalInt64s(got, want) {
+	if got, want := subscribers.Subscriber.Members, []int64{101}; !equalInt64s(got, want) {
 		t.Fatalf("channel group subscribers = %v, want %v", got, want)
 	}
 	if got, want := channelSubscribers(t, ctx, base, channelIDs[1]), []int64{101, mockBootstrapUserID}; !equalInt64s(
@@ -1990,7 +1990,7 @@ func TestConcurrentUnsubscribeAndDeleteDifferentChannelLeavesRemainingChannelsIn
 	if err != nil {
 		t.Fatalf("GetChannelGroupSubscribers error = %v", err)
 	}
-	if got, want := subscribers.SubscriberIDs, []int64{101}; !equalInt64s(got, want) {
+	if got, want := subscribers.Subscriber.Members, []int64{101}; !equalInt64s(got, want) {
 		t.Fatalf("subscribers = %v, want %v", got, want)
 	}
 	if got, want := channelSubscribers(t, ctx, base, channelIDs[0]), []int64{101, mockBootstrapUserID}; !equalInt64s(

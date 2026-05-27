@@ -1211,13 +1211,22 @@ func (s *channelGroups) GetChannelGroupSubscribersExecute(
 	if err != nil {
 		return nil, nil, err
 	}
+	namedGroup, err := s.withUserGroupName(r.ctx, group)
+	if err != nil {
+		return nil, nil, err
+	}
 	members, err := s.userGroupMembers(r.ctx, group.ID)
 	if err != nil {
 		return nil, nil, err
 	}
+	subscriber := zulip.UserGroup{
+		ID:      namedGroup.ID,
+		Name:    namedGroup.Name,
+		Members: members,
+	}
 	return &GetChannelGroupSubscribersResponse{
-		Response:      successResponse(),
-		SubscriberIDs: members,
+		Response:   successResponse(),
+		Subscriber: subscriber,
 	}, nil, nil
 }
 
@@ -2479,7 +2488,7 @@ func (r GetChannelGroupSubscribersRequest) Execute() (*GetChannelGroupSubscriber
 type GetChannelGroupSubscribersResponse struct {
 	zulip.Response
 
-	SubscriberIDs []int64 `json:"subscriber_ids"`
+	Subscriber zulip.UserGroup `json:"subscriber"`
 }
 
 type GetIsChannelGroupSubscriberRequest struct {

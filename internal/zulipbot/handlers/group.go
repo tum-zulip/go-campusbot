@@ -953,7 +953,7 @@ func (h *GroupHandler) handleShow(
 	subscribersResp, _, subErr := h.client.GetChannelGroupSubscribers(ctx, mapping.ChannelGroupID).Execute()
 	subscriberCount := -1
 	if subErr == nil {
-		subscriberCount = len(subscribersResp.SubscriberIDs)
+		subscriberCount = len(subscribersResp.Subscriber.Members)
 	}
 
 	var b strings.Builder
