@@ -9,7 +9,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -22,7 +21,6 @@ import (
 	"github.com/tum-zulip/go-campusbot/internal/channelgroup"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/announcement"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/command"
-	"github.com/tum-zulip/go-campusbot/internal/zulipbot/configsvc"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/handlers"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/storage"
 )
@@ -69,7 +67,6 @@ type Bot struct {
 	ownUser zulip.User
 
 	repo      *storage.Repository
-	config    *configsvc.Service
 	logger    *slog.Logger
 	startedAt time.Time
 
@@ -135,7 +132,6 @@ func NewBot(
 	bot.logger = cfg.Logger
 	bot.startedAt = time.Now().UTC()
 
-	bot.config = configsvc.NewService(repo, bot)
 	bot.argParser = command.NewArgParser(bot)
 
 	if err := channelgroup.Migrate(ctx, repo.DB()); err != nil {
@@ -153,42 +149,13 @@ func NewBot(
 	bot.groupSubscriber = groupService
 
 	announcementManager := announcement.NewManager(repo, bot, cfg.Logger)
-	groupConfigReader := handlers.NewGroupConfigAdapter(
-		func(ctx context.Context) (int64, bool, error) {
-			v, err := bot.config.GetRaw(ctx, configsvc.KeyAnnouncementChannelID)
-			if err != nil {
-				return 0, false, err
-			}
-			if v.IsDefault || v.Value == "" {
-				return 0, false, nil
-			}
-			id, err := strconv.ParseInt(v.Value, 10, 64)
-			if err != nil {
-				return 0, false, err
-			}
-			return id, true, nil
-		},
-		func(ctx context.Context) (string, bool, error) {
-			v, err := bot.config.GetRaw(ctx, configsvc.KeyAnnouncementTopic)
-			if err != nil {
-				return "", false, err
-			}
-			if v.IsDefault || v.Value == "" {
-				return "", false, nil
-			}
-			return v.Value, true, nil
-		},
-	)
 
 	bot.registry = command.NewRegistry()
-	if err := bot.registry.Register(handlers.NewConfigHandler(bot.config)); err != nil {
-		return nil, err
-	}
 	if err := bot.registry.Register(handlers.NewGroupHandler(
 		channelGroupClient,
 		repo,
 		announcementManager,
-		groupConfigReader,
+		bot,
 		bot,
 	)); err != nil {
 		return nil, err
@@ -227,7 +194,7 @@ func (bot *Bot) Run(ctx context.Context) (bool, error) {
 		return false, errors.New("Bot.Run requires a repository (use NewBot)")
 	}
 
-	notify, err := bot.config.Bool(ctx, configsvc.KeyRestartStartupNotification)
+	notify, err := bot.boolConfig(ctx, KeyRestartStartupNotification)
 	if err != nil {
 		return false, fmt.Errorf("load restart notification config: %w", err)
 	}
@@ -378,6 +345,14 @@ func (bot *Bot) dispatch(ctx context.Context, req command.Request) command.Resul
 		return bot.handleStatus(ctx, req)
 	case "restart":
 		return bot.handleRestart(ctx, req)
+	case "config":
+		if err := bot.Check(ctx, req.Actor, configMeta.Permission); err != nil {
+			if errors.Is(err, command.ErrPermissionUnavailable) {
+				return command.Result{Content: "I cannot verify permissions right now, so I will not run that command."}
+			}
+			return command.Result{Content: "permission denied"}
+		}
+		return bot.handleConfig(ctx, req)
 	}
 
 	handler, ok := bot.registry.Lookup(name)
@@ -486,7 +461,7 @@ func (bot *Bot) handleHelp(ctx context.Context, req command.Request) command.Res
 }
 
 func (bot *Bot) visibleMetas(role zulip.Role) []command.Metadata {
-	all := []command.Metadata{helpMeta, statusMeta, restartMeta}
+	all := []command.Metadata{helpMeta, statusMeta, restartMeta, configMeta}
 	if bot.registry != nil {
 		all = append(all, bot.registry.Metadata()...)
 	}

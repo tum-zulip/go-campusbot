@@ -1,4 +1,4 @@
-package zulipbot
+package zulipbot_test
 
 import (
 	"context"
@@ -10,12 +10,13 @@ import (
 
 	"github.com/tum-zulip/go-zulip/zulip"
 
+	"github.com/tum-zulip/go-campusbot/internal/zulipbot"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/command"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/storage"
 	"github.com/tum-zulip/go-campusbot/internal/zulipmock"
 )
 
-func newDispatchTestBot(t *testing.T) *Bot {
+func newDispatchTestBot(t *testing.T) *zulipbot.Bot {
 	t.Helper()
 
 	client := zulipmock.NewClient()
@@ -31,11 +32,11 @@ func newDispatchTestBot(t *testing.T) *Bot {
 	}
 	t.Cleanup(func() { _ = repo.Close() })
 
-	bot, err := NewBot(context.Background(), RuntimeConfig{Logger: slog.Default()}, client, repo)
+	bot, err := zulipbot.NewBot(context.Background(), zulipbot.RuntimeConfig{Logger: slog.Default()}, client, repo)
 	if err != nil {
 		t.Fatalf("NewBot: %v", err)
 	}
-	bot.startedAt = time.Now().Add(-2 * time.Hour)
+	bot.SetStartedAtForTest(time.Now().Add(-2 * time.Hour))
 	return bot
 }
 
@@ -60,7 +61,7 @@ func TestDispatchHelpListsCommands(t *testing.T) {
 	t.Parallel()
 
 	bot := newDispatchTestBot(t)
-	result := bot.dispatch(context.Background(), memberRequest("help"))
+	result := bot.Dispatch(context.Background(), memberRequest("help"))
 	if !strings.Contains(result.Content, "Supported commands") {
 		t.Fatalf("help output = %q", result.Content)
 	}
@@ -76,7 +77,7 @@ func TestDispatchStatusIncludesUptime(t *testing.T) {
 	t.Parallel()
 
 	bot := newDispatchTestBot(t)
-	result := bot.dispatch(context.Background(), memberRequest("status"))
+	result := bot.Dispatch(context.Background(), memberRequest("status"))
 	if !strings.Contains(result.Content, "uptime: 2h") {
 		t.Fatalf("status should report uptime: %q", result.Content)
 	}
@@ -95,7 +96,7 @@ func TestDispatchRestartSchedulesRestart(t *testing.T) {
 	ctx := context.Background()
 	req := ownerRequest("restart")
 
-	result := bot.dispatch(ctx, req)
+	result := bot.Dispatch(ctx, req)
 	if !strings.Contains(result.Content, "Restarting now") {
 		t.Fatalf("restart reply = %q", result.Content)
 	}
@@ -117,9 +118,9 @@ func TestDispatchRefusesWhenNotAccepting(t *testing.T) {
 	t.Parallel()
 
 	bot := newDispatchTestBot(t)
-	bot.accepting.Store(false)
+	bot.SetAcceptingForTest(false)
 
-	result := bot.dispatch(context.Background(), memberRequest("help"))
+	result := bot.Dispatch(context.Background(), memberRequest("help"))
 	if !strings.Contains(result.Content, "restarting") {
 		t.Fatalf("expected restarting refusal, got %q", result.Content)
 	}
@@ -129,7 +130,7 @@ func TestDispatchUnknownCommand(t *testing.T) {
 	t.Parallel()
 
 	bot := newDispatchTestBot(t)
-	result := bot.dispatch(context.Background(), memberRequest("bogus"))
+	result := bot.Dispatch(context.Background(), memberRequest("bogus"))
 	if !strings.Contains(result.Content, `Unknown command "bogus"`) {
 		t.Fatalf("unknown command reply = %q", result.Content)
 	}

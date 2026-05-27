@@ -818,30 +818,4 @@ func (h *GroupHandler) triggerAnnouncementUpdate(ctx context.Context) {
 
 var _ command.Handler = (*GroupHandler)(nil)
 
-// GroupConfigAdapter adapts two provider functions into a GroupConfigReader.
-type GroupConfigAdapter struct {
-	getChannelID func(ctx context.Context) (int64, bool, error)
-	getTopic     func(ctx context.Context) (string, bool, error)
-}
-
-func (a *GroupConfigAdapter) AnnouncementChannelID(ctx context.Context) (int64, bool, error) {
-	return a.getChannelID(ctx)
-}
-
-func (a *GroupConfigAdapter) AnnouncementTopic(ctx context.Context) (string, bool, error) {
-	return a.getTopic(ctx)
-}
-
-func NewGroupConfigAdapter(
-	getChannelID func(ctx context.Context) (int64, bool, error),
-	getTopic func(ctx context.Context) (string, bool, error),
-) *GroupConfigAdapter {
-	return &GroupConfigAdapter{
-		getChannelID: getChannelID,
-		getTopic:     getTopic,
-	}
-}
-
-var _ GroupConfigReader = (*GroupConfigAdapter)(nil)
-
 var _ zulip.Role = command.PermAdmin
