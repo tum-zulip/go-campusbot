@@ -100,7 +100,7 @@ func (h *GroupHandler) Metadata() command.Metadata {
 			"group unsubscribe [-k] <course_short_name>\n" +
 			"group create <short_name> <emoji_name>\n" +
 			"group mapping <list|set <short_name> <zulip_user_group> <emoji_name>|disable <short_name>>\n" +
-			"group channel <add|remove|create> <channel_id_or_name> <short_name>\n" +
+			"group channel <add|remove|create> <channel_mention_or_name> <short_name>\n" +
 			"group announce [set-message <message_id>|inspect]",
 		Permission: command.PermOpen,
 		ArgSpec:    GroupArgSpec,

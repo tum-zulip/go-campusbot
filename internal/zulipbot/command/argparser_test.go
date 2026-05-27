@@ -458,6 +458,10 @@ type channelArgs struct {
 	Channel zulip.Channel `arg:"channel" desc:"Zulip channel"`
 }
 
+type channelMentionArgs struct {
+	Channel zulip.Channel `arg:"channel" mention_only:"true" desc:"Zulip channel mention"`
+}
+
 type channelIDArgs struct {
 	ChannelID int64 `arg:"channel_id" desc:"Zulip channel ID"`
 }
@@ -480,6 +484,43 @@ func TestArgParserChannelMentionResolution(t *testing.T) {
 	got := result.(channelArgs)
 	if got.Channel.ChannelID != 24 || got.Channel.Name != "The Channel Name" {
 		t.Fatalf("unexpected channel: %+v", got.Channel)
+	}
+}
+
+func TestArgParserChannelMentionOnlyAcceptsMention(t *testing.T) {
+	t.Parallel()
+	resolver := &fakeResolver{
+		channels: map[int64]zulip.Channel{
+			24: {ChannelID: 24, Name: "The Channel Name"},
+		},
+		rendered: map[string]string{
+			`#**The Channel Name**`: `<p><a data-stream-id="24">#The Channel Name</a></p>`,
+		},
+	}
+	parser := command.NewArgParser(resolver)
+	result, err := parser.Parse(context.Background(), channelMentionArgs{}, []string{`#**The Channel Name**`})
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	got := result.(channelMentionArgs)
+	if got.Channel.ChannelID != 24 || got.Channel.Name != "The Channel Name" {
+		t.Fatalf("unexpected channel: %+v", got.Channel)
+	}
+}
+
+func TestArgParserChannelMentionOnlyRejectsInteger(t *testing.T) {
+	t.Parallel()
+	resolver := &fakeResolver{channels: map[int64]zulip.Channel{
+		24: {ChannelID: 24, Name: "The Channel Name"},
+	}}
+	parser := command.NewArgParser(resolver)
+	_, err := parser.Parse(context.Background(), channelMentionArgs{}, []string{"24"})
+	var userErr command.UserError
+	if !errors.As(err, &userErr) {
+		t.Fatalf("expected UserError, got %T: %v", err, err)
+	}
+	if !strings.Contains(userErr.Message, "Zulip channel mention") {
+		t.Fatalf("expected mention-only error, got %q", userErr.Message)
 	}
 }
 

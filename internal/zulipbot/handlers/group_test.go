@@ -181,6 +181,14 @@ func (r groupArgResolver) GetUserByID(ctx context.Context, id int64) (z.User, er
 	return resp.User, nil
 }
 
+func (r groupArgResolver) GetChannelByID(ctx context.Context, id int64) (z.Channel, error) {
+	resp, _, err := r.Client.GetChannelByID(ctx, id).Execute()
+	if err != nil {
+		return z.Channel{}, err
+	}
+	return resp.Channel, nil
+}
+
 func newGroupTestEnv(t *testing.T) *groupTestEnv {
 	t.Helper()
 	client, base := newChannelGroupClient(t)
@@ -1064,6 +1072,43 @@ func TestGroupCourseInvalidChannelID(t *testing.T) {
 	_, err := parser.Parse(ctx, handlers.GroupArgSpec, []string{"course", "add", "notanint", "WI"})
 	if err == nil {
 		t.Fatal("expected error for invalid channel_id")
+	}
+}
+
+func TestGroupChannelAddParsesChannelMention(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env, _ := newCourseTestEnv(t)
+	channelID := seedChannel(t, env.base, "wi-channel")
+	parser := command.NewArgParser(groupArgResolver{Client: env.base})
+
+	parsed, err := parser.Parse(ctx, handlers.GroupArgSpec, []string{"channel", "add", "#**wi-channel**", "WI"})
+	if err != nil {
+		t.Fatalf("Parse() failed: %v", err)
+	}
+	args, ok := parsed.(handlers.GroupChannelAddArgs)
+	if !ok {
+		t.Fatalf("expected GroupChannelAddArgs, got %T", parsed)
+	}
+	if args.Channel.ChannelID != channelID || args.Channel.Name != "wi-channel" {
+		t.Fatalf("unexpected channel: %+v", args.Channel)
+	}
+}
+
+func TestGroupChannelAddRejectsNumericChannelID(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env, _ := newCourseTestEnv(t)
+	channelID := seedChannel(t, env.base, "wi-channel")
+	parser := command.NewArgParser(groupArgResolver{Client: env.base})
+
+	_, err := parser.Parse(ctx, handlers.GroupArgSpec, []string{"channel", "add", itoa(channelID), "WI"})
+	var userErr command.UserError
+	if !errors.As(err, &userErr) {
+		t.Fatalf("expected UserError, got %T: %v", err, err)
+	}
+	if !strings.Contains(userErr.Message, "Zulip channel mention") {
+		t.Fatalf("expected mention-only error, got %q", userErr.Message)
 	}
 }
 

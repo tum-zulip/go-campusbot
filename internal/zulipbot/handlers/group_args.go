@@ -36,13 +36,13 @@ type GroupMappingDisableArgs struct {
 }
 
 type GroupChannelAddArgs struct {
-	Channel   zulip.Channel `desc:"Zulip channel"`
-	ShortName string        `desc:"Group short name"`
+	Channel   zulip.Channel `arg:"channel" mention_only:"true" desc:"Zulip channel mention"`
+	ShortName string        `                                  desc:"Group short name"`
 }
 
 type GroupChannelRemoveArgs struct {
-	Channel   zulip.Channel `desc:"Zulip channel"`
-	ShortName string        `desc:"Group short name"`
+	Channel   zulip.Channel `arg:"channel" mention_only:"true" desc:"Zulip channel mention"`
+	ShortName string        `                                  desc:"Group short name"`
 }
 
 type GroupChannelCreateArgs struct {
