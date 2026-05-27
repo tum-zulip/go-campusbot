@@ -211,6 +211,47 @@ func (s *GroupService) RemoveChannelFromGroup(ctx context.Context, channelGroupI
 	return nil
 }
 
+// AddFolderToGroup creates a Zulip channel folder for the group and assigns
+// the group's current channels to it. If a folder already exists, it assigns
+// the current channels to the existing folder.
+func (s *GroupService) AddFolderToGroup(ctx context.Context, channelGroupID int64) error {
+	_, _, err := s.client.UpdateChannelGroupFolder(ctx, channelGroupID).Add().Execute()
+	if err != nil {
+		return fmt.Errorf("add channel folder to channel group %d: %w", channelGroupID, err)
+	}
+	return nil
+}
+
+// RemoveFolderFromGroup archives the group's Zulip channel folder and removes
+// the folder association from the local channel group.
+func (s *GroupService) RemoveFolderFromGroup(ctx context.Context, channelGroupID int64) error {
+	_, _, err := s.client.UpdateChannelGroupFolder(ctx, channelGroupID).Remove().Execute()
+	if err != nil {
+		return fmt.Errorf("remove channel folder from channel group %d: %w", channelGroupID, err)
+	}
+	return nil
+}
+
+// AssignFolderToGroupChannels assigns the group's current channels to its
+// existing Zulip channel folder.
+func (s *GroupService) AssignFolderToGroupChannels(ctx context.Context, channelGroupID int64) error {
+	_, _, err := s.client.UpdateChannelGroupFolder(ctx, channelGroupID).Assign().Execute()
+	if err != nil {
+		return fmt.Errorf("assign channel folder for channel group %d: %w", channelGroupID, err)
+	}
+	return nil
+}
+
+// UnassignFolderFromChannels unassigns channels from the group's existing
+// Zulip channel folder, but keeps the folder associated with the group.
+func (s *GroupService) UnassignFolderFromChannels(ctx context.Context, channelGroupID int64) error {
+	_, _, err := s.client.UpdateChannelGroupFolder(ctx, channelGroupID).Unassign().Execute()
+	if err != nil {
+		return fmt.Errorf("unassign channel folder for channel group %d: %w", channelGroupID, err)
+	}
+	return nil
+}
+
 // UnsubscribeUserKeepChannels removes a user from the channel group future updates
 // but keeps their existing channel memberships.
 func (s *GroupService) UnsubscribeUserKeepChannels(ctx context.Context, userID int64, channelGroupID int64) error {

@@ -38,6 +38,7 @@ type Operation string
 
 const (
 	OperationCreateChannel          Operation = "CreateChannel"
+	OperationCreateChannelFolder    Operation = "CreateChannelFolder"
 	OperationCreateUserGroup        Operation = "CreateUserGroup"
 	OperationDeactivateUserGroup    Operation = "DeactivateUserGroup"
 	OperationGetChannelByID         Operation = "GetChannelByID"
@@ -48,6 +49,8 @@ const (
 	OperationGetUserGroups          Operation = "GetUserGroups"
 	OperationSubscribe              Operation = "Subscribe"
 	OperationUnsubscribe            Operation = "Unsubscribe"
+	OperationUpdateChannel          Operation = "UpdateChannel"
+	OperationUpdateChannelFolder    Operation = "UpdateChannelFolder"
 	OperationUpdateUserGroupMembers Operation = "UpdateUserGroupMembers"
 )
 
@@ -555,6 +558,15 @@ func requestStringPtr[T any](request T, name string) *string {
 	return (*string)(unsafe.Pointer(field.Pointer()))
 }
 
+func requestBoolPtr[T any](request T, name string) *bool {
+	v := reflect.ValueOf(request)
+	field := v.FieldByName(name)
+	if field.IsNil() {
+		return nil
+	}
+	return (*bool)(unsafe.Pointer(field.Pointer()))
+}
+
 func requestInt64SlicePtr[T any](request T, name string) *[]int64 {
 	v := reflect.ValueOf(request)
 	field := v.FieldByName(name)
@@ -773,8 +785,14 @@ func (c Client) CreateChannelFolder(ctx context.Context) channels.CreateChannelF
 }
 func (c Client) CreateChannelFolderExecute(r channels.CreateChannelFolderRequest) (*channels.CreateChannelFolderResponse, *http.Response, error) {
 	state := c.ensureState()
+	if err := state.waitForTurn(requestContext(r), OperationCreateChannelFolder, ""); err != nil {
+		return nil, nil, err
+	}
 	state.mu.Lock()
 	defer state.mu.Unlock()
+	if err := state.failLocked(OperationCreateChannelFolder); err != nil {
+		return nil, nil, err
+	}
 
 	name := ""
 	if v := requestStringPtr(r, "name"); v != nil {
@@ -1796,10 +1814,16 @@ func (c Client) UpdateChannel(ctx context.Context, channelID int64) channels.Upd
 }
 func (c Client) UpdateChannelExecute(r channels.UpdateChannelRequest) (*zulip.Response, *http.Response, error) {
 	state := c.ensureState()
+	channelID := requestInt64(r, "channelID")
+	if err := state.waitForTurn(requestContext(r), OperationUpdateChannel, int64Key(channelID)); err != nil {
+		return nil, nil, err
+	}
 	state.mu.Lock()
 	defer state.mu.Unlock()
+	if err := state.failLocked(OperationUpdateChannel); err != nil {
+		return nil, nil, err
+	}
 
-	channelID := requestInt64(r, "channelID")
 	channel, ok := state.channels[channelID]
 	if !ok {
 		return nil, nil, fmt.Errorf("channel %d not found", channelID)
@@ -1815,11 +1839,49 @@ func (c Client) UpdateChannelExecute(r channels.UpdateChannelRequest) (*zulip.Re
 	resp := successResponse()
 	return &resp, nil, nil
 }
-func (Client) UpdateChannelFolder(_ context.Context, _arg1 int64) channels.UpdateChannelFolderRequest {
-	return withAPIService(channels.UpdateChannelFolderRequest{}, Client{})
+func (c Client) UpdateChannelFolder(ctx context.Context, channelFolderID int64) channels.UpdateChannelFolderRequest {
+	return withInt64Field(
+		withContext(withAPIService(channels.UpdateChannelFolderRequest{}, c), ctx),
+		"channelFolderID",
+		channelFolderID,
+	)
 }
-func (Client) UpdateChannelFolderExecute(_ channels.UpdateChannelFolderRequest) (*zulip.Response, *http.Response, error) {
-	return nil, nil, nil
+func (c Client) UpdateChannelFolderExecute(r channels.UpdateChannelFolderRequest) (*zulip.Response, *http.Response, error) {
+	state := c.ensureState()
+	channelFolderID := requestInt64(r, "channelFolderID")
+	if err := state.waitForTurn(requestContext(r), OperationUpdateChannelFolder, int64Key(channelFolderID)); err != nil {
+		return nil, nil, err
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if err := state.failLocked(OperationUpdateChannelFolder); err != nil {
+		return nil, nil, err
+	}
+
+	folder, ok := state.channelFolders[channelFolderID]
+	if !ok {
+		return nil, nil, fmt.Errorf("channel folder %d not found", channelFolderID)
+	}
+	if name := requestStringPtr(r, "name"); name != nil {
+		folder.Name = *name
+	}
+	if description := requestStringPtr(r, "description"); description != nil {
+		folder.Description = *description
+	}
+	if isArchived := requestBoolPtr(r, "isArchived"); isArchived != nil {
+		folder.IsArchived = *isArchived
+		if *isArchived {
+			for channelID, channel := range state.channels {
+				if channel.channel.FolderID != nil && *channel.channel.FolderID == channelFolderID {
+					channel.channel.FolderID = nil
+					state.channels[channelID] = channel
+				}
+			}
+		}
+	}
+	state.channelFolders[channelFolderID] = folder
+	resp := successResponse()
+	return &resp, nil, nil
 }
 func (Client) UpdateLinkifier(_ context.Context, _arg1 int64) serverandorganizations.UpdateLinkifierRequest {
 	return withAPIService(serverandorganizations.UpdateLinkifierRequest{}, Client{})

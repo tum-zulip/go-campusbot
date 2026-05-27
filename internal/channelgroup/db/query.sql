@@ -17,6 +17,11 @@ WHERE id = ?;
 DELETE FROM channel_groups
 WHERE id = ?;
 
+-- name: UpdateChannelGroupChannelFolder :exec
+UPDATE channel_groups
+SET channel_folder_id = ?
+WHERE id = ?;
+
 -- name: ListChannelGroups :many
 SELECT *
 FROM channel_groups

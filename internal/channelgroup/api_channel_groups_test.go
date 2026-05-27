@@ -147,6 +147,53 @@ func TestCreateChannelGroupWithMockClient(t *testing.T) {
 	}
 }
 
+func TestCreateChannelGroupRollsBackLocalDBWritesOnChannelInsertFailure(t *testing.T) {
+	ctx := context.Background()
+	database, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatalf("open in-memory sqlite database: %v", err)
+	}
+	database.SetMaxOpenConns(1)
+	t.Cleanup(func() {
+		if err = database.Close(); err != nil {
+			t.Errorf("close test database: %v", err)
+		}
+	})
+	if _, err = database.ExecContext(ctx, `
+		CREATE TABLE channel_groups (
+			id INTEGER PRIMARY KEY,
+			channel_folder_id INTEGER
+		);
+	`); err != nil {
+		t.Fatalf("seed partial channelgroup schema: %v", err)
+	}
+
+	client, err := channelgroup.NewClient(
+		ctx,
+		zulipmock.NewClient(),
+		database,
+		channelgroup.WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
+	)
+	if err != nil {
+		t.Fatalf("NewClient error = %v", err)
+	}
+
+	if _, _, err = client.CreateChannelGroup(ctx).
+		Name("rollback local db write").
+		ChannelIDs([]int64{101}).
+		Execute(); err == nil {
+		t.Fatal("CreateChannelGroup error = nil, want local channel insert failure")
+	}
+
+	var groupCount int
+	if err = database.QueryRowContext(ctx, "SELECT COUNT(*) FROM channel_groups").Scan(&groupCount); err != nil {
+		t.Fatalf("count channel_groups: %v", err)
+	}
+	if groupCount != 0 {
+		t.Fatalf("channel_groups count = %d, want 0 after rollback", groupCount)
+	}
+}
+
 func TestCreateChannelGroupCreatesUserGroup(t *testing.T) {
 	ctx := context.Background()
 	base := zulipmock.NewClient()
@@ -258,6 +305,228 @@ func TestChannelGroupWithChannelFolderAssignsInitialAndAddedChannels(t *testing.
 	}
 	assertChannelFolderID(t, ctx, base, channelIDs[1], *group.ChannelGroup.ChannelFolderID)
 	assertChannelFolderID(t, ctx, base, channelIDs[2], *group.ChannelGroup.ChannelFolderID)
+}
+
+//nolint:funlen
+func TestChannelGroupFolderLifecycle(t *testing.T) {
+	ctx := context.Background()
+	base := zulipmock.NewClient()
+	client := newTestClient(t, base)
+	channelIDs := createMockBotSubscribedChannels(t, ctx, base, 2)
+
+	created, _, err := client.CreateChannelGroup(ctx).
+		Name("folder lifecycle").
+		ChannelIDs(channelIDs).
+		Execute()
+	if err != nil {
+		t.Fatalf("CreateChannelGroup error = %v", err)
+	}
+
+	if _, _, err = client.UpdateChannelGroupFolder(ctx, created.ChannelGroupID).Add().Execute(); err != nil {
+		t.Fatalf("Add folder error = %v", err)
+	}
+	group, _, err := client.GetChannelGroup(ctx, created.ChannelGroupID).Execute()
+	if err != nil {
+		t.Fatalf("GetChannelGroup error = %v", err)
+	}
+	if group.ChannelGroup.ChannelFolderID == nil {
+		t.Fatal("channel folder ID = nil after add")
+	}
+	folderID := *group.ChannelGroup.ChannelFolderID
+	assertChannelFolderID(t, ctx, base, channelIDs[0], folderID)
+	assertChannelFolderID(t, ctx, base, channelIDs[1], folderID)
+	assertChannelFolderArchived(t, ctx, base, folderID, false)
+
+	if _, _, err = client.UpdateChannelGroupFolder(ctx, created.ChannelGroupID).Unassign().Execute(); err != nil {
+		t.Fatalf("Unassign folder error = %v", err)
+	}
+	group, _, err = client.GetChannelGroup(ctx, created.ChannelGroupID).Execute()
+	if err != nil {
+		t.Fatalf("GetChannelGroup after unassign error = %v", err)
+	}
+	if group.ChannelGroup.ChannelFolderID == nil || *group.ChannelGroup.ChannelFolderID != folderID {
+		t.Fatalf("channel folder ID after unassign = %v, want %d", group.ChannelGroup.ChannelFolderID, folderID)
+	}
+	assertNoChannelFolder(t, ctx, base, channelIDs[0])
+	assertNoChannelFolder(t, ctx, base, channelIDs[1])
+	assertChannelFolderArchived(t, ctx, base, folderID, false)
+
+	if _, _, err = client.UpdateChannelGroupFolder(ctx, created.ChannelGroupID).Assign().Execute(); err != nil {
+		t.Fatalf("Assign folder error = %v", err)
+	}
+	assertChannelFolderID(t, ctx, base, channelIDs[0], folderID)
+	assertChannelFolderID(t, ctx, base, channelIDs[1], folderID)
+
+	if _, _, err = client.UpdateChannelGroupFolder(ctx, created.ChannelGroupID).Remove().Execute(); err != nil {
+		t.Fatalf("Remove folder error = %v", err)
+	}
+	group, _, err = client.GetChannelGroup(ctx, created.ChannelGroupID).Execute()
+	if err != nil {
+		t.Fatalf("GetChannelGroup after remove error = %v", err)
+	}
+	if group.ChannelGroup.ChannelFolderID != nil {
+		t.Fatalf("channel folder ID after remove = %d, want nil", *group.ChannelGroup.ChannelFolderID)
+	}
+	assertNoChannelFolder(t, ctx, base, channelIDs[0])
+	assertNoChannelFolder(t, ctx, base, channelIDs[1])
+	assertChannelFolderArchived(t, ctx, base, folderID, true)
+}
+
+func TestConcurrentFolderAddAndUnassignSerializesToUnassignedFolder(t *testing.T) {
+	ctx := context.Background()
+	base := zulipmock.NewClient()
+	client := newTestClient(t, base)
+	channelIDs := createMockBotSubscribedChannels(t, ctx, base, 2)
+
+	created, _, err := client.CreateChannelGroup(ctx).
+		Name("folder add unassign race").
+		ChannelIDs(channelIDs).
+		Execute()
+	if err != nil {
+		t.Fatalf("CreateChannelGroup error = %v", err)
+	}
+
+	serialization := base.SerializeRequestSteps(
+		zulipmock.OperationRequest(zulipmock.OperationGetUserGroups),
+		zulipmock.OperationRequest(zulipmock.OperationGetSubscribers),
+	)
+	runStartedBeforePreviousCompletes(t, ctx, serialization,
+		func() error {
+			_, _, err := client.UpdateChannelGroupFolder(ctx, created.ChannelGroupID).Add().Execute()
+			return err
+		},
+		func() error {
+			_, _, err := client.UpdateChannelGroupFolder(ctx, created.ChannelGroupID).Unassign().Execute()
+			return err
+		},
+	)
+
+	group, _, err := client.GetChannelGroup(ctx, created.ChannelGroupID).Execute()
+	if err != nil {
+		t.Fatalf("GetChannelGroup error = %v", err)
+	}
+	if group.ChannelGroup.ChannelFolderID == nil {
+		t.Fatal("channel folder ID = nil, want folder kept after unassign")
+	}
+	assertNoChannelFolder(t, ctx, base, channelIDs[0])
+	assertNoChannelFolder(t, ctx, base, channelIDs[1])
+	assertChannelFolderArchived(t, ctx, base, *group.ChannelGroup.ChannelFolderID, false)
+}
+
+func TestConcurrentFolderAddAndRemoveSerializesToRemovedFolder(t *testing.T) {
+	ctx := context.Background()
+	base := zulipmock.NewClient()
+	client := newTestClient(t, base)
+	channelIDs := createMockBotSubscribedChannels(t, ctx, base, 2)
+
+	created, _, err := client.CreateChannelGroup(ctx).
+		Name("folder add remove race").
+		ChannelIDs(channelIDs).
+		Execute()
+	if err != nil {
+		t.Fatalf("CreateChannelGroup error = %v", err)
+	}
+
+	serialization := base.SerializeRequestSteps(
+		zulipmock.OperationRequest(zulipmock.OperationGetUserGroups),
+		zulipmock.OperationRequest(zulipmock.OperationGetSubscribers),
+	)
+	runStartedBeforePreviousCompletes(t, ctx, serialization,
+		func() error {
+			_, _, err := client.UpdateChannelGroupFolder(ctx, created.ChannelGroupID).Add().Execute()
+			return err
+		},
+		func() error {
+			_, _, err := client.UpdateChannelGroupFolder(ctx, created.ChannelGroupID).Remove().Execute()
+			return err
+		},
+	)
+
+	group, _, err := client.GetChannelGroup(ctx, created.ChannelGroupID).Execute()
+	if err != nil {
+		t.Fatalf("GetChannelGroup error = %v", err)
+	}
+	if group.ChannelGroup.ChannelFolderID != nil {
+		t.Fatalf("channel folder ID = %d, want nil after remove", *group.ChannelGroup.ChannelFolderID)
+	}
+	assertNoChannelFolder(t, ctx, base, channelIDs[0])
+	assertNoChannelFolder(t, ctx, base, channelIDs[1])
+	assertOnlyChannelFolderArchived(t, ctx, base, true)
+}
+
+func TestConcurrentFolderAssignAndUnassignSerializesToUnassignedFolder(t *testing.T) {
+	ctx := context.Background()
+	base := zulipmock.NewClient()
+	client := newTestClient(t, base)
+	channelIDs := createMockBotSubscribedChannels(t, ctx, base, 2)
+	created, folderID := createGroupWithUnassignedFolder(
+		t,
+		ctx,
+		client,
+		base,
+		channelIDs,
+		"folder assign unassign race",
+	)
+
+	serialization := base.SerializeRequestSteps(
+		zulipmock.ChannelRequest(zulipmock.OperationUpdateChannel, channelIDs[0]),
+		zulipmock.OperationRequest(zulipmock.OperationGetSubscribers),
+	)
+	runStartedBeforePreviousCompletes(t, ctx, serialization,
+		func() error {
+			_, _, err := client.UpdateChannelGroupFolder(ctx, created.ChannelGroupID).Assign().Execute()
+			return err
+		},
+		func() error {
+			_, _, err := client.UpdateChannelGroupFolder(ctx, created.ChannelGroupID).Unassign().Execute()
+			return err
+		},
+	)
+
+	group, _, err := client.GetChannelGroup(ctx, created.ChannelGroupID).Execute()
+	if err != nil {
+		t.Fatalf("GetChannelGroup error = %v", err)
+	}
+	if group.ChannelGroup.ChannelFolderID == nil || *group.ChannelGroup.ChannelFolderID != folderID {
+		t.Fatalf("channel folder ID = %v, want %d", group.ChannelGroup.ChannelFolderID, folderID)
+	}
+	assertNoChannelFolder(t, ctx, base, channelIDs[0])
+	assertNoChannelFolder(t, ctx, base, channelIDs[1])
+	assertChannelFolderArchived(t, ctx, base, folderID, false)
+}
+
+func TestConcurrentFolderAssignAndRemoveSerializesToRemovedFolder(t *testing.T) {
+	ctx := context.Background()
+	base := zulipmock.NewClient()
+	client := newTestClient(t, base)
+	channelIDs := createMockBotSubscribedChannels(t, ctx, base, 2)
+	created, folderID := createGroupWithUnassignedFolder(t, ctx, client, base, channelIDs, "folder assign remove race")
+
+	serialization := base.SerializeRequestSteps(
+		zulipmock.ChannelRequest(zulipmock.OperationUpdateChannel, channelIDs[0]),
+		zulipmock.OperationRequest(zulipmock.OperationGetSubscribers),
+	)
+	runStartedBeforePreviousCompletes(t, ctx, serialization,
+		func() error {
+			_, _, err := client.UpdateChannelGroupFolder(ctx, created.ChannelGroupID).Assign().Execute()
+			return err
+		},
+		func() error {
+			_, _, err := client.UpdateChannelGroupFolder(ctx, created.ChannelGroupID).Remove().Execute()
+			return err
+		},
+	)
+
+	group, _, err := client.GetChannelGroup(ctx, created.ChannelGroupID).Execute()
+	if err != nil {
+		t.Fatalf("GetChannelGroup error = %v", err)
+	}
+	if group.ChannelGroup.ChannelFolderID != nil {
+		t.Fatalf("channel folder ID = %d, want nil after remove", *group.ChannelGroup.ChannelFolderID)
+	}
+	assertNoChannelFolder(t, ctx, base, channelIDs[0])
+	assertNoChannelFolder(t, ctx, base, channelIDs[1])
+	assertChannelFolderArchived(t, ctx, base, folderID, true)
 }
 
 func TestInitializeChannelGroupsRemovesChannelsMissingFromBotSubscriptions(t *testing.T) {
@@ -1383,6 +1652,45 @@ func runSerializedPair(
 	}
 }
 
+func runStartedBeforePreviousCompletes(
+	t *testing.T,
+	ctx context.Context,
+	serialization *zulipmock.RequestSerialization,
+	first func() error,
+	second func() error,
+) {
+	t.Helper()
+
+	errs := make(chan error, 2)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		errs <- first()
+	}()
+	if err := serialization.WaitForSteps(ctx, 1); err != nil {
+		t.Fatalf("first serialized request was not observed: %v", err)
+	}
+
+	wg.Add(1)
+	secondStarted := make(chan struct{})
+	go func() {
+		defer wg.Done()
+		close(secondStarted)
+		errs <- second()
+	}()
+	<-secondStarted
+	serialization.Close()
+
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent operation error = %v", err)
+		}
+	}
+}
+
 func runSerializedOperations(
 	t *testing.T,
 	ctx context.Context,
@@ -1506,6 +1814,43 @@ func createMockBotSubscribedChannels(t *testing.T, ctx context.Context, client z
 	return ids
 }
 
+func createGroupWithUnassignedFolder(
+	t *testing.T,
+	ctx context.Context,
+	client channelgroup.Client,
+	base zulipmock.Client,
+	channelIDs []int64,
+	name string,
+) (*channelgroup.CreateChannelGroupResponse, int64) {
+	t.Helper()
+
+	created, _, err := client.CreateChannelGroup(ctx).
+		Name(name).
+		ChannelIDs(channelIDs).
+		Execute()
+	if err != nil {
+		t.Fatalf("CreateChannelGroup error = %v", err)
+	}
+	if _, _, err = client.UpdateChannelGroupFolder(ctx, created.ChannelGroupID).Add().Execute(); err != nil {
+		t.Fatalf("Add folder error = %v", err)
+	}
+	group, _, err := client.GetChannelGroup(ctx, created.ChannelGroupID).Execute()
+	if err != nil {
+		t.Fatalf("GetChannelGroup error = %v", err)
+	}
+	if group.ChannelGroup.ChannelFolderID == nil {
+		t.Fatal("channel folder ID = nil after add")
+	}
+	folderID := *group.ChannelGroup.ChannelFolderID
+	if _, _, err = client.UpdateChannelGroupFolder(ctx, created.ChannelGroupID).Unassign().Execute(); err != nil {
+		t.Fatalf("Unassign folder error = %v", err)
+	}
+	for _, channelID := range channelIDs {
+		assertNoChannelFolder(t, ctx, base, channelID)
+	}
+	return created, folderID
+}
+
 func assertChannelFolderID(
 	t *testing.T,
 	ctx context.Context,
@@ -1524,6 +1869,51 @@ func assertChannelFolderID(
 	}
 	if *resp.Channel.FolderID != wantFolderID {
 		t.Fatalf("channel %d folder ID = %d, want %d", channelID, *resp.Channel.FolderID, wantFolderID)
+	}
+}
+
+func assertChannelFolderArchived(
+	t *testing.T,
+	ctx context.Context,
+	client zulipmock.Client,
+	folderID int64,
+	wantArchived bool,
+) {
+	t.Helper()
+
+	resp, _, err := client.GetChannelFolders(ctx).Execute()
+	if err != nil {
+		t.Fatalf("GetChannelFolders error = %v", err)
+	}
+	for _, folder := range resp.ChannelFolders {
+		if folder.ID != folderID {
+			continue
+		}
+		if folder.IsArchived != wantArchived {
+			t.Fatalf("folder %d archived = %t, want %t", folderID, folder.IsArchived, wantArchived)
+		}
+		return
+	}
+	t.Fatalf("folder %d not found in %+v", folderID, resp.ChannelFolders)
+}
+
+func assertOnlyChannelFolderArchived(
+	t *testing.T,
+	ctx context.Context,
+	client zulipmock.Client,
+	wantArchived bool,
+) {
+	t.Helper()
+
+	resp, _, err := client.GetChannelFolders(ctx).Execute()
+	if err != nil {
+		t.Fatalf("GetChannelFolders error = %v", err)
+	}
+	if len(resp.ChannelFolders) != 1 {
+		t.Fatalf("channel folders = %d, want 1", len(resp.ChannelFolders))
+	}
+	if resp.ChannelFolders[0].IsArchived != wantArchived {
+		t.Fatalf("folder archived = %t, want %t", resp.ChannelFolders[0].IsArchived, wantArchived)
 	}
 }
 

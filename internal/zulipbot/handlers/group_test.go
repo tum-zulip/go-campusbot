@@ -1112,6 +1112,58 @@ func TestGroupChannelAddRejectsNumericChannelID(t *testing.T) {
 	}
 }
 
+func TestGroupFolderAddAssignsExistingChannels(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env, groupID := newCourseTestEnv(t)
+	channelID := seedChannel(t, env.base, "wi-channel")
+	if _, _, err := env.client.UpdateChannelGroupChannels(ctx, groupID).Add([]int64{channelID}).Execute(); err != nil {
+		t.Fatalf("pre-add channel %d to group %d: %v", channelID, groupID, err)
+	}
+
+	h := env.handler(allowAll{})
+	result, err := h.Handle(ctx, makeGroupRequest(handlers.GroupFolderAddArgs{ShortName: "WI"}))
+	if err != nil {
+		t.Fatalf("Handle() failed: %v", err)
+	}
+	if result.Content == "" {
+		t.Error("expected non-empty result content")
+	}
+
+	group, _, err := env.client.GetChannelGroup(ctx, groupID).Execute()
+	if err != nil {
+		t.Fatalf("GetChannelGroup: %v", err)
+	}
+	if group.ChannelGroup.ChannelFolderID == nil {
+		t.Fatal("channel folder ID = nil after group folder add")
+	}
+	channel, _, err := env.base.GetChannelByID(ctx, channelID).Execute()
+	if err != nil {
+		t.Fatalf("GetChannelByID: %v", err)
+	}
+	if channel.Channel.FolderID == nil || *channel.Channel.FolderID != *group.ChannelGroup.ChannelFolderID {
+		t.Fatalf("channel folder ID = %v, want %d", channel.Channel.FolderID, *group.ChannelGroup.ChannelFolderID)
+	}
+}
+
+func TestGroupFolderSubcommandParses(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	parser := command.NewArgParser(nil)
+
+	parsed, err := parser.Parse(ctx, handlers.GroupArgSpec, []string{"folder", "unassign", "WI"})
+	if err != nil {
+		t.Fatalf("Parse() failed: %v", err)
+	}
+	args, ok := parsed.(handlers.GroupFolderUnassignArgs)
+	if !ok {
+		t.Fatalf("expected GroupFolderUnassignArgs, got %T", parsed)
+	}
+	if args.ShortName != "WI" {
+		t.Fatalf("ShortName = %q, want WI", args.ShortName)
+	}
+}
+
 func TestGroupChannelCreate(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

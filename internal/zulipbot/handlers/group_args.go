@@ -50,6 +50,22 @@ type GroupChannelCreateArgs struct {
 	ShortName   string `desc:"Group short name"`
 }
 
+type GroupFolderAddArgs struct {
+	ShortName string `desc:"Group short name"`
+}
+
+type GroupFolderRemoveArgs struct {
+	ShortName string `desc:"Group short name"`
+}
+
+type GroupFolderAssignArgs struct {
+	ShortName string `desc:"Group short name"`
+}
+
+type GroupFolderUnassignArgs struct {
+	ShortName string `desc:"Group short name"`
+}
+
 // GroupAnnounceArgs covers "group announce" with no subcommand.
 type GroupAnnounceArgs struct{}
 
@@ -74,6 +90,12 @@ var GroupArgSpec = command.SubcmdSpec{ //nolint:gochecknoglobals // package-leve
 		"add":    GroupChannelAddArgs{},
 		"remove": GroupChannelRemoveArgs{},
 		"create": GroupChannelCreateArgs{},
+	},
+	"folder": command.SubcmdSpec{
+		"add":      GroupFolderAddArgs{},
+		"remove":   GroupFolderRemoveArgs{},
+		"assign":   GroupFolderAssignArgs{},
+		"unassign": GroupFolderUnassignArgs{},
 	},
 	"course": command.SubcmdSpec{
 		"add":    GroupChannelAddArgs{},

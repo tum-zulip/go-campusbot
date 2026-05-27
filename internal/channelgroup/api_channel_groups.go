@@ -16,6 +16,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/tum-zulip/go-campusbot/internal/callorigin"
@@ -33,6 +34,10 @@ const (
 	originCreate         = "CreateChannelGroup"
 	originImport         = "ImportZulipUserGroup"
 	originUpdateChannels = "UpdateChannelGroupChannels"
+	originFolderAdd      = "AddChannelGroupFolder"
+	originFolderRemove   = "RemoveChannelGroupFolder"
+	originFolderAssign   = "AssignChannelGroupFolder"
+	originFolderUnassign = "UnassignChannelGroupFolder"
 	originSubscribe      = "SubscribeToChannelGroup"
 	originUnsubscribe    = "UnsubscribeFromChannelGroup"
 )
@@ -111,14 +116,18 @@ func newClientWithService(base client.Client, service APIChannelGroups) Client {
 
 type channelGroups struct {
 	base    client.Client
+	db      *sql.DB
 	queries *channelgroupdb.Queries
 	logger  *slog.Logger
 	runCtx  context.Context // overrides the ctx passed to startChannelGroupEventListener
+
+	folderOpsMu sync.Mutex
 }
 
 func newChannelGroups(base client.Client, database *sql.DB, opts ...ClientOption) *channelGroups {
 	service := &channelGroups{
 		base:    base,
+		db:      database,
 		queries: channelgroupdb.New(database),
 		logger:  slog.Default(),
 	}
@@ -129,6 +138,29 @@ func newChannelGroups(base client.Client, database *sql.DB, opts ...ClientOption
 }
 
 var _ APIChannelGroups = (*channelGroups)(nil)
+
+func (s *channelGroups) withTx(ctx context.Context, fn func(*channelgroupdb.Queries) error) error {
+	if s.db == nil {
+		return errors.New("database connection must not be nil")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin channelgroup SQLite transaction: %w", err)
+	}
+	defer func() {
+		if tx != nil {
+			_ = tx.Rollback()
+		}
+	}()
+	if err := fn(s.queries.WithTx(tx)); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit channelgroup SQLite transaction: %w", err)
+	}
+	tx = nil
+	return nil
+}
 
 func (s *channelGroups) initializeChannelGroups(ctx context.Context) error {
 	groups, err := s.getGroups(ctx)
@@ -151,7 +183,7 @@ func (s *channelGroups) initializeChannelGroups(ctx context.Context) error {
 	for _, group := range groups {
 		userGroup, ok := userGroups[group.ID]
 		if !ok || userGroup.Deactivated {
-			if err = s.queries.DeleteChannelGroup(ctx, group.ID); err != nil {
+			if err = s.deleteChannelGroup(ctx, group.ID); err != nil {
 				return err
 			}
 			s.logger.InfoContext(ctx, "removed channel group with missing or deactivated user group",
@@ -165,10 +197,7 @@ func (s *channelGroups) initializeChannelGroups(ctx context.Context) error {
 			if _, ok = subscribedChannelIDs[channelID]; ok {
 				continue
 			}
-			if err = s.queries.RemoveChannelGroupChannel(ctx, channelgroupdb.RemoveChannelGroupChannelParams{
-				ChannelGroupID: group.ID,
-				ChannelID:      channelID,
-			}); err != nil {
+			if err = s.removeChannelGroupChannel(ctx, group.ID, channelID); err != nil {
 				return err
 			}
 			s.logger.InfoContext(ctx, "removed stale channel from channel group",
@@ -326,7 +355,10 @@ func channelDeleteEventIDs(event events.ChannelDeleteEvent) []int64 {
 }
 
 func (s *channelGroups) removeChannelFromChannelGroups(ctx context.Context, channelID int64) error {
-	if err := s.queries.RemoveChannelFromChannelGroups(ctx, channelID); err != nil {
+	err := s.withTx(ctx, func(q *channelgroupdb.Queries) error {
+		return q.RemoveChannelFromChannelGroups(ctx, channelID)
+	})
+	if err != nil {
 		return err
 	}
 	s.logger.InfoContext(ctx, "removed deleted channel from channel groups", "channel_id", channelID)
@@ -334,7 +366,7 @@ func (s *channelGroups) removeChannelFromChannelGroups(ctx context.Context, chan
 }
 
 func (s *channelGroups) removeDeletedUserGroupChannelGroup(ctx context.Context, userGroupID int64) error {
-	if err := s.queries.DeleteChannelGroup(ctx, userGroupID); err != nil {
+	if err := s.deleteChannelGroup(ctx, userGroupID); err != nil {
 		return err
 	}
 	s.logger.InfoContext(ctx, "removed channel group for deleted user group", "channel_group_id", userGroupID)
@@ -392,7 +424,7 @@ func (s *channelGroups) CreateChannelGroupExecute(
 	rollback := func(cause error) error {
 		var rollbackErrs []error
 		if dbGroupCreated {
-			if err := s.queries.DeleteChannelGroup(r.ctx, group.ID); err != nil {
+			if err := s.deleteChannelGroup(r.ctx, group.ID); err != nil {
 				rollbackErrs = append(rollbackErrs, fmt.Errorf("delete local channel group %d: %w", group.ID, err))
 			}
 		}
@@ -431,23 +463,31 @@ func (s *channelGroups) CreateChannelGroupExecute(
 		}
 	}
 
-	dbGroup, err := s.queries.CreateChannelGroup(r.ctx, channelgroupdb.CreateChannelGroupParams{
-		ID:              group.ID,
-		ChannelFolderID: channelFolderID,
+	var dbGroup channelgroupdb.ChannelGroup
+	err = s.withTx(r.ctx, func(q *channelgroupdb.Queries) error {
+		var err error
+		dbGroup, err = q.CreateChannelGroup(r.ctx, channelgroupdb.CreateChannelGroupParams{
+			ID:              group.ID,
+			ChannelFolderID: channelFolderID,
+		})
+		if err != nil {
+			return err
+		}
+		for _, channelID := range group.ChannelIDs {
+			if err = q.AddChannelGroupChannel(r.ctx, channelgroupdb.AddChannelGroupChannelParams{
+				ChannelGroupID: dbGroup.ID,
+				ChannelID:      channelID,
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 	if err != nil {
 		return nil, nil, rollback(err)
 	}
 	dbGroupID := dbGroup.ID
 	dbGroupCreated = true
-	for _, channelID := range group.ChannelIDs {
-		if err = s.queries.AddChannelGroupChannel(r.ctx, channelgroupdb.AddChannelGroupChannelParams{
-			ChannelGroupID: dbGroupID,
-			ChannelID:      channelID,
-		}); err != nil {
-			return nil, nil, rollback(err)
-		}
-	}
 
 	s.logger.InfoContext(r.ctx, "created channel group",
 		"channel_group_id", dbGroupID,
@@ -470,18 +510,20 @@ func (s *channelGroups) CreateChannelGroupExecute(
 // returns nil without touching the database.
 func (s *channelGroups) ImportZulipUserGroup(ctx context.Context, userGroupID int64) error {
 	ctx = callorigin.With(ctx, originImport)
-	if _, err := s.queries.GetChannelGroup(ctx, userGroupID); err == nil {
+	return s.withTx(ctx, func(q *channelgroupdb.Queries) error {
+		if _, err := q.GetChannelGroup(ctx, userGroupID); err == nil {
+			return nil
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("check channel group %d: %w", userGroupID, err)
+		}
+		if _, err := q.CreateChannelGroup(ctx, channelgroupdb.CreateChannelGroupParams{
+			ID:              userGroupID,
+			ChannelFolderID: sql.NullInt64{},
+		}); err != nil {
+			return fmt.Errorf("import channel group %d: %w", userGroupID, err)
+		}
 		return nil
-	} else if !errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("check channel group %d: %w", userGroupID, err)
-	}
-	if _, err := s.queries.CreateChannelGroup(ctx, channelgroupdb.CreateChannelGroupParams{
-		ID:              userGroupID,
-		ChannelFolderID: sql.NullInt64{},
-	}); err != nil {
-		return fmt.Errorf("import channel group %d: %w", userGroupID, err)
-	}
-	return nil
+	})
 }
 
 func (s *channelGroups) GetChannelGroups(ctx context.Context) GetChannelGroupsRequest {
@@ -532,7 +574,7 @@ func (s *channelGroups) GetChannelGroupExecute(
 }
 
 func (s *channelGroups) DeleteChannelGroup(ctx context.Context, channelGroupID int64) error {
-	if err := s.queries.DeleteChannelGroup(ctx, channelGroupID); err != nil {
+	if err := s.deleteChannelGroup(ctx, channelGroupID); err != nil {
 		return fmt.Errorf("delete local channel group %d: %w", channelGroupID, err)
 	}
 	if _, _, err := s.base.DeactivateUserGroup(ctx, channelGroupID).Execute(); err != nil {
@@ -637,6 +679,126 @@ func (s *channelGroups) UpdateChannelGroupChannelsExecute(
 		"subscriber_count", len(members),
 	)
 	return ptrResponse(successResponse()), nil, nil
+}
+
+func (s *channelGroups) UpdateChannelGroupFolder(
+	ctx context.Context,
+	channelGroupID int64,
+) UpdateChannelGroupFolderRequest {
+	return UpdateChannelGroupFolderRequest{ctx: ctx, apiService: s, channelGroupID: channelGroupID}
+}
+
+func (s *channelGroups) UpdateChannelGroupFolderExecute(
+	r UpdateChannelGroupFolderRequest,
+) (*zulip.Response, *http.Response, error) {
+	if r.action == nil {
+		return nil, nil, errors.New("folder action is required")
+	}
+
+	switch *r.action {
+	case FolderActionAdd:
+		r.ctx = callorigin.With(r.ctx, originFolderAdd)
+	case FolderActionRemove:
+		r.ctx = callorigin.With(r.ctx, originFolderRemove)
+	case FolderActionAssign:
+		r.ctx = callorigin.With(r.ctx, originFolderAssign)
+	case FolderActionUnassign:
+		r.ctx = callorigin.With(r.ctx, originFolderUnassign)
+	default:
+		return nil, nil, fmt.Errorf("unsupported folder action %q", *r.action)
+	}
+
+	s.folderOpsMu.Lock()
+	defer s.folderOpsMu.Unlock()
+
+	if err := s.updateChannelGroupFolder(r.ctx, r.channelGroupID, *r.action); err != nil {
+		return nil, nil, err
+	}
+	return ptrResponse(successResponse()), nil, nil
+}
+
+func (s *channelGroups) updateChannelGroupFolder(
+	ctx context.Context,
+	channelGroupID int64,
+	action FolderAction,
+) error {
+	group, err := s.getGroup(ctx, channelGroupID)
+	if err != nil {
+		return err
+	}
+
+	switch action {
+	case FolderActionAdd:
+		return s.addChannelGroupFolder(ctx, group)
+	case FolderActionRemove:
+		return s.removeChannelGroupFolder(ctx, group)
+	case FolderActionAssign:
+		return s.assignChannelGroupFolder(ctx, group)
+	case FolderActionUnassign:
+		return s.unassignChannelGroupFolder(ctx, group)
+	default:
+		return fmt.Errorf("unsupported folder action %q", action)
+	}
+}
+
+func (s *channelGroups) addChannelGroupFolder(ctx context.Context, group ChannelGroup) error {
+	if group.ChannelFolderID != nil {
+		return s.assignChannelGroupFolder(ctx, group)
+	}
+
+	namedGroup, err := s.withUserGroupName(ctx, group)
+	if err != nil {
+		return err
+	}
+	folderResp, _, err := s.base.CreateChannelFolder(ctx).
+		Name(namedGroup.Name).
+		Description("").
+		Execute()
+	if err != nil {
+		return err
+	}
+
+	folderID := folderResp.ChannelFolderID
+	if err = s.setChannelGroupFolder(ctx, group.ID, sql.NullInt64{Int64: folderID, Valid: true}); err != nil {
+		_, _, _ = s.base.UpdateChannelFolder(ctx, folderID).IsArchived(true).Execute()
+		return err
+	}
+
+	group.ChannelFolderID = &folderID
+	if err = s.assignChannelGroupFolder(ctx, group); err != nil {
+		_ = s.setChannelGroupFolder(ctx, group.ID, sql.NullInt64{})
+		_, _, _ = s.base.UpdateChannelFolder(ctx, folderID).IsArchived(true).Execute()
+		return err
+	}
+	return nil
+}
+
+func (s *channelGroups) removeChannelGroupFolder(ctx context.Context, group ChannelGroup) error {
+	if group.ChannelFolderID == nil {
+		return nil
+	}
+	if err := s.archiveChannelFolder(ctx, *group.ChannelFolderID); err != nil {
+		return err
+	}
+	return s.setChannelGroupFolder(ctx, group.ID, sql.NullInt64{})
+}
+
+func (s *channelGroups) assignChannelGroupFolder(ctx context.Context, group ChannelGroup) error {
+	if group.ChannelFolderID == nil {
+		return errors.New("channel group has no channel folder")
+	}
+	return s.addChannelsToFolder(ctx, group.ChannelIDs, *group.ChannelFolderID)
+}
+
+func (s *channelGroups) unassignChannelGroupFolder(ctx context.Context, group ChannelGroup) error {
+	if group.ChannelFolderID == nil {
+		return nil
+	}
+	if err := s.archiveChannelFolder(ctx, *group.ChannelFolderID); err != nil {
+		return err
+	}
+	_, _, err := s.base.UpdateChannelFolder(ctx, *group.ChannelFolderID).IsArchived(false).Execute()
+	return err
 }
 
 func (s *channelGroups) GetChannelGroupSubscribers(
@@ -813,14 +975,28 @@ func (s *channelGroups) UnsubscribeFromChannelGroupExecute(
 }
 
 func (s *channelGroups) getGroup(ctx context.Context, channelGroupID int64) (ChannelGroup, error) {
-	dbGroup, err := s.queries.GetChannelGroup(ctx, channelGroupID)
+	var group ChannelGroup
+	err := s.withTx(ctx, func(q *channelgroupdb.Queries) error {
+		var err error
+		group, err = getGroup(ctx, q, channelGroupID)
+		return err
+	})
+	return group, err
+}
+
+func getGroup(
+	ctx context.Context,
+	q channelgroupdb.Querier,
+	channelGroupID int64,
+) (ChannelGroup, error) {
+	dbGroup, err := q.GetChannelGroup(ctx, channelGroupID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return ChannelGroup{}, errChannelGroupNotFound(channelGroupID)
 		}
 		return ChannelGroup{}, err
 	}
-	channels, err := s.queries.ListChannelGroupChannels(ctx, channelGroupID)
+	channels, err := q.ListChannelGroupChannels(ctx, channelGroupID)
 	if err != nil {
 		return ChannelGroup{}, err
 	}
@@ -828,7 +1004,17 @@ func (s *channelGroups) getGroup(ctx context.Context, channelGroupID int64) (Cha
 }
 
 func (s *channelGroups) getGroups(ctx context.Context) ([]ChannelGroup, error) {
-	dbGroups, err := s.queries.ListChannelGroups(ctx)
+	var groups []ChannelGroup
+	err := s.withTx(ctx, func(q *channelgroupdb.Queries) error {
+		var err error
+		groups, err = getGroups(ctx, q)
+		return err
+	})
+	return groups, err
+}
+
+func getGroups(ctx context.Context, q channelgroupdb.Querier) ([]ChannelGroup, error) {
+	dbGroups, err := q.ListChannelGroups(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -836,7 +1022,7 @@ func (s *channelGroups) getGroups(ctx context.Context) ([]ChannelGroup, error) {
 	groups := make([]ChannelGroup, 0, len(dbGroups))
 	for _, dbGroup := range dbGroups {
 		var channels []int64
-		channels, err = s.queries.ListChannelGroupChannels(ctx, dbGroup.ID)
+		channels, err = q.ListChannelGroupChannels(ctx, dbGroup.ID)
 		if err != nil {
 			return nil, err
 		}
@@ -851,30 +1037,36 @@ func (s *channelGroups) updateGroupChannels(
 	addChannelIDs *[]int64,
 	deleteChannelIDs *[]int64,
 ) (ChannelGroup, error) {
-	if _, err := s.getGroup(ctx, channelGroupID); err != nil {
-		return ChannelGroup{}, err
-	}
-	if deleteChannelIDs != nil {
-		for _, channelID := range uniqueInt64s(*deleteChannelIDs) {
-			if err := s.queries.RemoveChannelGroupChannel(ctx, channelgroupdb.RemoveChannelGroupChannelParams{
-				ChannelGroupID: channelGroupID,
-				ChannelID:      channelID,
-			}); err != nil {
-				return ChannelGroup{}, err
+	var group ChannelGroup
+	err := s.withTx(ctx, func(q *channelgroupdb.Queries) error {
+		if _, err := getGroup(ctx, q, channelGroupID); err != nil {
+			return err
+		}
+		if deleteChannelIDs != nil {
+			for _, channelID := range uniqueInt64s(*deleteChannelIDs) {
+				if err := q.RemoveChannelGroupChannel(ctx, channelgroupdb.RemoveChannelGroupChannelParams{
+					ChannelGroupID: channelGroupID,
+					ChannelID:      channelID,
+				}); err != nil {
+					return err
+				}
 			}
 		}
-	}
-	if addChannelIDs != nil {
-		for _, channelID := range uniqueInt64s(*addChannelIDs) {
-			if err := s.queries.AddChannelGroupChannel(ctx, channelgroupdb.AddChannelGroupChannelParams{
-				ChannelGroupID: channelGroupID,
-				ChannelID:      channelID,
-			}); err != nil {
-				return ChannelGroup{}, err
+		if addChannelIDs != nil {
+			for _, channelID := range uniqueInt64s(*addChannelIDs) {
+				if err := q.AddChannelGroupChannel(ctx, channelgroupdb.AddChannelGroupChannelParams{
+					ChannelGroupID: channelGroupID,
+					ChannelID:      channelID,
+				}); err != nil {
+					return err
+				}
 			}
 		}
-	}
-	return s.getGroup(ctx, channelGroupID)
+		var err error
+		group, err = getGroup(ctx, q, channelGroupID)
+		return err
+	})
+	return group, err
 }
 
 func (s *channelGroups) addChannelsToFolder(ctx context.Context, channelIDs []int64, channelFolderID int64) error {
@@ -884,6 +1076,43 @@ func (s *channelGroups) addChannelsToFolder(ctx context.Context, channelIDs []in
 		}
 	}
 	return nil
+}
+
+func (s *channelGroups) archiveChannelFolder(ctx context.Context, channelFolderID int64) error {
+	_, _, err := s.base.UpdateChannelFolder(ctx, channelFolderID).IsArchived(true).Execute()
+	return err
+}
+
+func (s *channelGroups) setChannelGroupFolder(
+	ctx context.Context,
+	channelGroupID int64,
+	channelFolderID sql.NullInt64,
+) error {
+	return s.withTx(ctx, func(q *channelgroupdb.Queries) error {
+		return q.UpdateChannelGroupChannelFolder(ctx, channelgroupdb.UpdateChannelGroupChannelFolderParams{
+			ID:              channelGroupID,
+			ChannelFolderID: channelFolderID,
+		})
+	})
+}
+
+func (s *channelGroups) deleteChannelGroup(ctx context.Context, channelGroupID int64) error {
+	return s.withTx(ctx, func(q *channelgroupdb.Queries) error {
+		return q.DeleteChannelGroup(ctx, channelGroupID)
+	})
+}
+
+func (s *channelGroups) removeChannelGroupChannel(
+	ctx context.Context,
+	channelGroupID int64,
+	channelID int64,
+) error {
+	return s.withTx(ctx, func(q *channelgroupdb.Queries) error {
+		return q.RemoveChannelGroupChannel(ctx, channelgroupdb.RemoveChannelGroupChannelParams{
+			ChannelGroupID: channelGroupID,
+			ChannelID:      channelID,
+		})
+	})
 }
 
 func (s *channelGroups) cleanupAddedChannels(
@@ -1015,7 +1244,12 @@ func (s *channelGroups) unsubscribeUsersFromChannelGroupChannels(
 		return nil
 	}
 
-	otherGroupChannels, err := s.queries.ListOtherChannelGroupsForChannelsInGroup(ctx, channelGroupID)
+	var otherGroupChannels []channelgroupdb.ListOtherChannelGroupsForChannelsInGroupRow
+	err := s.withTx(ctx, func(q *channelgroupdb.Queries) error {
+		var err error
+		otherGroupChannels, err = q.ListOtherChannelGroupsForChannelsInGroup(ctx, channelGroupID)
+		return err
+	})
 	if err != nil {
 		return err
 	}
@@ -1371,6 +1605,11 @@ type APIChannelGroups interface {
 	UpdateChannelGroupChannels(ctx context.Context, channelGroupID int64) UpdateChannelGroupChannelsRequest
 	UpdateChannelGroupChannelsExecute(r UpdateChannelGroupChannelsRequest) (*zulip.Response, *http.Response, error)
 
+	// UpdateChannelGroupFolder creates, removes, assigns, or unassigns the
+	// Zulip channel folder associated with a channel group.
+	UpdateChannelGroupFolder(ctx context.Context, channelGroupID int64) UpdateChannelGroupFolderRequest
+	UpdateChannelGroupFolderExecute(r UpdateChannelGroupFolderRequest) (*zulip.Response, *http.Response, error)
+
 	// --- Subscribers ------------------------------------------------------
 	// Subscribing a user (principal) to a channel group materializes
 	// subscriptions to every channel currently in the group. Unsubscribing
@@ -1561,6 +1800,50 @@ func (r UpdateChannelGroupChannelsRequest) Delete(channelIDs []int64) UpdateChan
 
 func (r UpdateChannelGroupChannelsRequest) Execute() (*zulip.Response, *http.Response, error) {
 	return r.apiService.UpdateChannelGroupChannelsExecute(r)
+}
+
+type FolderAction string
+
+const (
+	FolderActionAdd      FolderAction = "add"
+	FolderActionRemove   FolderAction = "remove"
+	FolderActionAssign   FolderAction = "assign"
+	FolderActionUnassign FolderAction = "unassign"
+)
+
+type UpdateChannelGroupFolderRequest struct {
+	ctx            context.Context
+	apiService     APIChannelGroups
+	channelGroupID int64
+	action         *FolderAction
+}
+
+func (r UpdateChannelGroupFolderRequest) Add() UpdateChannelGroupFolderRequest {
+	action := FolderActionAdd
+	r.action = &action
+	return r
+}
+
+func (r UpdateChannelGroupFolderRequest) Remove() UpdateChannelGroupFolderRequest {
+	action := FolderActionRemove
+	r.action = &action
+	return r
+}
+
+func (r UpdateChannelGroupFolderRequest) Assign() UpdateChannelGroupFolderRequest {
+	action := FolderActionAssign
+	r.action = &action
+	return r
+}
+
+func (r UpdateChannelGroupFolderRequest) Unassign() UpdateChannelGroupFolderRequest {
+	action := FolderActionUnassign
+	r.action = &action
+	return r
+}
+
+func (r UpdateChannelGroupFolderRequest) Execute() (*zulip.Response, *http.Response, error) {
+	return r.apiService.UpdateChannelGroupFolderExecute(r)
 }
 
 // --- Subscribers ------------------------------------------------------------

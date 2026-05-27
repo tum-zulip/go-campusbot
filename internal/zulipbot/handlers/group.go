@@ -101,6 +101,7 @@ func (h *GroupHandler) Metadata() command.Metadata {
 			"group create <short_name> <emoji_name>\n" +
 			"group mapping <list|set <short_name> <zulip_user_group> <emoji_name>|disable <short_name>>\n" +
 			"group channel <add|remove|create> <channel_mention_or_name> <short_name>\n" +
+			"group folder <add|remove|assign|unassign> <short_name>\n" +
 			"group announce [set-message <message_id>|inspect]",
 		Permission: command.PermOpen,
 		ArgSpec:    GroupArgSpec,
@@ -127,6 +128,14 @@ func (h *GroupHandler) Handle(ctx context.Context, req command.Request) (command
 		return h.handleChannelRemove(ctx, req, args)
 	case GroupChannelCreateArgs:
 		return h.handleChannelCreate(ctx, req, args)
+	case GroupFolderAddArgs:
+		return h.handleFolderModify(ctx, req, args.ShortName, h.addFolderToGroup, "Added channel folder to **%s**.")
+	case GroupFolderRemoveArgs:
+		return h.handleFolderModify(ctx, req, args.ShortName, h.removeFolderFromGroup, "Removed channel folder from **%s**.")
+	case GroupFolderAssignArgs:
+		return h.handleFolderModify(ctx, req, args.ShortName, h.assignFolderToGroup, "Assigned channel folder for **%s**.")
+	case GroupFolderUnassignArgs:
+		return h.handleFolderModify(ctx, req, args.ShortName, h.unassignFolderFromGroup, "Unassigned channel folder for **%s**.")
 	case GroupAnnounceArgs:
 		return h.runAnnounce(ctx, req)
 	case GroupAnnounceSetMessageArgs:
@@ -726,6 +735,63 @@ func (h *GroupHandler) removeChannelFromGroup(ctx context.Context, channelGroupI
 		Execute()
 	if err != nil {
 		return fmt.Errorf("remove channel %d from channel group %d: %w", channelID, channelGroupID, err)
+	}
+	return nil
+}
+
+func (h *GroupHandler) handleFolderModify(
+	ctx context.Context,
+	req command.Request,
+	shortName string,
+	op func(ctx context.Context, groupID int64) error,
+	successFmt string,
+) (command.Result, error) {
+	if err := h.auth.Check(ctx, req.Actor, command.PermAdmin); err != nil {
+		return command.Result{}, command.NewUserError("permission denied")
+	}
+
+	mapping, found, err := h.repo.GetEmojiGroupMappingByShortName(ctx, shortName)
+	if err != nil {
+		return command.Result{}, err
+	}
+	if !found {
+		return command.Result{}, command.NewUserError(fmt.Sprintf("Unknown channel group %q.", shortName))
+	}
+
+	if err := op(ctx, mapping.ChannelGroupID); err != nil {
+		return command.Result{}, fmt.Errorf("channel group folder operation: %w", err)
+	}
+	return command.Result{Content: fmt.Sprintf(successFmt, mapping.ShortName)}, nil
+}
+
+func (h *GroupHandler) addFolderToGroup(ctx context.Context, channelGroupID int64) error {
+	_, _, err := h.client.UpdateChannelGroupFolder(ctx, channelGroupID).Add().Execute()
+	if err != nil {
+		return fmt.Errorf("add channel folder to channel group %d: %w", channelGroupID, err)
+	}
+	return nil
+}
+
+func (h *GroupHandler) removeFolderFromGroup(ctx context.Context, channelGroupID int64) error {
+	_, _, err := h.client.UpdateChannelGroupFolder(ctx, channelGroupID).Remove().Execute()
+	if err != nil {
+		return fmt.Errorf("remove channel folder from channel group %d: %w", channelGroupID, err)
+	}
+	return nil
+}
+
+func (h *GroupHandler) assignFolderToGroup(ctx context.Context, channelGroupID int64) error {
+	_, _, err := h.client.UpdateChannelGroupFolder(ctx, channelGroupID).Assign().Execute()
+	if err != nil {
+		return fmt.Errorf("assign channel folder for channel group %d: %w", channelGroupID, err)
+	}
+	return nil
+}
+
+func (h *GroupHandler) unassignFolderFromGroup(ctx context.Context, channelGroupID int64) error {
+	_, _, err := h.client.UpdateChannelGroupFolder(ctx, channelGroupID).Unassign().Execute()
+	if err != nil {
+		return fmt.Errorf("unassign channel folder for channel group %d: %w", channelGroupID, err)
 	}
 	return nil
 }
