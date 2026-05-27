@@ -1188,6 +1188,135 @@ func TestGroupFolderAddAssignsExistingChannels(t *testing.T) {
 	}
 }
 
+func TestGroupFolderUnassignUserErrorForChannelInDifferentFolder(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env, groupID := newCourseTestEnv(t)
+	channelID := seedChannel(t, env.base, "wi-channel")
+	if _, _, err := env.client.UpdateChannelGroupChannels(ctx, groupID).Add([]int64{channelID}).Execute(); err != nil {
+		t.Fatalf("pre-add channel %d to group %d: %v", channelID, groupID, err)
+	}
+	if _, _, err := env.client.UpdateChannelGroupFolder(ctx, groupID).Add().Execute(); err != nil {
+		t.Fatalf("pre-add folder to group %d: %v", groupID, err)
+	}
+
+	otherFolder, _, err := env.base.CreateChannelFolder(ctx).Name("manual folder").Execute()
+	if err != nil {
+		t.Fatalf("CreateChannelFolder: %v", err)
+	}
+	if _, _, err = env.base.UpdateChannel(ctx, channelID).FolderID(otherFolder.ChannelFolderID).Execute(); err != nil {
+		t.Fatalf("move channel to other folder: %v", err)
+	}
+
+	h := env.handler(allowAll{})
+	_, err = h.Handle(ctx, makeGroupRequest(handlers.GroupFolderUnassignArgs{ShortName: "WI"}))
+	var userErr command.UserError
+	if !errors.As(err, &userErr) {
+		t.Fatalf("expected UserError, got %T: %v", err, err)
+	}
+	if !strings.Contains(userErr.Message, "another channel folder") {
+		t.Fatalf("expected folder conflict message, got %q", userErr.Message)
+	}
+	channel, _, err := env.base.GetChannelByID(ctx, channelID).Execute()
+	if err != nil {
+		t.Fatalf("GetChannelByID: %v", err)
+	}
+	if channel.Channel.FolderID == nil || *channel.Channel.FolderID != otherFolder.ChannelFolderID {
+		t.Fatalf("channel folder ID = %v, want %d", channel.Channel.FolderID, otherFolder.ChannelFolderID)
+	}
+}
+
+func TestGroupFolderRemoveUserErrorForChannelOutsideGroupInFolder(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env, groupID := newCourseTestEnv(t)
+	channelID := seedChannel(t, env.base, "wi-channel")
+	extraChannelID := seedChannel(t, env.base, "manual-channel")
+	if _, _, err := env.client.UpdateChannelGroupChannels(ctx, groupID).Add([]int64{channelID}).Execute(); err != nil {
+		t.Fatalf("pre-add channel %d to group %d: %v", channelID, groupID, err)
+	}
+	if _, _, err := env.client.UpdateChannelGroupFolder(ctx, groupID).Add().Execute(); err != nil {
+		t.Fatalf("pre-add folder to group %d: %v", groupID, err)
+	}
+	group, _, err := env.client.GetChannelGroup(ctx, groupID).Execute()
+	if err != nil {
+		t.Fatalf("GetChannelGroup: %v", err)
+	}
+	if group.ChannelGroup.ChannelFolderID == nil {
+		t.Fatal("channel folder ID = nil after group folder add")
+	}
+	if _, _, err = env.base.UpdateChannel(ctx, extraChannelID).FolderID(*group.ChannelGroup.ChannelFolderID).Execute(); err != nil {
+		t.Fatalf("move extra channel to group folder: %v", err)
+	}
+
+	h := env.handler(allowAll{})
+	_, err = h.Handle(ctx, makeGroupRequest(handlers.GroupFolderRemoveArgs{ShortName: "WI"}))
+	var userErr command.UserError
+	if !errors.As(err, &userErr) {
+		t.Fatalf("expected UserError, got %T: %v", err, err)
+	}
+	if !strings.Contains(userErr.Message, "not part of **WI**") {
+		t.Fatalf("expected external channel message, got %q", userErr.Message)
+	}
+}
+
+func TestGroupFolderRemoveBadRequestIsUserError(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env, groupID := newCourseTestEnv(t)
+	channelID := seedChannel(t, env.base, "wi-channel")
+	if _, _, err := env.client.UpdateChannelGroupChannels(ctx, groupID).Add([]int64{channelID}).Execute(); err != nil {
+		t.Fatalf("pre-add channel %d to group %d: %v", channelID, groupID, err)
+	}
+	if _, _, err := env.client.UpdateChannelGroupFolder(ctx, groupID).Add().Execute(); err != nil {
+		t.Fatalf("pre-add folder to group %d: %v", groupID, err)
+	}
+	env.base.FailNext(zulipmock.OperationUpdateChannelFolder, z.CodedError{
+		Response: z.Response{
+			Result: z.ResponseError,
+			Msg:    "You need to remove all the channels from this folder to archive it.",
+		},
+		Code: "BAD_REQUEST",
+	})
+
+	h := env.handler(allowAll{})
+	_, err := h.Handle(ctx, makeGroupRequest(handlers.GroupFolderRemoveArgs{ShortName: "WI"}))
+	var userErr command.UserError
+	if !errors.As(err, &userErr) {
+		t.Fatalf("expected UserError, got %T: %v", err, err)
+	}
+	if !strings.Contains(userErr.Message, "still contains channels outside **WI**") {
+		t.Fatalf("expected archive bad request message, got %q", userErr.Message)
+	}
+}
+
+func TestGroupFolderAddUserErrorForChannelInDifferentFolder(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env, groupID := newCourseTestEnv(t)
+	channelID := seedChannel(t, env.base, "wi-channel")
+	if _, _, err := env.client.UpdateChannelGroupChannels(ctx, groupID).Add([]int64{channelID}).Execute(); err != nil {
+		t.Fatalf("pre-add channel %d to group %d: %v", channelID, groupID, err)
+	}
+	otherFolder, _, err := env.base.CreateChannelFolder(ctx).Name("manual folder").Execute()
+	if err != nil {
+		t.Fatalf("CreateChannelFolder: %v", err)
+	}
+	if _, _, err = env.base.UpdateChannel(ctx, channelID).FolderID(otherFolder.ChannelFolderID).Execute(); err != nil {
+		t.Fatalf("move channel to other folder: %v", err)
+	}
+
+	h := env.handler(allowAll{})
+	_, err = h.Handle(ctx, makeGroupRequest(handlers.GroupFolderAddArgs{ShortName: "WI"}))
+	var userErr command.UserError
+	if !errors.As(err, &userErr) {
+		t.Fatalf("expected UserError, got %T: %v", err, err)
+	}
+	if !strings.Contains(userErr.Message, "another channel folder") {
+		t.Fatalf("expected folder conflict message, got %q", userErr.Message)
+	}
+}
+
 func TestGroupFolderSubcommandParses(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

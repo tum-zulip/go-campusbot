@@ -372,6 +372,114 @@ func TestChannelGroupFolderLifecycle(t *testing.T) {
 	assertChannelFolderArchived(t, ctx, base, folderID, true)
 }
 
+func TestChannelGroupFolderRemoveRejectsManualChannelInFolder(t *testing.T) {
+	ctx := context.Background()
+	base := zulipmock.NewClient()
+	client := newTestClient(t, base)
+	channelIDs := createMockBotSubscribedChannels(t, ctx, base, 3)
+
+	created, _, err := client.CreateChannelGroup(ctx).
+		Name("folder manual member").
+		ChannelIDs(channelIDs[:2]).
+		Execute()
+	if err != nil {
+		t.Fatalf("CreateChannelGroup error = %v", err)
+	}
+	if _, _, err = client.UpdateChannelGroupFolder(ctx, created.ChannelGroupID).Add().Execute(); err != nil {
+		t.Fatalf("Add folder error = %v", err)
+	}
+	group, _, err := client.GetChannelGroup(ctx, created.ChannelGroupID).Execute()
+	if err != nil {
+		t.Fatalf("GetChannelGroup error = %v", err)
+	}
+	if group.ChannelGroup.ChannelFolderID == nil {
+		t.Fatal("channel folder ID = nil after add")
+	}
+	folderID := *group.ChannelGroup.ChannelFolderID
+	if _, _, err = base.UpdateChannel(ctx, channelIDs[2]).FolderID(folderID).Execute(); err != nil {
+		t.Fatalf("move manual channel to group folder: %v", err)
+	}
+
+	_, _, err = client.UpdateChannelGroupFolder(ctx, created.ChannelGroupID).Remove().Execute()
+	var externalChannel channelgroup.ChannelFolderExternalChannelError
+	if !errors.As(err, &externalChannel) {
+		t.Fatalf("expected ChannelFolderExternalChannelError, got %T: %v", err, err)
+	}
+	if externalChannel.ChannelID != channelIDs[2] || externalChannel.ChannelFolderID != folderID {
+		t.Fatalf("unexpected external channel error: %+v", externalChannel)
+	}
+
+	assertChannelFolderID(t, ctx, base, channelIDs[0], folderID)
+	assertChannelFolderID(t, ctx, base, channelIDs[1], folderID)
+	assertChannelFolderID(t, ctx, base, channelIDs[2], folderID)
+	assertChannelFolderArchived(t, ctx, base, folderID, false)
+}
+
+func TestChannelGroupFolderUnassignRejectsChannelInDifferentFolder(t *testing.T) {
+	ctx := context.Background()
+	base := zulipmock.NewClient()
+	client := newTestClient(t, base)
+	channelIDs := createMockBotSubscribedChannels(t, ctx, base, 1)
+
+	created, _, err := client.CreateChannelGroup(ctx).
+		Name("folder conflict").
+		ChannelIDs(channelIDs).
+		Execute()
+	if err != nil {
+		t.Fatalf("CreateChannelGroup error = %v", err)
+	}
+	if _, _, err = client.UpdateChannelGroupFolder(ctx, created.ChannelGroupID).Add().Execute(); err != nil {
+		t.Fatalf("Add folder error = %v", err)
+	}
+
+	otherFolder, _, err := base.CreateChannelFolder(ctx).Name("manual folder").Execute()
+	if err != nil {
+		t.Fatalf("CreateChannelFolder error = %v", err)
+	}
+	if _, _, err = base.UpdateChannel(ctx, channelIDs[0]).FolderID(otherFolder.ChannelFolderID).Execute(); err != nil {
+		t.Fatalf("move channel to other folder: %v", err)
+	}
+
+	_, _, err = client.UpdateChannelGroupFolder(ctx, created.ChannelGroupID).Unassign().Execute()
+	var conflict channelgroup.ChannelFolderConflictError
+	if !errors.As(err, &conflict) {
+		t.Fatalf("expected ChannelFolderConflictError, got %T: %v", err, err)
+	}
+	if conflict.ChannelID != channelIDs[0] || conflict.ConflictingFolderID != otherFolder.ChannelFolderID {
+		t.Fatalf("unexpected conflict: %+v", conflict)
+	}
+	assertChannelFolderID(t, ctx, base, channelIDs[0], otherFolder.ChannelFolderID)
+}
+
+func TestChannelGroupFolderAddRejectsChannelInDifferentFolder(t *testing.T) {
+	ctx := context.Background()
+	base := zulipmock.NewClient()
+	client := newTestClient(t, base)
+	channelIDs := createMockBotSubscribedChannels(t, ctx, base, 1)
+
+	created, _, err := client.CreateChannelGroup(ctx).
+		Name("folder add conflict").
+		ChannelIDs(channelIDs).
+		Execute()
+	if err != nil {
+		t.Fatalf("CreateChannelGroup error = %v", err)
+	}
+	otherFolder, _, err := base.CreateChannelFolder(ctx).Name("manual folder").Execute()
+	if err != nil {
+		t.Fatalf("CreateChannelFolder error = %v", err)
+	}
+	if _, _, err = base.UpdateChannel(ctx, channelIDs[0]).FolderID(otherFolder.ChannelFolderID).Execute(); err != nil {
+		t.Fatalf("move channel to other folder: %v", err)
+	}
+
+	_, _, err = client.UpdateChannelGroupFolder(ctx, created.ChannelGroupID).Add().Execute()
+	var conflict channelgroup.ChannelFolderConflictError
+	if !errors.As(err, &conflict) {
+		t.Fatalf("expected ChannelFolderConflictError, got %T: %v", err, err)
+	}
+	assertChannelFolderID(t, ctx, base, channelIDs[0], otherFolder.ChannelFolderID)
+}
+
 func TestConcurrentFolderAddAndUnassignSerializesToUnassignedFolder(t *testing.T) {
 	ctx := context.Background()
 	base := zulipmock.NewClient()
@@ -469,7 +577,7 @@ func TestConcurrentFolderAssignAndUnassignSerializesToUnassignedFolder(t *testin
 	)
 
 	serialization := base.SerializeRequestSteps(
-		zulipmock.ChannelRequest(zulipmock.OperationUpdateChannel, channelIDs[0]),
+		zulipmock.ChannelRequest(zulipmock.OperationGetChannelByID, channelIDs[0]),
 		zulipmock.OperationRequest(zulipmock.OperationGetSubscribers),
 	)
 	runStartedBeforePreviousCompletes(t, ctx, serialization,
@@ -503,7 +611,7 @@ func TestConcurrentFolderAssignAndRemoveSerializesToRemovedFolder(t *testing.T) 
 	created, folderID := createGroupWithUnassignedFolder(t, ctx, client, base, channelIDs, "folder assign remove race")
 
 	serialization := base.SerializeRequestSteps(
-		zulipmock.ChannelRequest(zulipmock.OperationUpdateChannel, channelIDs[0]),
+		zulipmock.ChannelRequest(zulipmock.OperationGetChannelByID, channelIDs[0]),
 		zulipmock.OperationRequest(zulipmock.OperationGetSubscribers),
 	)
 	runStartedBeforePreviousCompletes(t, ctx, serialization,

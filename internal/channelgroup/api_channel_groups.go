@@ -16,6 +16,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -138,6 +139,34 @@ func newChannelGroups(base client.Client, database *sql.DB, opts ...ClientOption
 }
 
 var _ APIChannelGroups = (*channelGroups)(nil)
+
+type ChannelFolderConflictError struct {
+	ChannelID           int64
+	ExpectedFolderID    int64
+	ConflictingFolderID int64
+}
+
+func (err ChannelFolderConflictError) Error() string {
+	return fmt.Sprintf(
+		"channel %d is in channel folder %d, not managed channel folder %d",
+		err.ChannelID,
+		err.ConflictingFolderID,
+		err.ExpectedFolderID,
+	)
+}
+
+type ChannelFolderExternalChannelError struct {
+	ChannelID       int64
+	ChannelFolderID int64
+}
+
+func (err ChannelFolderExternalChannelError) Error() string {
+	return fmt.Sprintf(
+		"channel %d is in managed channel folder %d but not in the channel group",
+		err.ChannelID,
+		err.ChannelFolderID,
+	)
+}
 
 func (s *channelGroups) withTx(ctx context.Context, fn func(*channelgroupdb.Queries) error) error {
 	if s.db == nil {
@@ -777,6 +806,12 @@ func (s *channelGroups) removeChannelGroupFolder(ctx context.Context, group Chan
 	if group.ChannelFolderID == nil {
 		return nil
 	}
+	if err := s.rejectChannelsOutsideGroupInFolder(ctx, group.ChannelIDs, *group.ChannelFolderID); err != nil {
+		return err
+	}
+	if err := s.removeChannelsFromFolder(ctx, group.ChannelIDs, *group.ChannelFolderID); err != nil {
+		return err
+	}
 	if err := s.archiveChannelFolder(ctx, *group.ChannelFolderID); err != nil {
 		return err
 	}
@@ -794,11 +829,7 @@ func (s *channelGroups) unassignChannelGroupFolder(ctx context.Context, group Ch
 	if group.ChannelFolderID == nil {
 		return nil
 	}
-	if err := s.archiveChannelFolder(ctx, *group.ChannelFolderID); err != nil {
-		return err
-	}
-	_, _, err := s.base.UpdateChannelFolder(ctx, *group.ChannelFolderID).IsArchived(false).Execute()
-	return err
+	return s.removeChannelsFromFolder(ctx, group.ChannelIDs, *group.ChannelFolderID)
 }
 
 func (s *channelGroups) GetChannelGroupSubscribers(
@@ -1071,6 +1102,20 @@ func (s *channelGroups) updateGroupChannels(
 
 func (s *channelGroups) addChannelsToFolder(ctx context.Context, channelIDs []int64, channelFolderID int64) error {
 	for _, channelID := range uniqueInt64s(channelIDs) {
+		channelResp, _, err := s.base.GetChannelByID(ctx, channelID).Execute()
+		if err != nil {
+			return err
+		}
+		if channelResp.Channel.FolderID != nil {
+			if *channelResp.Channel.FolderID == channelFolderID {
+				continue
+			}
+			return ChannelFolderConflictError{
+				ChannelID:           channelID,
+				ExpectedFolderID:    channelFolderID,
+				ConflictingFolderID: *channelResp.Channel.FolderID,
+			}
+		}
 		if _, _, err := s.base.UpdateChannel(ctx, channelID).FolderID(channelFolderID).Execute(); err != nil {
 			return err
 		}
@@ -1078,8 +1123,60 @@ func (s *channelGroups) addChannelsToFolder(ctx context.Context, channelIDs []in
 	return nil
 }
 
+func (s *channelGroups) removeChannelsFromFolder(ctx context.Context, channelIDs []int64, channelFolderID int64) error {
+	for _, channelID := range uniqueInt64s(channelIDs) {
+		channelResp, _, err := s.base.GetChannelByID(ctx, channelID).Execute()
+		if err != nil {
+			return err
+		}
+		if channelResp.Channel.FolderID == nil {
+			continue
+		}
+		if *channelResp.Channel.FolderID != channelFolderID {
+			return ChannelFolderConflictError{
+				ChannelID:           channelID,
+				ExpectedFolderID:    channelFolderID,
+				ConflictingFolderID: *channelResp.Channel.FolderID,
+			}
+		}
+		if _, _, err = s.base.UpdateChannel(ctx, channelID).FolderIDNone().Execute(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *channelGroups) rejectChannelsOutsideGroupInFolder(
+	ctx context.Context,
+	groupChannelIDs []int64,
+	channelFolderID int64,
+) error {
+	channelsResp, _, err := s.base.GetChannels(ctx).IncludeAll(true).Execute()
+	if err != nil {
+		return err
+	}
+	for _, channel := range channelsResp.Channels {
+		if channel.FolderID == nil || *channel.FolderID != channelFolderID {
+			continue
+		}
+		if !containsInt64(groupChannelIDs, channel.ChannelID) {
+			return ChannelFolderExternalChannelError{
+				ChannelID:       channel.ChannelID,
+				ChannelFolderID: channelFolderID,
+			}
+		}
+	}
+	return nil
+}
+
 func (s *channelGroups) archiveChannelFolder(ctx context.Context, channelFolderID int64) error {
 	_, _, err := s.base.UpdateChannelFolder(ctx, channelFolderID).IsArchived(true).Execute()
+	var codedErr zulip.CodedError
+	if errors.As(err, &codedErr) &&
+		codedErr.Code == "BAD_REQUEST" &&
+		strings.Contains(codedErr.Msg, "remove all the channels from this folder") {
+		return ChannelFolderExternalChannelError{ChannelFolderID: channelFolderID}
+	}
 	return err
 }
 

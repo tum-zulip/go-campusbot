@@ -42,6 +42,7 @@ const (
 	OperationCreateUserGroup        Operation = "CreateUserGroup"
 	OperationDeactivateUserGroup    Operation = "DeactivateUserGroup"
 	OperationGetChannelByID         Operation = "GetChannelByID"
+	OperationGetChannels            Operation = "GetChannels"
 	OperationGetSubscribers         Operation = "GetSubscribers"
 	OperationGetSubscriptions       Operation = "GetSubscriptions"
 	OperationGetIsUserGroupMember   Operation = "GetIsUserGroupMember"
@@ -1136,11 +1137,26 @@ func (Client) GetChannelTopics(_ context.Context, _arg1 int64) channels.GetChann
 func (Client) GetChannelTopicsExecute(_ channels.GetChannelTopicsRequest) (*channels.GetChannelTopicsResponse, *http.Response, error) {
 	return nil, nil, nil
 }
-func (Client) GetChannels(_ context.Context) channels.GetChannelsRequest {
-	return withAPIService(channels.GetChannelsRequest{}, Client{})
+func (c Client) GetChannels(ctx context.Context) channels.GetChannelsRequest {
+	return withContext(withAPIService(channels.GetChannelsRequest{}, c), ctx)
 }
-func (Client) GetChannelsExecute(_ channels.GetChannelsRequest) (*channels.GetChannelsResponse, *http.Response, error) {
-	return nil, nil, nil
+func (c Client) GetChannelsExecute(r channels.GetChannelsRequest) (*channels.GetChannelsResponse, *http.Response, error) {
+	state := c.ensureState()
+	if err := state.waitForTurn(requestContext(r), OperationGetChannels, ""); err != nil {
+		return nil, nil, err
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if err := state.failLocked(OperationGetChannels); err != nil {
+		return nil, nil, err
+	}
+
+	list := make([]zulip.Channel, 0, len(state.channels))
+	for _, channel := range state.channels {
+		list = append(list, channel.channel)
+	}
+	sort.Slice(list, func(i, j int) bool { return list[i].ChannelID < list[j].ChannelID })
+	return &channels.GetChannelsResponse{Response: successResponse(), Channels: list}, nil, nil
 }
 func (Client) GetCustomEmoji(_ context.Context) serverandorganizations.GetCustomEmojiRequest {
 	return withAPIService(serverandorganizations.GetCustomEmojiRequest{}, Client{})
@@ -1828,6 +1844,12 @@ func (c Client) UpdateChannelExecute(r channels.UpdateChannelRequest) (*zulip.Re
 	if !ok {
 		return nil, nil, fmt.Errorf("channel %d not found", channelID)
 	}
+	if folderIDNone := requestBoolPtr(r, "folderIDNone"); folderIDNone != nil && *folderIDNone {
+		channel.channel.FolderID = nil
+		state.channels[channelID] = channel
+		resp := successResponse()
+		return &resp, nil, nil
+	}
 	if folderID := requestInt64Ptr(r, "folderID"); folderID != nil {
 		if _, ok := state.channelFolders[*folderID]; !ok {
 			return nil, nil, fmt.Errorf("channel folder %d not found", *folderID)
@@ -1871,10 +1893,11 @@ func (c Client) UpdateChannelFolderExecute(r channels.UpdateChannelFolderRequest
 	if isArchived := requestBoolPtr(r, "isArchived"); isArchived != nil {
 		folder.IsArchived = *isArchived
 		if *isArchived {
-			for channelID, channel := range state.channels {
+			for _, channel := range state.channels {
 				if channel.channel.FolderID != nil && *channel.channel.FolderID == channelFolderID {
-					channel.channel.FolderID = nil
-					state.channels[channelID] = channel
+					return nil, nil, fmt.Errorf(
+						"You need to remove all the channels from this folder to archive it. (BAD_REQUEST)",
+					)
 				}
 			}
 		}

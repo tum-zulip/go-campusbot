@@ -771,6 +771,9 @@ func (h *GroupHandler) handleChannelModify(
 	}
 
 	if err := op(ctx, mapping.ChannelGroupID, channelID); err != nil {
+		if userErr, ok := folderUserError(err, mapping.ShortName); ok {
+			return command.Result{}, userErr
+		}
 		return command.Result{}, fmt.Errorf("channel group operation: %w", err)
 	}
 	return command.Result{Content: fmt.Sprintf(successFmt, channelID, mapping.ShortName)}, nil
@@ -816,9 +819,39 @@ func (h *GroupHandler) handleFolderModify(
 	}
 
 	if err := op(ctx, mapping.ChannelGroupID); err != nil {
+		if userErr, ok := folderUserError(err, mapping.ShortName); ok {
+			return command.Result{}, userErr
+		}
 		return command.Result{}, fmt.Errorf("channel group folder operation: %w", err)
 	}
 	return command.Result{Content: fmt.Sprintf(successFmt, mapping.ShortName)}, nil
+}
+
+func folderUserError(err error, shortName string) (command.UserError, bool) {
+	var folderConflict channelgroup.ChannelFolderConflictError
+	if errors.As(err, &folderConflict) {
+		return command.NewUserError(fmt.Sprintf(
+			"Channel %d is in another channel folder. Remove it from that folder before changing the folder for **%s**.",
+			folderConflict.ChannelID,
+			shortName,
+		)), true
+	}
+
+	var externalChannel channelgroup.ChannelFolderExternalChannelError
+	if errors.As(err, &externalChannel) {
+		if externalChannel.ChannelID == 0 {
+			return command.NewUserError(fmt.Sprintf(
+				"This channel folder still contains channels outside **%s**. Remove those channels from the folder before removing the group folder.",
+				shortName,
+			)), true
+		}
+		return command.NewUserError(fmt.Sprintf(
+			"Channel %d is in this channel folder but is not part of **%s**. Remove it from the folder before removing the group folder.",
+			externalChannel.ChannelID,
+			shortName,
+		)), true
+	}
+	return command.UserError{}, false
 }
 
 func (h *GroupHandler) addFolderToGroup(ctx context.Context, channelGroupID int64) error {
