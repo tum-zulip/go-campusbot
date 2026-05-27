@@ -1,3 +1,4 @@
+//nolint:goconst // Struct tag values are clearer at the call sites in this parser.
 package command
 
 import (
@@ -187,47 +188,16 @@ func (p *ArgParser) setField(ctx context.Context, fv reflect.Value, field reflec
 		fv.SetInt(n)
 
 	case field.Type == zulipUserType:
-		var n int64
-		var err error
-		if field.Tag.Get("mention_only") == "true" {
-			n, err = p.userIDFromMention(ctx, argName, token)
-		} else {
-			n, err = p.userIDFromToken(ctx, argName, token)
-		}
+		user, err := p.userFromToken(ctx, field, argName, token)
 		if err != nil {
 			return err
-		}
-		resolver, ok := p.resolver.(UserResolver)
-		if !ok {
-			return fmt.Errorf("argparser: UserResolver required for zulip.User field %q but not configured", field.Name)
-		}
-		user, err := resolver.GetUserByID(ctx, n)
-		if err != nil {
-			return fmt.Errorf("resolve user %d: %w", n, err)
 		}
 		fv.Set(reflect.ValueOf(user))
 
 	case field.Type == zulipChannelType:
-		var n int64
-		var err error
-		if field.Tag.Get("mention_only") == "true" {
-			n, err = p.channelIDFromMention(ctx, argName, token)
-		} else {
-			n, err = p.channelIDFromToken(ctx, argName, token)
-		}
+		channel, err := p.channelFromToken(ctx, field, argName, token)
 		if err != nil {
 			return err
-		}
-		resolver, ok := p.resolver.(ChannelResolver)
-		if !ok {
-			return fmt.Errorf(
-				"argparser: ChannelResolver required for zulip.Channel field %q but not configured",
-				field.Name,
-			)
-		}
-		channel, err := resolver.GetChannelByID(ctx, n)
-		if err != nil {
-			return fmt.Errorf("resolve channel %d: %w", n, err)
 		}
 		fv.Set(reflect.ValueOf(channel))
 
@@ -235,6 +205,64 @@ func (p *ArgParser) setField(ctx context.Context, fv reflect.Value, field reflec
 		return fmt.Errorf("argparser: unsupported field type %v for field %q", field.Type, field.Name)
 	}
 	return nil
+}
+
+func (p *ArgParser) userFromToken(
+	ctx context.Context,
+	field reflect.StructField,
+	argName, token string,
+) (zulip.User, error) {
+	var n int64
+	var err error
+	if field.Tag.Get("mention_only") == "true" {
+		n, err = p.userIDFromMention(ctx, argName, token)
+	} else {
+		n, err = p.userIDFromToken(ctx, argName, token)
+	}
+	if err != nil {
+		return zulip.User{}, err
+	}
+	resolver, ok := p.resolver.(UserResolver)
+	if !ok {
+		return zulip.User{}, fmt.Errorf(
+			"argparser: UserResolver required for zulip.User field %q but not configured",
+			field.Name,
+		)
+	}
+	user, err := resolver.GetUserByID(ctx, n)
+	if err != nil {
+		return zulip.User{}, fmt.Errorf("resolve user %d: %w", n, err)
+	}
+	return user, nil
+}
+
+func (p *ArgParser) channelFromToken(
+	ctx context.Context,
+	field reflect.StructField,
+	argName, token string,
+) (zulip.Channel, error) {
+	var n int64
+	var err error
+	if field.Tag.Get("mention_only") == "true" {
+		n, err = p.channelIDFromMention(ctx, argName, token)
+	} else {
+		n, err = p.channelIDFromToken(ctx, argName, token)
+	}
+	if err != nil {
+		return zulip.Channel{}, err
+	}
+	resolver, ok := p.resolver.(ChannelResolver)
+	if !ok {
+		return zulip.Channel{}, fmt.Errorf(
+			"argparser: ChannelResolver required for zulip.Channel field %q but not configured",
+			field.Name,
+		)
+	}
+	channel, err := resolver.GetChannelByID(ctx, n)
+	if err != nil {
+		return zulip.Channel{}, fmt.Errorf("resolve channel %d: %w", n, err)
+	}
+	return channel, nil
 }
 
 func (p *ArgParser) parseInt64Arg(ctx context.Context, argName, token string) (int64, error) {
@@ -252,10 +280,10 @@ func (p *ArgParser) parseInt64Arg(ctx context.Context, argName, token string) (i
 }
 
 func (p *ArgParser) userIDFromToken(ctx context.Context, argName, token string) (int64, error) {
-	if _, id, ok := zulipUserMentionNameAndID(token); ok {
+	if id, ok := zulipUserMentionID(token); ok {
 		return id, nil
 	}
-	if _, ok := zulipUserMentionName(token); ok {
+	if isZulipUserMention(token) {
 		id, err := p.resolveMentionID(ctx, token, renderedUserIDPattern)
 		if err != nil {
 			if errors.Is(err, errRenderedIDNotFound) {
@@ -275,10 +303,10 @@ func (p *ArgParser) userIDFromToken(ctx context.Context, argName, token string) 
 }
 
 func (p *ArgParser) userIDFromMention(ctx context.Context, argName, token string) (int64, error) {
-	if _, id, ok := zulipUserMentionNameAndID(token); ok {
+	if id, ok := zulipUserMentionID(token); ok {
 		return id, nil
 	}
-	if _, ok := zulipUserMentionName(token); ok {
+	if isZulipUserMention(token) {
 		id, err := p.resolveMentionID(ctx, token, renderedUserIDPattern)
 		if err != nil {
 			if errors.Is(err, errRenderedIDNotFound) {
@@ -294,7 +322,7 @@ func (p *ArgParser) userIDFromMention(ctx context.Context, argName, token string
 }
 
 func (p *ArgParser) channelIDFromToken(ctx context.Context, argName, token string) (int64, error) {
-	if _, ok := zulipChannelMentionName(token); ok {
+	if isZulipChannelMention(token) {
 		id, err := p.resolveMentionID(ctx, token, renderedChannelIDPattern)
 		if err != nil {
 			if errors.Is(err, errRenderedIDNotFound) {
@@ -314,7 +342,7 @@ func (p *ArgParser) channelIDFromToken(ctx context.Context, argName, token strin
 }
 
 func (p *ArgParser) channelIDFromMention(ctx context.Context, argName, token string) (int64, error) {
-	if _, ok := zulipChannelMentionName(token); ok {
+	if isZulipChannelMention(token) {
 		id, err := p.resolveMentionID(ctx, token, renderedChannelIDPattern)
 		if err != nil {
 			if errors.Is(err, errRenderedIDNotFound) {

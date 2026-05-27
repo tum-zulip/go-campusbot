@@ -18,32 +18,26 @@ var (
 	renderedChannelIDPattern = regexp.MustCompile(`data-stream-id="(\d+)"`)
 )
 
-func zulipUserMentionName(token string) (string, bool) {
+func isZulipUserMention(token string) bool {
 	matches := userMentionPattern.FindStringSubmatch(strings.TrimSpace(token))
-	if matches == nil {
-		return "", false
-	}
-	return matches[1], true
+	return matches != nil
 }
 
-func zulipUserMentionNameAndID(token string) (string, int64, bool) {
+func zulipUserMentionID(token string) (int64, bool) {
 	matches := userMentionWithIDPattern.FindStringSubmatch(strings.TrimSpace(token))
 	if matches == nil {
-		return "", 0, false
+		return 0, false
 	}
 	id, err := strconv.ParseInt(matches[2], 10, 64)
 	if err != nil {
-		return "", 0, false
+		return 0, false
 	}
-	return matches[1], id, true
+	return id, true
 }
 
-func zulipChannelMentionName(token string) (string, bool) {
+func isZulipChannelMention(token string) bool {
 	matches := channelMentionPattern.FindStringSubmatch(strings.TrimSpace(token))
-	if matches == nil {
-		return "", false
-	}
-	return matches[1], true
+	return matches != nil
 }
 
 func idFromRenderedHTML(pattern *regexp.Regexp, html string) (int64, error) {

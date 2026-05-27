@@ -177,11 +177,11 @@ func seedChannelGroup(t *testing.T, client channelgroup.Client, base zulipmock.C
 
 // seedZulipUserGroup creates a user group in the Zulip mock so that it shows up
 // in client.GetUserGroups. Returns the new group ID.
-func seedZulipUserGroup(t *testing.T, base zulipmock.Client, name, description string, members []int64) int64 {
+func seedZulipUserGroup(t *testing.T, base zulipmock.Client, name string, members []int64) int64 {
 	t.Helper()
 	resp, _, err := base.CreateUserGroup(context.Background()).
 		Name(name).
-		Description(description).
+		Description("").
 		Members(members).
 		Execute()
 	if err != nil {
@@ -484,7 +484,7 @@ func TestGroupMappingSetAutoImportsWhenZulipVisibleButNotLocal(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	env := newGroupTestEnv(t)
-	groupID := seedZulipUserGroup(t, env.base, "PGDP", "", []int64{1})
+	groupID := seedZulipUserGroup(t, env.base, "PGDP", []int64{1})
 	msgID := int64(555)
 	if err := saveAnnouncementState(ctx, env.queries, &msgID); err != nil {
 		t.Fatalf("SaveAnnouncementState: %v", err)
@@ -523,7 +523,7 @@ func TestGroupMappingSetParsesUserGroupMention(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	env := newGroupTestEnv(t)
-	groupID := seedZulipUserGroup(t, env.base, "PGDP", "", []int64{1})
+	groupID := seedZulipUserGroup(t, env.base, "PGDP", []int64{1})
 	parser := command.NewArgParser(groupArgResolver{Client: env.base})
 
 	parsed, err := parser.Parse(ctx, handlers.GroupArgSpec, []string{"mapping", "set", "PGDP", "@**PGDP**", "math"})
@@ -543,7 +543,7 @@ func TestGroupMappingSetRejectsNumericUserGroupID(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	env := newGroupTestEnv(t)
-	groupID := seedZulipUserGroup(t, env.base, "PGDP", "", []int64{1})
+	groupID := seedZulipUserGroup(t, env.base, "PGDP", []int64{1})
 	parser := command.NewArgParser(groupArgResolver{Client: env.base})
 
 	_, err := parser.Parse(ctx, handlers.GroupArgSpec, []string{"mapping", "set", "PGDP", itoa(groupID), "math"})
@@ -590,7 +590,7 @@ func TestGroupMappingSetRejectsWhenZulipDoesNotKnowGroup(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	env := newGroupTestEnv(t)
-	seedZulipUserGroup(t, env.base, "OtherGroup", "", []int64{1})
+	seedZulipUserGroup(t, env.base, "OtherGroup", []int64{1})
 	setAnnouncementConfig(t, env.queries, 1, "t")
 
 	h := env.handler(allowAll{})
@@ -627,7 +627,7 @@ func TestGroupMappingSetRejectsPlainUser(t *testing.T) {
 	ctx := context.Background()
 	env := newGroupTestEnv(t)
 	env.base.AddUser(z.User{UserID: 808, FullName: "Plain User", Email: "plain@example.com"})
-	seedZulipUserGroup(t, env.base, "OtherGroup", "", []int64{1})
+	seedZulipUserGroup(t, env.base, "OtherGroup", []int64{1})
 	setAnnouncementConfig(t, env.queries, 1, "t")
 
 	h := env.handler(allowAll{})
