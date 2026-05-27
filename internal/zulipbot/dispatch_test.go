@@ -326,6 +326,39 @@ func TestDispatchUnknownCommand(t *testing.T) {
 	}
 }
 
+func TestDispatchDeniesRestrictedSubcommandBeforeArgErrors(t *testing.T) {
+	t.Parallel()
+
+	bot := newDispatchTestBot(t)
+	result := bot.Dispatch(context.Background(), memberRequest("group", "create"))
+	if result.Content != "permission denied" {
+		t.Fatalf("group create reply = %q, want permission denied", result.Content)
+	}
+	if strings.Contains(result.Content, "Usage:") || strings.Contains(result.Content, "emoji_name") {
+		t.Fatalf("restricted arg error leaked in reply: %q", result.Content)
+	}
+}
+
+func TestDispatchSubcommandArgErrorsOnlyShowVisibleSubcommands(t *testing.T) {
+	t.Parallel()
+
+	bot := newDispatchTestBot(t)
+	result := bot.Dispatch(context.Background(), memberRequest("group", "bogus"))
+	if !strings.Contains(result.Content, `unknown subcommand "bogus"`) {
+		t.Fatalf("group bogus reply = %q", result.Content)
+	}
+	for _, restricted := range []string{"create", "mapping", "channel", "folder", "announce"} {
+		if strings.Contains(result.Content, restricted) {
+			t.Fatalf("restricted subcommand %q leaked in reply: %q", restricted, result.Content)
+		}
+	}
+	for _, visible := range []string{"subscribe", "unsubscribe", "ls", "show"} {
+		if !strings.Contains(result.Content, visible) {
+			t.Fatalf("visible subcommand %q missing from reply: %q", visible, result.Content)
+		}
+	}
+}
+
 func TestRegisterQueueRequestsReactionEvents(t *testing.T) {
 	t.Parallel()
 

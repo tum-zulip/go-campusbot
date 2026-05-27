@@ -94,32 +94,32 @@ var GroupArgSpec = command.SubcmdSpec{ //nolint:gochecknoglobals // package-leve
 	"unsubscribe": GroupUnsubscribeArgs{},
 	"ls":          GroupLsArgs{},
 	"show":        GroupShowArgs{},
-	"create":      GroupCreateArgs{},
-	"remove":      GroupRemoveArgs{},
-	"mapping": command.SubcmdSpec{
+	"create":      command.RequireRole(command.PermAdmin, GroupCreateArgs{}),
+	"remove":      command.RequireRole(command.PermAdmin, GroupRemoveArgs{}),
+	"mapping": command.RequireRole(command.PermAdmin, command.SubcmdSpec{
 		"list":    GroupMappingListArgs{},
 		"set":     GroupMappingSetArgs{},
 		"disable": GroupMappingDisableArgs{},
-	},
-	"channel": command.SubcmdSpec{
+	}),
+	"channel": command.RequireRole(command.PermAdmin, command.SubcmdSpec{
 		"add":    GroupChannelAddArgs{},
 		"remove": GroupChannelRemoveArgs{},
 		"create": GroupChannelCreateArgs{},
-	},
-	"folder": command.SubcmdSpec{
+	}),
+	"folder": command.RequireRole(command.PermAdmin, command.SubcmdSpec{
 		"add":      GroupFolderAddArgs{},
 		"remove":   GroupFolderRemoveArgs{},
 		"assign":   GroupFolderAssignArgs{},
 		"unassign": GroupFolderUnassignArgs{},
-	},
-	"course": command.SubcmdSpec{
+	}),
+	"course": command.RequireRole(command.PermAdmin, command.SubcmdSpec{
 		"add":    GroupChannelAddArgs{},
 		"remove": GroupChannelRemoveArgs{},
 		"create": GroupChannelCreateArgs{},
-	},
-	"announce": command.SubcmdSpec{
+	}),
+	"announce": command.RequireRole(command.PermAdmin, command.SubcmdSpec{
 		"":            GroupAnnounceArgs{},
 		"set-message": GroupAnnounceSetMessageArgs{},
 		"inspect":     GroupAnnounceInspectArgs{},
-	},
+	}),
 }

@@ -269,6 +269,56 @@ func TestArgParserNestedSubcmd(t *testing.T) {
 	}
 }
 
+func TestArgParserRestrictedSpecDispatchesWrappedSpec(t *testing.T) {
+	t.Parallel()
+	result := parse(t, command.RequireRole(command.PermAdmin, testSpec), []string{"a", "hello"})
+	got, ok := result.(subA)
+	if !ok {
+		t.Fatalf("expected subA, got %T", result)
+	}
+	if got.Val != "hello" {
+		t.Fatalf("Val = %q, want %q", got.Val, "hello")
+	}
+}
+
+func TestRequiredPermissionReturnsSelectedSubcommandPermission(t *testing.T) {
+	t.Parallel()
+	spec := command.SubcmdSpec{
+		"open":       subA{},
+		"restricted": command.RequireRole(command.PermAdmin, subA{}),
+		"nested": command.RequireRole(command.PermAdmin, command.SubcmdSpec{
+			"owner": command.RequireRole(command.PermOwner, subA{}),
+		}),
+	}
+	if got := command.RequiredPermission(spec, []string{"open", "value"}); got != command.PermOpen {
+		t.Fatalf("open permission = %v, want %v", got, command.PermOpen)
+	}
+	if got := command.RequiredPermission(spec, []string{"restricted"}); got != command.PermAdmin {
+		t.Fatalf("restricted permission = %v, want %v", got, command.PermAdmin)
+	}
+	if got := command.RequiredPermission(spec, []string{"nested", "owner"}); got != command.PermOwner {
+		t.Fatalf("nested owner permission = %v, want %v", got, command.PermOwner)
+	}
+}
+
+func TestFilterArgSpecRemovesDisallowedSubcommands(t *testing.T) {
+	t.Parallel()
+	spec := command.SubcmdSpec{
+		"open":       subA{},
+		"restricted": command.RequireRole(command.PermAdmin, subA{}),
+	}
+	filtered := command.FilterArgSpec(spec, func(permission zulip.Role) bool {
+		return permission == command.PermOpen
+	})
+	msg := parseErr(t, filtered, []string{"restricted"})
+	if strings.Contains(msg, "open, restricted") || strings.Contains(msg, "restricted, open") {
+		t.Fatalf("filtered error leaked restricted subcommand: %q", msg)
+	}
+	if !strings.Contains(msg, "open") {
+		t.Fatalf("filtered error should mention open subcommand: %q", msg)
+	}
+}
+
 // --- empty-string key (default subcommand) ---
 
 // defaultArgs represents the zero-arg default case (e.g. "group announce" with no subcommand).

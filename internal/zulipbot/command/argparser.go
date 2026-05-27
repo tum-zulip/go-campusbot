@@ -65,6 +65,10 @@ func (p *ArgParser) Parse(ctx context.Context, spec any, rawArgs []string) (any,
 		return p.parseSubcmd(ctx, sub, rawArgs)
 	}
 
+	if restricted, ok := spec.(RestrictedSpec); ok {
+		return p.Parse(ctx, restricted.Spec, rawArgs)
+	}
+
 	return p.parseStruct(ctx, spec, rawArgs)
 }
 

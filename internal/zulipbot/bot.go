@@ -561,12 +561,32 @@ func (bot *Bot) dispatchOne(ctx context.Context, req command.Request) (command.R
 	}
 
 	if meta.ArgSpec != nil && bot.argParser != nil {
+		requiredPermission := command.RequiredPermission(meta.ArgSpec, req.Invocation.Args)
+		if err := bot.Check(ctx, req.Actor, requiredPermission); err != nil {
+			bot.logger.WarnContext(
+				ctx,
+				"subcommand permission denied",
+				"command",
+				meta.Name,
+				"actor_user_id",
+				req.Actor.UserID,
+				"message_id",
+				req.MessageID,
+				"error",
+				err,
+			)
+			return permissionDeniedResult(err), false
+		}
+
 		bot.logger.DebugContext(ctx, "parsing command arguments",
 			"command", meta.Name,
 			"arg_count", len(req.Invocation.Args),
 			"actor_user_id", req.Actor.UserID,
 			"message_id", req.MessageID)
-		parsed, parseErr := bot.argParser.Parse(ctx, meta.ArgSpec, req.Invocation.Args)
+		visibleArgSpec := command.FilterArgSpec(meta.ArgSpec, func(permission zulip.Role) bool {
+			return bot.Check(ctx, req.Actor, permission) == nil
+		})
+		parsed, parseErr := bot.argParser.Parse(ctx, visibleArgSpec, req.Invocation.Args)
 		if parseErr != nil {
 			var userErr command.UserError
 			if errors.As(parseErr, &userErr) {
