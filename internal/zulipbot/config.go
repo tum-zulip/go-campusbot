@@ -11,13 +11,12 @@ import (
 	"github.com/tum-zulip/go-zulip/zulip"
 
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/command"
+	"github.com/tum-zulip/go-campusbot/internal/zulipbot/handlers"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/storage"
 )
 
 const (
 	KeyRestartStartupNotification = "restart_startup_notification"
-	KeyAnnouncementChannelID      = "announcement.channel_id"
-	KeyAnnouncementTopic          = "announcement.topic"
 )
 
 var errUnknownConfigKey = errors.New("unknown config key")
@@ -48,16 +47,16 @@ var configDefs = map[string]configDef{
 		WritePermission: zulip.RoleAdmin,
 		Validate:        validateConfigBool,
 	},
-	KeyAnnouncementChannelID: {
-		Key:             KeyAnnouncementChannelID,
+	handlers.KeyAnnouncementChannelID: {
+		Key:             handlers.KeyAnnouncementChannelID,
 		Summary:         "Channel ID for the channel group announcement message.",
 		Default:         "",
 		ReadPermission:  zulip.RoleAdmin,
 		WritePermission: zulip.RoleAdmin,
 		Validate:        validateConfigPositiveInt64,
 	},
-	KeyAnnouncementTopic: {
-		Key:             KeyAnnouncementTopic,
+	handlers.KeyAnnouncementTopic: {
+		Key:             handlers.KeyAnnouncementTopic,
 		Summary:         "Topic for the channel group announcement message.",
 		Default:         "",
 		ReadPermission:  zulip.RoleAdmin,
@@ -118,32 +117,6 @@ func (bot *Bot) boolConfig(ctx context.Context, key string) (bool, error) {
 		return false, fmt.Errorf("stored config %q is not a bool: %w", key, err)
 	}
 	return parsed, nil
-}
-
-func (bot *Bot) AnnouncementChannelID(ctx context.Context) (int64, bool, error) {
-	v, err := bot.getConfig(ctx, KeyAnnouncementChannelID)
-	if err != nil {
-		return 0, false, err
-	}
-	if v.IsDefault || v.Value == "" {
-		return 0, false, nil
-	}
-	id, err := strconv.ParseInt(v.Value, 10, 64)
-	if err != nil {
-		return 0, false, err
-	}
-	return id, true, nil
-}
-
-func (bot *Bot) AnnouncementTopic(ctx context.Context) (string, bool, error) {
-	v, err := bot.getConfig(ctx, KeyAnnouncementTopic)
-	if err != nil {
-		return "", false, err
-	}
-	if v.IsDefault || v.Value == "" {
-		return "", false, nil
-	}
-	return v.Value, true, nil
 }
 
 func (bot *Bot) setConfig(

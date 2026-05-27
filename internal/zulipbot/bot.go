@@ -19,7 +19,6 @@ import (
 	"github.com/tum-zulip/go-zulip/zulip/events"
 
 	"github.com/tum-zulip/go-campusbot/internal/channelgroup"
-	"github.com/tum-zulip/go-campusbot/internal/zulipbot/announcement"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/command"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/handlers"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/storage"
@@ -148,15 +147,12 @@ func NewBot(
 	groupService := channelgroup.NewGroupService(channelGroupClient)
 	bot.groupSubscriber = groupService
 
-	announcementManager := announcement.NewManager(repo, bot, cfg.Logger)
-
 	bot.registry = command.NewRegistry()
 	if err := bot.registry.Register(handlers.NewGroupHandler(
 		channelGroupClient,
 		repo,
-		announcementManager,
 		bot,
-		bot,
+		cfg.Logger,
 	)); err != nil {
 		return nil, err
 	}
@@ -677,29 +673,6 @@ func (bot *Bot) fetchRole(ctx context.Context, userID int64) (zulip.Role, error)
 		return 0, fmt.Errorf("get Zulip user %d: empty response", userID)
 	}
 	return resp.User.Role, nil
-}
-
-func (bot *Bot) EditMessage(ctx context.Context, messageID int64, content string) error {
-	_, _, err := bot.client.UpdateMessage(ctx, messageID).Content(content).Execute()
-	if err != nil {
-		return fmt.Errorf("edit Zulip message %d: %w", messageID, err)
-	}
-	return nil
-}
-
-func (bot *Bot) AddReaction(ctx context.Context, messageID int64, emojiName, emojiCode, reactionType string) error {
-	req := bot.client.AddReaction(ctx, messageID).EmojiName(emojiName)
-	if emojiCode != "" {
-		req = req.EmojiCode(emojiCode)
-	}
-	if reactionType != "" {
-		req = req.ReactionType(reactionType)
-	}
-	_, _, err := req.Execute()
-	if err != nil {
-		return fmt.Errorf("add reaction %q to message %d: %w", emojiName, messageID, err)
-	}
-	return nil
 }
 
 func (bot *Bot) GetUserByID(ctx context.Context, id int64) (zulip.User, error) {

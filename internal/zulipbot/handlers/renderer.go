@@ -1,4 +1,4 @@
-package announcement
+package handlers
 
 import (
 	"crypto/sha256"
@@ -27,9 +27,9 @@ Have a nice day! :bothappypad:
 
 (2) If your course has changed its emote, remove your reaction of the old emote and react with the new one. Then, you can remove the new reaction again to unsubscribe from the group and its channels.`
 
-// Render generates the announcement message markdown from enabled emoji→group mappings.
+// RenderAnnouncement generates the announcement message markdown from enabled emoji→group mappings.
 // The table uses a 3-column group layout (Course | Emoji pairs, 3 pairs per row).
-func Render(mappings []storage.EmojiGroupMapping) string {
+func RenderAnnouncement(mappings []storage.EmojiGroupMapping) string {
 	var b strings.Builder
 
 	b.WriteString(preamble)
@@ -41,14 +41,13 @@ func Render(mappings []storage.EmojiGroupMapping) string {
 	return b.String()
 }
 
-// ContentHash returns a SHA256 hex digest of the rendered content (for change detection).
-func ContentHash(mappings []storage.EmojiGroupMapping) string {
-	content := Render(mappings)
+// AnnouncementContentHash returns a SHA256 hex digest of the rendered content (for change detection).
+func AnnouncementContentHash(mappings []storage.EmojiGroupMapping) string {
+	content := RenderAnnouncement(mappings)
 	sum := sha256.Sum256([]byte(content))
 	return hex.EncodeToString(sum[:])
 }
 
-// escapeMarkdown escapes Markdown-special characters in group names.
 func escapeMarkdown(s string) string {
 	s = strings.ReplaceAll(s, "|", `\|`)
 	s = strings.ReplaceAll(s, "*", `\*`)
@@ -56,15 +55,11 @@ func escapeMarkdown(s string) string {
 	return s
 }
 
-// renderTable builds the 3-column-group Markdown table.
 func renderTable(mappings []storage.EmojiGroupMapping) string {
 	const cols = 3
-	// Each "group" is (Course, Emoji) pair. Between groups there's a spacer column.
-	// Full row width = cols*(Course+Emoji) + (cols-1)*spacer = cols*2 + cols-1 = 8 cols
 
 	var b strings.Builder
 
-	// Header
 	b.WriteString("| Course | Emoji |   | Course | Emoji |   | Course | Emoji |\n")
 	b.WriteString("| --- | --- | --- | --- | --- | --- | --- | --- |\n")
 
@@ -72,7 +67,6 @@ func renderTable(mappings []storage.EmojiGroupMapping) string {
 		return strings.TrimRight(b.String(), "\n")
 	}
 
-	// Pad mappings to next multiple of 3
 	padded := make([]storage.EmojiGroupMapping, len(mappings))
 	copy(padded, mappings)
 	for len(padded)%cols != 0 {
@@ -93,7 +87,6 @@ func renderTable(mappings []storage.EmojiGroupMapping) string {
 			b.WriteString(" | ")
 			b.WriteString(emojiStr)
 			b.WriteString(" |")
-			// Add spacer column unless it's the last column
 			if col < cols-1 {
 				b.WriteString("   |")
 			}

@@ -15,37 +15,35 @@ import (
 	z "github.com/tum-zulip/go-zulip/zulip"
 
 	"github.com/tum-zulip/go-campusbot/internal/channelgroup"
-	"github.com/tum-zulip/go-campusbot/internal/zulipbot/announcement"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/command"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/handlers"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/storage"
 	"github.com/tum-zulip/go-campusbot/internal/zulipmock"
 )
 
-// --- Fakes for non-Zulip dependencies (announcer/config/auth) ---
+// --- Fakes for non-Zulip dependencies (auth) ---
 
-type fakeAnnouncer struct {
-	called int
-}
-
-func (a *fakeAnnouncer) UpdateAfterMappingChange(_ context.Context, _ *announcement.SendParams) error {
-	a.called++
-	return nil
-}
-
-type fakeGroupConfigReader struct {
-	channelID int64
-	topic     string
-	channelOK bool
-	topicOK   bool
-}
-
-func (r *fakeGroupConfigReader) AnnouncementChannelID(_ context.Context) (int64, bool, error) {
-	return r.channelID, r.channelOK, nil
-}
-
-func (r *fakeGroupConfigReader) AnnouncementTopic(_ context.Context) (string, bool, error) {
-	return r.topic, r.topicOK, nil
+// setAnnouncementConfig persists the announcement channel/topic config so the
+// handler's storage-backed lookups return them. Pass channelID<=0 or topic=""
+// to leave that key unset.
+func setAnnouncementConfig(t *testing.T, repo *storage.Repository, channelID int64, topic string) {
+	t.Helper()
+	if channelID > 0 {
+		if err := repo.SetConfigValue(context.Background(), storage.ConfigChange{
+			Key:   handlers.KeyAnnouncementChannelID,
+			Value: strconv.FormatInt(channelID, 10),
+		}); err != nil {
+			t.Fatalf("SetConfigValue(channel_id): %v", err)
+		}
+	}
+	if topic != "" {
+		if err := repo.SetConfigValue(context.Background(), storage.ConfigChange{
+			Key:   handlers.KeyAnnouncementTopic,
+			Value: topic,
+		}); err != nil {
+			t.Fatalf("SetConfigValue(topic): %v", err)
+		}
+	}
 }
 
 type allowAll struct{}
@@ -158,27 +156,39 @@ func seedZulipUserGroup(t *testing.T, base zulipmock.Client, name, description s
 }
 
 type groupTestEnv struct {
-	repo      *storage.Repository
-	client    channelgroup.Client
-	base      zulipmock.Client
-	announcer *fakeAnnouncer
-	config    *fakeGroupConfigReader
+	repo   *storage.Repository
+	client channelgroup.Client
+	base   zulipmock.Client
 }
 
 func newGroupTestEnv(t *testing.T) *groupTestEnv {
 	t.Helper()
 	client, base := newChannelGroupClient(t)
 	return &groupTestEnv{
-		repo:      openGroupTestRepo(t),
-		client:    client,
-		base:      base,
-		announcer: &fakeAnnouncer{},
-		config:    &fakeGroupConfigReader{},
+		repo:   openGroupTestRepo(t),
+		client: client,
+		base:   base,
 	}
 }
 
 func (e *groupTestEnv) handler(auth command.Authorizer) *handlers.GroupHandler {
-	return handlers.NewGroupHandler(e.client, e.repo, e.announcer, e.config, auth)
+	return handlers.NewGroupHandler(e.client, e.repo, auth, nil)
+}
+
+// announcementHash returns the rendered-content hash currently stored, or "" if
+// no announcement state exists yet. Tests use this as a proxy for "did the
+// handler run an announcement send/edit?": the hash is only saved by
+// ensureAnnouncement after a successful SendMessage/UpdateMessage call.
+func announcementHash(t *testing.T, repo *storage.Repository) string {
+	t.Helper()
+	state, ok, err := repo.GetAnnouncementState(context.Background())
+	if err != nil {
+		t.Fatalf("GetAnnouncementState: %v", err)
+	}
+	if !ok {
+		return ""
+	}
+	return state.ContentHash
 }
 
 // --- Tests ---
@@ -477,10 +487,7 @@ func TestGroupMappingSetAutoImportsWhenZulipVisibleButNotLocal(t *testing.T) {
 	if err := env.repo.SaveAnnouncementState(ctx, storage.AnnouncementState{MessageID: &msgID}); err != nil {
 		t.Fatalf("SaveAnnouncementState: %v", err)
 	}
-	env.config.channelID = 1
-	env.config.topic = "t"
-	env.config.channelOK = true
-	env.config.topicOK = true
+	setAnnouncementConfig(t, env.repo, 1, "t")
 
 	h := env.handler(allowAll{})
 	result, err := h.Handle(
@@ -501,8 +508,8 @@ func TestGroupMappingSetAutoImportsWhenZulipVisibleButNotLocal(t *testing.T) {
 	if err != nil || !ok || m.ChannelGroupID != groupID {
 		t.Fatalf("expected mapping stored with channel group %d, got m=%+v ok=%v err=%v", groupID, m, ok, err)
 	}
-	if env.announcer.called == 0 {
-		t.Error("expected announcer to be called after successful mapping set")
+	if announcementHash(t, env.repo) == "" {
+		t.Error("expected announcement message to be updated after successful mapping set")
 	}
 }
 
@@ -511,10 +518,7 @@ func TestGroupMappingSetSkipsAutoImportWhenAlreadyLocal(t *testing.T) {
 	ctx := context.Background()
 	env := newGroupTestEnv(t)
 	groupID := seedChannelGroup(t, env.client, env.base, "NEWCOURSE")
-	env.config.channelID = 1
-	env.config.topic = "t"
-	env.config.channelOK = true
-	env.config.topicOK = true
+	setAnnouncementConfig(t, env.repo, 1, "t")
 
 	h := env.handler(allowAll{})
 	result, err := h.Handle(
@@ -540,10 +544,7 @@ func TestGroupMappingSetRejectsWhenZulipDoesNotKnowGroup(t *testing.T) {
 	ctx := context.Background()
 	env := newGroupTestEnv(t)
 	seedZulipUserGroup(t, env.base, "OtherGroup", "", []int64{1})
-	env.config.channelID = 1
-	env.config.topic = "t"
-	env.config.channelOK = true
-	env.config.topicOK = true
+	setAnnouncementConfig(t, env.repo, 1, "t")
 
 	h := env.handler(allowAll{})
 	// Use an ID that does not match any seeded group.
@@ -565,8 +566,8 @@ func TestGroupMappingSetRejectsWhenZulipDoesNotKnowGroup(t *testing.T) {
 	if _, ok, err := env.repo.GetEmojiGroupMappingByShortName(ctx, "PGDP"); err != nil || ok {
 		t.Errorf("expected mapping not to be stored, got err=%v, ok=%v", err, ok)
 	}
-	if env.announcer.called != 0 {
-		t.Errorf("expected announcer not to be called on rejected mapping, got %d calls", env.announcer.called)
+	if env.base.LastSentMessage() != nil {
+		t.Errorf("expected no message sent on rejected mapping, got %+v", env.base.LastSentMessage())
 	}
 }
 
@@ -575,10 +576,7 @@ func TestGroupMappingSetAcceptsExistingChannelGroup(t *testing.T) {
 	ctx := context.Background()
 	env := newGroupTestEnv(t)
 	groupID := seedChannelGroup(t, env.client, env.base, "NEWCOURSE")
-	env.config.channelID = 1
-	env.config.topic = "t"
-	env.config.channelOK = true
-	env.config.topicOK = true
+	setAnnouncementConfig(t, env.repo, 1, "t")
 
 	h := env.handler(allowAll{})
 	_, err := h.Handle(
@@ -652,10 +650,7 @@ func TestGroupAnnounceRejectsInvalidEnabledMapping(t *testing.T) {
 	if err := env.repo.SaveAnnouncementState(ctx, storage.AnnouncementState{MessageID: &msgID}); err != nil {
 		t.Fatalf("SaveAnnouncementState: %v", err)
 	}
-	env.config.channelID = 1
-	env.config.topic = "t"
-	env.config.channelOK = true
-	env.config.topicOK = true
+	setAnnouncementConfig(t, env.repo, 1, "t")
 
 	h := env.handler(allowAll{})
 	_, err := h.Handle(ctx, makeGroupRequest(handlers.GroupAnnounceArgs{}))
@@ -666,8 +661,8 @@ func TestGroupAnnounceRejectsInvalidEnabledMapping(t *testing.T) {
 	if !strings.Contains(userErr.Message, "PGDP") || !strings.Contains(userErr.Message, "9999") {
 		t.Errorf("error should list invalid mapping PGDP/9999, got: %q", userErr.Message)
 	}
-	if env.announcer.called != 0 {
-		t.Errorf("expected announcer not to be called when validation fails, got %d", env.announcer.called)
+	if got := announcementHash(t, env.repo); got != "" {
+		t.Errorf("expected no announcement update when validation fails, got hash %q", got)
 	}
 }
 
@@ -685,17 +680,14 @@ func TestGroupAnnounceIgnoresDisabledInvalidMapping(t *testing.T) {
 	if err := env.repo.SaveAnnouncementState(ctx, storage.AnnouncementState{MessageID: &msgID}); err != nil {
 		t.Fatalf("SaveAnnouncementState: %v", err)
 	}
-	env.config.channelID = 1
-	env.config.topic = "t"
-	env.config.channelOK = true
-	env.config.topicOK = true
+	setAnnouncementConfig(t, env.repo, 1, "t")
 
 	h := env.handler(allowAll{})
 	if _, err := h.Handle(ctx, makeGroupRequest(handlers.GroupAnnounceArgs{})); err != nil {
 		t.Fatalf("Handle() failed: %v", err)
 	}
-	if env.announcer.called != 1 {
-		t.Errorf("expected announcer to run when only disabled mapping is invalid, got %d calls", env.announcer.called)
+	if announcementHash(t, env.repo) == "" {
+		t.Error("expected announcement message to be updated when only disabled mapping is invalid")
 	}
 }
 
@@ -709,17 +701,14 @@ func TestGroupAnnounceAllValidMappings(t *testing.T) {
 	if err := env.repo.SaveAnnouncementState(ctx, storage.AnnouncementState{MessageID: &msgID}); err != nil {
 		t.Fatalf("SaveAnnouncementState: %v", err)
 	}
-	env.config.channelID = 1
-	env.config.topic = "t"
-	env.config.channelOK = true
-	env.config.topicOK = true
+	setAnnouncementConfig(t, env.repo, 1, "t")
 
 	h := env.handler(allowAll{})
 	if _, err := h.Handle(ctx, makeGroupRequest(handlers.GroupAnnounceArgs{})); err != nil {
 		t.Fatalf("Handle() failed: %v", err)
 	}
-	if env.announcer.called != 1 {
-		t.Errorf("expected announcer to be called once for valid mappings, got %d", env.announcer.called)
+	if announcementHash(t, env.repo) == "" {
+		t.Error("expected announcement message to be updated for valid mappings")
 	}
 }
 
@@ -772,8 +761,8 @@ func TestGroupAnnounceExistingMessageID(t *testing.T) {
 	if result.Content == "" {
 		t.Error("expected non-empty result")
 	}
-	if env.announcer.called != 1 {
-		t.Errorf("expected announcer called once, got %d", env.announcer.called)
+	if announcementHash(t, env.repo) == "" {
+		t.Error("expected announcement message to be updated")
 	}
 }
 
@@ -907,10 +896,7 @@ func TestGroupAnnounceInspect(t *testing.T) {
 	if err := env.repo.SaveAnnouncementState(ctx, storage.AnnouncementState{MessageID: &msgID}); err != nil {
 		t.Fatalf("SaveAnnouncementState: %v", err)
 	}
-	env.config.channelID = 42
-	env.config.topic = "mytopic"
-	env.config.channelOK = true
-	env.config.topicOK = true
+	setAnnouncementConfig(t, env.repo, 42, "mytopic")
 
 	h := env.handler(allowAll{})
 	result, err := h.Handle(ctx, makeGroupRequest(handlers.GroupAnnounceInspectArgs{}))

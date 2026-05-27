@@ -4,55 +4,91 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/tum-zulip/go-zulip/zulip"
 
 	"github.com/tum-zulip/go-campusbot/internal/channelgroup"
-	"github.com/tum-zulip/go-campusbot/internal/zulipbot/announcement"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/command"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/storage"
 )
 
-// AnnouncementUpdater triggers announcement re-render.
-type AnnouncementUpdater interface {
-	UpdateAfterMappingChange(ctx context.Context, send *announcement.SendParams) error
-}
+// Config keys for the channel-group announcement message. Kept here (rather
+// than in the parent zulipbot package) so the handler can read them directly
+// from storage without an interface indirection; zulipbot/config.go imports
+// these to register them as user-facing config values.
+const (
+	KeyAnnouncementChannelID = "announcement.channel_id"
+	KeyAnnouncementTopic     = "announcement.topic"
+)
 
-// GroupConfigReader provides announcement channel/topic config.
-type GroupConfigReader interface {
-	AnnouncementChannelID(ctx context.Context) (int64, bool, error)
-	AnnouncementTopic(ctx context.Context) (string, bool, error)
+// announceTarget carries the channel/topic used when no announcement message
+// has been sent yet. Required only on the initial send.
+type announceTarget struct {
+	channelID int64
+	topic     string
 }
 
 // GroupHandler handles the "group" command.
 type GroupHandler struct {
-	client       channelgroup.Client
-	repo         *storage.Repository
-	announcer    AnnouncementUpdater
-	configReader GroupConfigReader
-	auth         command.Authorizer
+	client channelgroup.Client
+	repo   *storage.Repository
+	auth   command.Authorizer
+	logger *slog.Logger
 }
 
 // NewGroupHandler creates a new GroupHandler. It uses the channelgroup.Client
 // directly for all Zulip and channel-group operations and the storage
-// Repository for emoji-mapping and announcement-state persistence.
+// Repository for emoji-mapping, announcement-state, and config persistence.
 func NewGroupHandler(
 	client channelgroup.Client,
 	repo *storage.Repository,
-	announcer AnnouncementUpdater,
-	configReader GroupConfigReader,
 	auth command.Authorizer,
+	logger *slog.Logger,
 ) *GroupHandler {
-	return &GroupHandler{
-		client:       client,
-		repo:         repo,
-		announcer:    announcer,
-		configReader: configReader,
-		auth:         auth,
+	if logger == nil {
+		logger = slog.Default()
 	}
+	return &GroupHandler{
+		client: client,
+		repo:   repo,
+		auth:   auth,
+		logger: logger,
+	}
+}
+
+// announcementChannelID returns the configured announcement channel ID. Returns
+// (0, false, nil) when unset or empty.
+func (h *GroupHandler) announcementChannelID(ctx context.Context) (int64, bool, error) {
+	raw, ok, err := h.repo.ConfigValue(ctx, KeyAnnouncementChannelID)
+	if err != nil {
+		return 0, false, err
+	}
+	if !ok || raw == "" {
+		return 0, false, nil
+	}
+	id, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
+	if err != nil {
+		return 0, false, fmt.Errorf("parse %s=%q: %w", KeyAnnouncementChannelID, raw, err)
+	}
+	return id, true, nil
+}
+
+// announcementTopic returns the configured announcement topic. Returns
+// ("", false, nil) when unset or empty.
+func (h *GroupHandler) announcementTopic(ctx context.Context) (string, bool, error) {
+	raw, ok, err := h.repo.ConfigValue(ctx, KeyAnnouncementTopic)
+	if err != nil {
+		return "", false, err
+	}
+	if !ok || raw == "" {
+		return "", false, nil
+	}
+	return raw, true, nil
 }
 
 func (h *GroupHandler) Metadata() command.Metadata {
@@ -562,13 +598,13 @@ func (h *GroupHandler) runAnnounce(ctx context.Context, req command.Request) (co
 		return command.Result{}, fmt.Errorf("read announcement state: %w", err)
 	}
 
-	var send *announcement.SendParams
+	var target *announceTarget
 	if !ok || state.MessageID == nil {
-		channelID, channelOK, err := h.configReader.AnnouncementChannelID(ctx)
+		channelID, channelOK, err := h.announcementChannelID(ctx)
 		if err != nil {
 			return command.Result{}, fmt.Errorf("read announcement channel ID: %w", err)
 		}
-		topic, topicOK, err := h.configReader.AnnouncementTopic(ctx)
+		topic, topicOK, err := h.announcementTopic(ctx)
 		if err != nil {
 			return command.Result{}, fmt.Errorf("read announcement topic: %w", err)
 		}
@@ -584,10 +620,10 @@ func (h *GroupHandler) runAnnounce(ctx context.Context, req command.Request) (co
 				"Announcement topic not configured. Set `announcement.topic` first.",
 			)
 		}
-		send = &announcement.SendParams{ChannelID: channelID, Topic: topic}
+		target = &announceTarget{channelID: channelID, topic: topic}
 	}
 
-	if err := h.announcer.UpdateAfterMappingChange(ctx, send); err != nil {
+	if err := h.ensureAnnouncement(ctx, target); err != nil {
 		return command.Result{}, fmt.Errorf("send/update announcement: %w", err)
 	}
 
@@ -631,8 +667,8 @@ func (h *GroupHandler) handleAnnounceInspect(ctx context.Context, req command.Re
 		return command.Result{}, fmt.Errorf("read announcement state: %w", err)
 	}
 
-	channelID, channelOK, _ := h.configReader.AnnouncementChannelID(ctx)
-	topic, topicOK, _ := h.configReader.AnnouncementTopic(ctx)
+	channelID, channelOK, _ := h.announcementChannelID(ctx)
+	topic, topicOK, _ := h.announcementTopic(ctx)
 
 	var b strings.Builder
 	b.WriteString("**Announcement configuration:**\n")
@@ -798,21 +834,115 @@ func (h *GroupHandler) triggerAnnouncementUpdate(ctx context.Context) {
 		return
 	}
 
-	var send *announcement.SendParams
+	var target *announceTarget
 	if !ok || state.MessageID == nil {
-		channelID, channelOK, err := h.configReader.AnnouncementChannelID(ctx)
+		channelID, channelOK, err := h.announcementChannelID(ctx)
 		if err != nil || !channelOK {
 			return
 		}
-		topic, topicOK, err := h.configReader.AnnouncementTopic(ctx)
+		topic, topicOK, err := h.announcementTopic(ctx)
 		if err != nil || !topicOK {
 			return
 		}
-		send = &announcement.SendParams{ChannelID: channelID, Topic: topic}
+		target = &announceTarget{channelID: channelID, topic: topic}
 	}
 
-	if err := h.announcer.UpdateAfterMappingChange(ctx, send); err != nil {
-		_ = err
+	if err := h.ensureAnnouncement(ctx, target); err != nil {
+		h.logger.WarnContext(ctx, "announcement update failed", "error", err)
+	}
+}
+
+// ensureAnnouncement sends or edits the channel-group announcement message.
+//   - If no message_id is stored: send a new message to the supplied channel/topic
+//     and persist the message_id. Requires a non-nil target with positive channelID
+//     and non-empty topic.
+//   - If a message_id is stored: edit the message when the rendered content has
+//     changed; otherwise leave it alone.
+//
+// After a send or edit, the bot's reactions for every enabled mapping are added.
+// Reaction errors are logged but never propagated.
+func (h *GroupHandler) ensureAnnouncement(ctx context.Context, target *announceTarget) error {
+	mappings, err := h.repo.ListEnabledEmojiGroupMappings(ctx)
+	if err != nil {
+		return fmt.Errorf("list emoji group mappings: %w", err)
+	}
+
+	content := RenderAnnouncement(mappings)
+	hash := AnnouncementContentHash(mappings)
+
+	state, ok, err := h.repo.GetAnnouncementState(ctx)
+	if err != nil {
+		return fmt.Errorf("get announcement state: %w", err)
+	}
+
+	var messageID int64
+	if !ok || state.MessageID == nil {
+		if target == nil || target.channelID <= 0 || target.topic == "" {
+			return errors.New("no announcement message_id stored and no channel/topic provided: " +
+				"run `group announce set-message <id>` to migrate from an existing message, " +
+				"or set announcement.channel_id and announcement.topic to create a new one",
+			)
+		}
+		resp, _, err := h.client.SendMessage(ctx).
+			To(zulip.ChannelAsRecipient(target.channelID)).
+			Topic(target.topic).
+			Content(content).
+			Execute()
+		if err != nil {
+			return fmt.Errorf("send announcement message: %w", err)
+		}
+		if resp == nil {
+			return errors.New("send announcement message: empty response")
+		}
+		messageID = resp.ID
+		if err := h.repo.SaveAnnouncementState(ctx, storage.AnnouncementState{
+			MessageID:   &messageID,
+			ContentHash: hash,
+		}); err != nil {
+			return fmt.Errorf("save announcement state: %w", err)
+		}
+		h.logger.InfoContext(ctx, "sent new announcement message", "message_id", messageID)
+	} else {
+		messageID = *state.MessageID
+		if state.ContentHash != hash {
+			if _, _, err := h.client.UpdateMessage(ctx, messageID).Content(content).Execute(); err != nil {
+				return fmt.Errorf("edit announcement message %d: %w", messageID, err)
+			}
+			if err := h.repo.SaveAnnouncementState(ctx, storage.AnnouncementState{
+				MessageID:   &messageID,
+				ContentHash: hash,
+			}); err != nil {
+				return fmt.Errorf("save announcement state: %w", err)
+			}
+			h.logger.InfoContext(ctx, "updated announcement message", "message_id", messageID)
+		} else {
+			h.logger.InfoContext(ctx, "announcement message is up to date", "message_id", messageID)
+		}
+	}
+
+	h.addAnnouncementReactions(ctx, messageID, mappings)
+	return nil
+}
+
+func (h *GroupHandler) addAnnouncementReactions(
+	ctx context.Context,
+	messageID int64,
+	mappings []storage.EmojiGroupMapping,
+) {
+	for _, mapping := range mappings {
+		req := h.client.AddReaction(ctx, messageID).EmojiName(mapping.EmojiName)
+		if mapping.EmojiCode != "" {
+			req = req.EmojiCode(mapping.EmojiCode)
+		}
+		if mapping.ReactionType != "" {
+			req = req.ReactionType(mapping.ReactionType)
+		}
+		if _, _, err := req.Execute(); err != nil {
+			h.logger.WarnContext(ctx, "failed to add bot reaction to announcement",
+				"message_id", messageID,
+				"emoji_name", mapping.EmojiName,
+				"error", err)
+		}
 	}
 }
 

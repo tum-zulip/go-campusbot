@@ -1,15 +1,15 @@
-package announcement_test
+package handlers_test
 
 import (
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/tum-zulip/go-campusbot/internal/zulipbot/announcement"
+	"github.com/tum-zulip/go-campusbot/internal/zulipbot/handlers"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/storage"
 )
 
-func mapping(shortName, emojiName string, channelGroupID int64) storage.EmojiGroupMapping {
+func rendererMapping(shortName, emojiName string, channelGroupID int64) storage.EmojiGroupMapping {
 	return storage.EmojiGroupMapping{
 		ID:             1,
 		ShortName:      shortName,
@@ -26,7 +26,7 @@ func mapping(shortName, emojiName string, channelGroupID int64) storage.EmojiGro
 
 func TestRenderEmpty(t *testing.T) {
 	t.Parallel()
-	content := announcement.Render(nil)
+	content := handlers.RenderAnnouncement(nil)
 	if !strings.Contains(content, "Hi!") {
 		t.Error("expected preamble in rendered content")
 	}
@@ -41,9 +41,9 @@ func TestRenderEmpty(t *testing.T) {
 func TestRenderSingleMapping(t *testing.T) {
 	t.Parallel()
 	mappings := []storage.EmojiGroupMapping{
-		mapping("WI", "wi", 42),
+		rendererMapping("WI", "wi", 42),
 	}
-	content := announcement.Render(mappings)
+	content := handlers.RenderAnnouncement(mappings)
 	if !strings.Contains(content, "WI") {
 		t.Error("expected short name in rendered content")
 	}
@@ -55,12 +55,11 @@ func TestRenderSingleMapping(t *testing.T) {
 func TestRenderThreeMappings(t *testing.T) {
 	t.Parallel()
 	mappings := []storage.EmojiGroupMapping{
-		mapping("A", "alpha", 1),
-		mapping("B", "beta", 2),
-		mapping("C", "gamma", 3),
+		rendererMapping("A", "alpha", 1),
+		rendererMapping("B", "beta", 2),
+		rendererMapping("C", "gamma", 3),
 	}
-	content := announcement.Render(mappings)
-	// All three should be in one row
+	content := handlers.RenderAnnouncement(mappings)
 	lines := strings.Split(content, "\n")
 	found := false
 	for _, line := range lines {
@@ -77,16 +76,15 @@ func TestRenderThreeMappings(t *testing.T) {
 func TestRenderFourMappingsPadsToSix(t *testing.T) {
 	t.Parallel()
 	mappings := []storage.EmojiGroupMapping{
-		mapping("A", "alpha", 1),
-		mapping("B", "beta", 2),
-		mapping("C", "gamma", 3),
-		mapping("D", "delta", 4),
+		rendererMapping("A", "alpha", 1),
+		rendererMapping("B", "beta", 2),
+		rendererMapping("C", "gamma", 3),
+		rendererMapping("D", "delta", 4),
 	}
-	content := announcement.Render(mappings)
+	content := handlers.RenderAnnouncement(mappings)
 	if !strings.Contains(content, "A") || !strings.Contains(content, "D") {
 		t.Error("expected all four mappings in rendered content")
 	}
-	// Should have two data rows (first row has A,B,C; second row has D + padding)
 	lines := strings.Split(content, "\n")
 	dataRows := 0
 	for _, line := range lines {
@@ -102,9 +100,9 @@ func TestRenderFourMappingsPadsToSix(t *testing.T) {
 func TestRenderMarkdownEscaping(t *testing.T) {
 	t.Parallel()
 	mappings := []storage.EmojiGroupMapping{
-		mapping("Course|With|Pipes", "emoji", 1),
+		rendererMapping("Course|With|Pipes", "emoji", 1),
 	}
-	content := announcement.Render(mappings)
+	content := handlers.RenderAnnouncement(mappings)
 	if strings.Contains(content, "Course|With|Pipes") {
 		t.Error("expected pipes to be escaped in short name")
 	}
@@ -116,10 +114,10 @@ func TestRenderMarkdownEscaping(t *testing.T) {
 func TestContentHashDeterministic(t *testing.T) {
 	t.Parallel()
 	mappings := []storage.EmojiGroupMapping{
-		mapping("WI", "wi", 42),
+		rendererMapping("WI", "wi", 42),
 	}
-	hash1 := announcement.ContentHash(mappings)
-	hash2 := announcement.ContentHash(mappings)
+	hash1 := handlers.AnnouncementContentHash(mappings)
+	hash2 := handlers.AnnouncementContentHash(mappings)
 	if hash1 != hash2 {
 		t.Errorf("ContentHash not deterministic: %s != %s", hash1, hash2)
 	}
@@ -130,8 +128,8 @@ func TestContentHashDeterministic(t *testing.T) {
 
 func TestContentHashChangesWithMappings(t *testing.T) {
 	t.Parallel()
-	empty := announcement.ContentHash(nil)
-	one := announcement.ContentHash([]storage.EmojiGroupMapping{mapping("WI", "wi", 42)})
+	empty := handlers.AnnouncementContentHash(nil)
+	one := handlers.AnnouncementContentHash([]storage.EmojiGroupMapping{rendererMapping("WI", "wi", 42)})
 	if empty == one {
 		t.Error("expected different hashes for empty and non-empty mappings")
 	}
