@@ -752,7 +752,7 @@ func (h *GroupHandler) handleChannelAdd(
 	if err := h.auth.Check(ctx, req.Actor, command.PermAdmin); err != nil {
 		return command.Result{}, command.NewUserError("permission denied")
 	}
-	return h.handleChannelModify(ctx, args.ChannelID, args.ShortName,
+	return h.handleChannelModify(ctx, args.Channel.ChannelID, args.ShortName,
 		h.addChannelToGroup, "Added channel %d to **%s**.")
 }
 
@@ -764,7 +764,7 @@ func (h *GroupHandler) handleChannelRemove(
 	if err := h.auth.Check(ctx, req.Actor, command.PermAdmin); err != nil {
 		return command.Result{}, command.NewUserError("permission denied")
 	}
-	return h.handleChannelModify(ctx, args.ChannelID, args.ShortName,
+	return h.handleChannelModify(ctx, args.Channel.ChannelID, args.ShortName,
 		h.removeChannelFromGroup, "Removed channel %d from **%s**.")
 }
 

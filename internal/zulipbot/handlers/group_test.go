@@ -937,7 +937,10 @@ func TestGroupCourseAdd(t *testing.T) {
 	channelID := seedChannel(t, env.base, "wi-channel")
 	h := env.handler(allowAll{})
 
-	result, err := h.Handle(ctx, makeGroupRequest(handlers.GroupChannelAddArgs{ChannelID: channelID, ShortName: "WI"}))
+	result, err := h.Handle(ctx, makeGroupRequest(handlers.GroupChannelAddArgs{
+		Channel:   z.Channel{ChannelID: channelID},
+		ShortName: "WI",
+	}))
 	if err != nil {
 		t.Fatalf("Handle() failed: %v", err)
 	}
@@ -966,7 +969,10 @@ func TestGroupCourseRemove(t *testing.T) {
 	h := env.handler(allowAll{})
 	result, err := h.Handle(
 		ctx,
-		makeGroupRequest(handlers.GroupChannelRemoveArgs{ChannelID: channelID, ShortName: "WI"}),
+		makeGroupRequest(handlers.GroupChannelRemoveArgs{
+			Channel:   z.Channel{ChannelID: channelID},
+			ShortName: "WI",
+		}),
 	)
 	if err != nil {
 		t.Fatalf("Handle() failed: %v", err)
@@ -989,7 +995,10 @@ func TestGroupCoursePermissionDenied(t *testing.T) {
 	env, _ := newCourseTestEnv(t)
 	h := env.handler(denyAll{})
 
-	_, err := h.Handle(ctx, makeGroupRequest(handlers.GroupChannelAddArgs{ChannelID: 99, ShortName: "WI"}))
+	_, err := h.Handle(ctx, makeGroupRequest(handlers.GroupChannelAddArgs{
+		Channel:   z.Channel{ChannelID: 99},
+		ShortName: "WI",
+	}))
 	if err == nil {
 		t.Fatal("expected error for non-admin user")
 	}
@@ -1001,7 +1010,10 @@ func TestGroupCourseUnknownGroup(t *testing.T) {
 	env, _ := newCourseTestEnv(t)
 	h := env.handler(allowAll{})
 
-	_, err := h.Handle(ctx, makeGroupRequest(handlers.GroupChannelAddArgs{ChannelID: 99, ShortName: "UNKNOWN"}))
+	_, err := h.Handle(ctx, makeGroupRequest(handlers.GroupChannelAddArgs{
+		Channel:   z.Channel{ChannelID: 99},
+		ShortName: "UNKNOWN",
+	}))
 	if err == nil {
 		t.Fatal("expected error for unknown group")
 	}

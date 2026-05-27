@@ -1,6 +1,10 @@
 package handlers
 
-import "github.com/tum-zulip/go-campusbot/internal/zulipbot/command"
+import (
+	"github.com/tum-zulip/go-zulip/zulip"
+
+	"github.com/tum-zulip/go-campusbot/internal/zulipbot/command"
+)
 
 // Arg structs for the "group" command tree.
 // Each distinct leaf action has its own type so the Handle type switch is unambiguous.
@@ -35,13 +39,13 @@ type GroupMappingDisableArgs struct {
 }
 
 type GroupChannelAddArgs struct {
-	ChannelID int64  `desc:"Channel ID"`
-	ShortName string `desc:"Group short name"`
+	Channel   zulip.Channel `desc:"Zulip channel"`
+	ShortName string        `desc:"Group short name"`
 }
 
 type GroupChannelRemoveArgs struct {
-	ChannelID int64  `desc:"Channel ID"`
-	ShortName string `desc:"Group short name"`
+	Channel   zulip.Channel `desc:"Zulip channel"`
+	ShortName string        `desc:"Group short name"`
 }
 
 type GroupChannelCreateArgs struct {
