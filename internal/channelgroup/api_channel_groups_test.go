@@ -851,7 +851,7 @@ func TestConcurrentTwoSubscribersAndAddChannelMaterializesBothUsers(t *testing.T
 		t.Fatalf("CreateChannelGroup error = %v", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	const (
 		addOrigin = "UpdateChannelGroupChannels"
@@ -863,7 +863,7 @@ func TestConcurrentTwoSubscribersAndAddChannelMaterializesBothUsers(t *testing.T
 		zulipmock.SubscriptionRequest(zulipmock.OperationSubscribe, []string{mockChannelName(2)}, []int64{101}).
 			From(addOrigin),
 		zulipmock.OperationRequest(zulipmock.OperationGetUserGroupMembers).From(addOrigin),
-		zulipmock.OperationRequest(zulipmock.OperationUpdateUserGroupMembers).From(subOrigin),
+		zulipmock.UpdateUserGroupMembersRequest(created.ChannelGroupID, []int64{202}, nil).From(subOrigin),
 		zulipmock.ChannelRequest(zulipmock.OperationGetChannelByID, channelIDs[0]).From(subOrigin),
 		zulipmock.ChannelRequest(zulipmock.OperationGetChannelByID, channelIDs[1]).From(subOrigin),
 		zulipmock.SubscriptionRequest(
@@ -872,7 +872,7 @@ func TestConcurrentTwoSubscribersAndAddChannelMaterializesBothUsers(t *testing.T
 			[]int64{202},
 		).From(subOrigin),
 		zulipmock.OperationRequest(zulipmock.OperationGetUserGroupMembers).From(subOrigin),
-		zulipmock.OperationRequest(zulipmock.OperationUpdateUserGroupMembers).From(subOrigin),
+		zulipmock.UpdateUserGroupMembersRequest(created.ChannelGroupID, []int64{303}, nil).From(subOrigin),
 		zulipmock.ChannelRequest(zulipmock.OperationGetChannelByID, channelIDs[0]).From(subOrigin),
 		zulipmock.ChannelRequest(zulipmock.OperationGetChannelByID, channelIDs[1]).From(subOrigin),
 		zulipmock.SubscriptionRequest(

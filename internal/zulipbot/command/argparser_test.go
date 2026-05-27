@@ -308,7 +308,9 @@ type userArgs struct {
 }
 
 type fakeResolver struct {
-	users map[int64]zulip.User
+	users    map[int64]zulip.User
+	channels map[int64]zulip.Channel
+	rendered map[string]string
 }
 
 func (r *fakeResolver) GetUserByID(_ context.Context, id int64) (zulip.User, error) {
@@ -317,6 +319,22 @@ func (r *fakeResolver) GetUserByID(_ context.Context, id int64) (zulip.User, err
 		return zulip.User{}, errors.New("user not found")
 	}
 	return u, nil
+}
+
+func (r *fakeResolver) GetChannelByID(_ context.Context, id int64) (zulip.Channel, error) {
+	channel, ok := r.channels[id]
+	if !ok {
+		return zulip.Channel{}, errors.New("channel not found")
+	}
+	return channel, nil
+}
+
+func (r *fakeResolver) RenderMessage(_ context.Context, content string) (string, error) {
+	rendered, ok := r.rendered[content]
+	if !ok {
+		return "", errors.New("rendered content not found")
+	}
+	return rendered, nil
 }
 
 func TestArgParserUserResolution(t *testing.T) {
@@ -335,6 +353,43 @@ func TestArgParserUserResolution(t *testing.T) {
 	}
 	if got.User.UserID != 42 || got.User.FullName != "Alice" {
 		t.Fatalf("unexpected user: %+v", got.User)
+	}
+}
+
+func TestArgParserUserMentionResolution(t *testing.T) {
+	t.Parallel()
+	resolver := &fakeResolver{
+		users: map[int64]zulip.User{
+			42: {UserID: 42, FullName: "The User Name"},
+		},
+		rendered: map[string]string{
+			`@**The User Name**`: `<p><span data-user-id="42">@The User Name</span></p>`,
+		},
+	}
+	parser := command.NewArgParser(resolver)
+	result, err := parser.Parse(context.Background(), userArgs{}, []string{`@**The User Name**`})
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	got := result.(userArgs)
+	if got.User.UserID != 42 || got.User.FullName != "The User Name" {
+		t.Fatalf("unexpected user: %+v", got.User)
+	}
+}
+
+func TestArgParserUserMentionWithEmbeddedIDResolution(t *testing.T) {
+	t.Parallel()
+	resolver := &fakeResolver{users: map[int64]zulip.User{
+		42: {UserID: 42, FullName: "The User Name"},
+	}}
+	parser := command.NewArgParser(resolver)
+	result, err := parser.Parse(context.Background(), userArgs{}, []string{`@**The User Name|42**`})
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	got := result.(userArgs)
+	if got.User.UserID != 42 {
+		t.Fatalf("UserID = %d, want 42", got.User.UserID)
 	}
 }
 
@@ -357,5 +412,63 @@ func TestArgParserUserResolutionNonIntegerID(t *testing.T) {
 	}
 	if err.Error() == "" {
 		t.Fatal("expected non-empty error")
+	}
+}
+
+// --- zulip.Channel resolution ---
+
+type channelArgs struct {
+	Channel zulip.Channel `arg:"channel" desc:"Zulip channel"`
+}
+
+type channelIDArgs struct {
+	ChannelID int64 `arg:"channel_id" desc:"Zulip channel ID"`
+}
+
+func TestArgParserChannelMentionResolution(t *testing.T) {
+	t.Parallel()
+	resolver := &fakeResolver{
+		channels: map[int64]zulip.Channel{
+			24: {ChannelID: 24, Name: "The Channel Name"},
+		},
+		rendered: map[string]string{
+			`#**The Channel Name**`: `<p><a data-stream-id="24">#The Channel Name</a></p>`,
+		},
+	}
+	parser := command.NewArgParser(resolver)
+	result, err := parser.Parse(context.Background(), channelArgs{}, []string{`#**The Channel Name**`})
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	got := result.(channelArgs)
+	if got.Channel.ChannelID != 24 || got.Channel.Name != "The Channel Name" {
+		t.Fatalf("unexpected channel: %+v", got.Channel)
+	}
+}
+
+func TestArgParserChannelIDMentionResolution(t *testing.T) {
+	t.Parallel()
+	resolver := &fakeResolver{
+		rendered: map[string]string{
+			`#**The Channel Name**`: `<p><a data-stream-id="24">#The Channel Name</a></p>`,
+		},
+	}
+	parser := command.NewArgParser(resolver)
+	result, err := parser.Parse(context.Background(), channelIDArgs{}, []string{`#**The Channel Name**`})
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	got := result.(channelIDArgs)
+	if got.ChannelID != 24 {
+		t.Fatalf("ChannelID = %d, want 24", got.ChannelID)
+	}
+}
+
+func TestArgParserChannelIDStillAcceptsInteger(t *testing.T) {
+	t.Parallel()
+	result := parse(t, channelIDArgs{}, []string{"24"})
+	got := result.(channelIDArgs)
+	if got.ChannelID != 24 {
+		t.Fatalf("ChannelID = %d, want 24", got.ChannelID)
 	}
 }

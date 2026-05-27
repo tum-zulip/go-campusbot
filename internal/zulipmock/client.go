@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"unsafe"
@@ -117,6 +118,64 @@ type channelState struct {
 
 type userGroupState struct {
 	group zulip.UserGroup
+}
+
+func (s *state) renderedMentionUserIDLocked(content string) (int64, bool) {
+	name, id, ok := splitUserMention(content)
+	if !ok {
+		return 0, false
+	}
+	if id != 0 {
+		if _, ok := s.users[id]; ok {
+			return id, true
+		}
+		return 0, false
+	}
+	for _, user := range s.users {
+		if user.FullName == name {
+			return user.UserID, true
+		}
+	}
+	return 0, false
+}
+
+func (s *state) renderedMentionChannelIDLocked(content string) (int64, bool) {
+	name, ok := splitChannelMention(content)
+	if !ok {
+		return 0, false
+	}
+	id, ok := s.channelIDs[name]
+	return id, ok
+}
+
+func splitUserMention(content string) (string, int64, bool) {
+	content = strings.TrimSpace(content)
+	prefix := "@**"
+	if strings.HasPrefix(content, "@_**") {
+		prefix = "@_**"
+	}
+	if !strings.HasPrefix(content, prefix) || !strings.HasSuffix(content, "**") {
+		return "", 0, false
+	}
+	body := strings.TrimSuffix(strings.TrimPrefix(content, prefix), "**")
+	name, rawID, hasID := strings.Cut(body, "|")
+	if !hasID {
+		return name, 0, name != ""
+	}
+	id, err := strconv.ParseInt(rawID, 10, 64)
+	if err != nil {
+		return "", 0, false
+	}
+	return name, id, name != ""
+}
+
+func splitChannelMention(content string) (string, bool) {
+	content = strings.TrimSpace(content)
+	if !strings.HasPrefix(content, "#**") || !strings.HasSuffix(content, "**") {
+		return "", false
+	}
+	name := strings.TrimSuffix(strings.TrimPrefix(content, "#**"), "**")
+	return name, name != ""
 }
 
 type SentMessage struct {
@@ -1030,11 +1089,24 @@ func (c Client) GetChannelFoldersExecute(_ channels.GetChannelFoldersRequest) (*
 		ChannelFolders: folders,
 	}, nil, nil
 }
-func (Client) GetChannelID(_ context.Context) channels.GetChannelIDRequest {
-	return withAPIService(channels.GetChannelIDRequest{}, Client{})
+func (c Client) GetChannelID(ctx context.Context) channels.GetChannelIDRequest {
+	return withContext(withAPIService(channels.GetChannelIDRequest{}, c), ctx)
 }
-func (Client) GetChannelIDExecute(_ channels.GetChannelIDRequest) (*channels.GetChannelIDResponse, *http.Response, error) {
-	return nil, nil, nil
+func (Client) GetChannelIDExecute(r channels.GetChannelIDRequest) (*channels.GetChannelIDResponse, *http.Response, error) {
+	client := requestClient(r)
+	state := client.ensureState()
+	state.mu.Lock()
+	defer state.mu.Unlock()
+
+	name := ""
+	if value := requestStringPtr(r, "channel"); value != nil {
+		name = *value
+	}
+	id, ok := state.channelIDs[name]
+	if !ok {
+		return nil, nil, fmt.Errorf("channel %q not found", name)
+	}
+	return &channels.GetChannelIDResponse{Response: successResponse(), ChannelID: id}, nil, nil
 }
 func (Client) GetChannelTopics(_ context.Context, _arg1 int64) channels.GetChannelTopicsRequest {
 	return withAPIService(channels.GetChannelTopicsRequest{}, Client{})
@@ -1475,11 +1547,26 @@ func (Client) RemoveReaction(_ context.Context, _arg1 int64) messages.RemoveReac
 func (Client) RemoveReactionExecute(_ messages.RemoveReactionRequest) (*zulip.Response, *http.Response, error) {
 	return nil, nil, nil
 }
-func (Client) RenderMessage(_ context.Context) messages.RenderMessageRequest {
-	return withAPIService(messages.RenderMessageRequest{}, Client{})
+func (c Client) RenderMessage(ctx context.Context) messages.RenderMessageRequest {
+	return withContext(withAPIService(messages.RenderMessageRequest{}, c), ctx)
 }
-func (Client) RenderMessageExecute(_ messages.RenderMessageRequest) (*messages.RenderMessageResponse, *http.Response, error) {
-	return nil, nil, nil
+func (Client) RenderMessageExecute(r messages.RenderMessageRequest) (*messages.RenderMessageResponse, *http.Response, error) {
+	client := requestClient(r)
+	state := client.ensureState()
+	state.mu.Lock()
+	defer state.mu.Unlock()
+
+	content := ""
+	if value := requestStringPtr(r, "content"); value != nil {
+		content = *value
+	}
+	rendered := content
+	if userID, ok := state.renderedMentionUserIDLocked(content); ok {
+		rendered = fmt.Sprintf(`<p><span data-user-id="%d">%s</span></p>`, userID, content)
+	} else if channelID, ok := state.renderedMentionChannelIDLocked(content); ok {
+		rendered = fmt.Sprintf(`<p><a data-stream-id="%d">%s</a></p>`, channelID, content)
+	}
+	return &messages.RenderMessageResponse{Response: successResponse(), Rendered: rendered}, nil, nil
 }
 func (Client) ReorderCustomProfileFields(_ context.Context) serverandorganizations.ReorderCustomProfileFieldsRequest {
 	return withAPIService(serverandorganizations.ReorderCustomProfileFieldsRequest{}, Client{})

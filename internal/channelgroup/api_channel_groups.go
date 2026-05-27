@@ -764,7 +764,7 @@ func (s *channelGroups) UnsubscribeFromChannelGroupExecute(
 	}
 
 	if !r.keepChannels && len(group.ChannelIDs) > 0 {
-		if err = s.unsubscribeUsersFromChannels(r.ctx, group.ChannelIDs, userIDs); err != nil {
+		if err = s.unsubscribeUsersFromChannelGroupChannels(r.ctx, r.channelGroupID, group.ChannelIDs, userIDs); err != nil {
 			return nil, nil, err
 		}
 	}
@@ -788,7 +788,12 @@ func (s *channelGroups) UnsubscribeFromChannelGroupExecute(
 				"channel_ids", addedWhileUnsubscribing,
 				"user_ids", userIDs,
 			)
-			if err = s.unsubscribeUsersFromChannels(r.ctx, addedWhileUnsubscribing, userIDs); err != nil {
+			if err = s.unsubscribeUsersFromChannelGroupChannels(
+				r.ctx,
+				r.channelGroupID,
+				addedWhileUnsubscribing,
+				userIDs,
+			); err != nil {
 				return nil, nil, err
 			}
 		}
@@ -993,6 +998,81 @@ func (s *channelGroups) unsubscribeUsersFromChannels(
 		Principals(zulip.UserIDsAsPrincipals(userIDs...)).
 		Execute()
 	return err
+}
+
+//nolint:gocognit,funlen // the logic is lengthy but straightforward (hopefully)
+func (s *channelGroups) unsubscribeUsersFromChannelGroupChannels(
+	ctx context.Context,
+	channelGroupID int64,
+	channelIDs []int64,
+	userIDs []int64,
+) error {
+	channelIDs = uniqueInt64s(channelIDs)
+	userIDs = uniqueInt64s(userIDs)
+	if len(channelIDs) == 0 || len(userIDs) == 0 {
+		return nil
+	}
+
+	otherGroupChannels, err := s.queries.ListOtherChannelGroupsForChannelsInGroup(ctx, channelGroupID)
+	if err != nil {
+		return err
+	}
+	if len(otherGroupChannels) == 0 {
+		return s.unsubscribeUsersFromChannels(ctx, channelIDs, userIDs)
+	}
+
+	targetChannels := make(map[int64]struct{}, len(channelIDs))
+	for _, channelID := range channelIDs {
+		targetChannels[channelID] = struct{}{}
+	}
+	sharedChannelsByGroup := make(map[int64][]int64)
+	for _, row := range otherGroupChannels {
+		if _, ok := targetChannels[row.ChannelID]; !ok {
+			continue
+		}
+		sharedChannelsByGroup[row.ChannelGroupID] = append(sharedChannelsByGroup[row.ChannelGroupID], row.ChannelID)
+	}
+	if len(sharedChannelsByGroup) == 0 {
+		return s.unsubscribeUsersFromChannels(ctx, channelIDs, userIDs)
+	}
+
+	coveredChannelsByUser := make(map[int64][]int64, len(userIDs))
+	for otherGroupID, sharedChannelIDs := range sharedChannelsByGroup {
+		members, err := s.userGroupMembers(ctx, otherGroupID)
+		if err != nil {
+			return err
+		}
+		for _, userID := range userIDs {
+			if containsInt64(members, userID) {
+				coveredChannelsByUser[userID] = append(coveredChannelsByUser[userID], sharedChannelIDs...)
+			}
+		}
+	}
+
+	unsubscribeUsersByChannels := make(map[string][]int64)
+	unsubscribeChannelsByKey := make(map[string][]int64)
+	for _, userID := range userIDs {
+		unsubscribeChannelIDs := removeInt64s(channelIDs, coveredChannelsByUser[userID])
+		if len(unsubscribeChannelIDs) == 0 {
+			continue
+		}
+		key := fmt.Sprint(unsubscribeChannelIDs)
+		unsubscribeChannelsByKey[key] = unsubscribeChannelIDs
+		unsubscribeUsersByChannels[key] = append(unsubscribeUsersByChannels[key], userID)
+	}
+
+	keys := make([]string, 0, len(unsubscribeUsersByChannels))
+	for key := range unsubscribeUsersByChannels {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		unsubUserIDs := unsubscribeUsersByChannels[key]
+		if err := s.unsubscribeUsersFromChannels(ctx, unsubscribeChannelsByKey[key], unsubUserIDs); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *channelGroups) userGroupMembersForChannelUpdates(

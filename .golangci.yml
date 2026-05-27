@@ -332,6 +332,17 @@ linters:
       - common-false-positives
     # Excluding configuration per-path, per-linter, per-text and per-source.
     rules:
+      - path: '_test\.go'
+        linters:
+          - errcheck
+      - path: internal/zulipbot/command/parser\.go
+        text: 'Magic number: 2, in <argument> detected'
+        linters:
+          - mnd
+      - path: internal/zulipbot/command/parser\.go
+        text: 'Magic number: 2, in <return> detected'
+        linters:
+          - mnd
       - path: cmd/campusbot/main\.go
         linters:
           - funlen

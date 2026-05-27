@@ -73,7 +73,9 @@ func splitArgs(value string) ([]string, error) {
 		inToken = false
 	}
 
-	for _, r := range value {
+	runes := []rune(value)
+	for i := 0; i < len(runes); i++ {
+		r := runes[i]
 		if escaped {
 			current.WriteRune(r)
 			escaped = false
@@ -93,6 +95,14 @@ func splitArgs(value string) ([]string, error) {
 			current.WriteRune(r)
 			inToken = true
 			continue
+		}
+		if !inToken {
+			if token, next, ok := scanZulipMentionToken(runes, i); ok {
+				current.WriteString(token)
+				inToken = true
+				i = next - 1
+				continue
+			}
 		}
 		if r == '\'' || r == '"' {
 			quote = r
@@ -119,4 +129,56 @@ func splitArgs(value string) ([]string, error) {
 		flush()
 	}
 	return args, nil
+}
+
+func scanZulipMentionToken(runes []rune, start int) (string, int, bool) {
+	switch runes[start] {
+	case '@':
+		i := start + 1
+		if i < len(runes) && runes[i] == '_' {
+			i++
+		}
+		if !hasRunesAt(runes, i, "**") {
+			return "", start, false
+		}
+		end, ok := findRunes(runes, i+2, "**")
+		if !ok {
+			return "", start, false
+		}
+		return string(runes[start : end+2]), end + 2, true
+	case '#':
+		i := start + 1
+		if !hasRunesAt(runes, i, "**") {
+			return "", start, false
+		}
+		end, ok := findRunes(runes, i+2, "**")
+		if !ok {
+			return "", start, false
+		}
+		return string(runes[start : end+2]), end + 2, true
+	default:
+		return "", start, false
+	}
+}
+
+func hasRunesAt(runes []rune, start int, value string) bool {
+	needle := []rune(value)
+	if start+len(needle) > len(runes) {
+		return false
+	}
+	for i, r := range needle {
+		if runes[start+i] != r {
+			return false
+		}
+	}
+	return true
+}
+
+func findRunes(runes []rune, start int, value string) (int, bool) {
+	for i := start; i < len(runes); i++ {
+		if hasRunesAt(runes, i, value) {
+			return i, true
+		}
+	}
+	return 0, false
 }

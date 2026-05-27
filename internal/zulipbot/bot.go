@@ -686,6 +686,28 @@ func (bot *Bot) GetUserByID(ctx context.Context, id int64) (zulip.User, error) {
 	return resp.User, nil
 }
 
+func (bot *Bot) GetChannelByID(ctx context.Context, id int64) (zulip.Channel, error) {
+	resp, _, err := bot.client.GetChannelByID(ctx, id).Execute()
+	if err != nil {
+		return zulip.Channel{}, fmt.Errorf("get Zulip channel %d: %w", id, err)
+	}
+	if resp == nil {
+		return zulip.Channel{}, fmt.Errorf("get Zulip channel %d: empty response", id)
+	}
+	return resp.Channel, nil
+}
+
+func (bot *Bot) RenderMessage(ctx context.Context, content string) (string, error) {
+	resp, _, err := bot.client.RenderMessage(ctx).Content(content).Execute()
+	if err != nil {
+		return "", fmt.Errorf("render Zulip message %q: %w", content, err)
+	}
+	if resp == nil {
+		return "", fmt.Errorf("render Zulip message %q: empty response", content)
+	}
+	return resp.Rendered, nil
+}
+
 // --- Restart state --------------------------------------------------------
 
 // ScheduleRestart records a restart request in storage and flips the bot to

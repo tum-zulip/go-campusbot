@@ -28,6 +28,53 @@ func TestParserParsesDirectMessageCommand(t *testing.T) {
 	}
 }
 
+func TestParserSplitsQuotedArgumentWithSpaces(t *testing.T) {
+	t.Parallel()
+
+	invocation, err := command.Parse(`group channel create "The New Channel Name" WI`)
+	if err != nil {
+		t.Fatalf("Parse() failed: %v", err)
+	}
+	wantArgs := []string{"channel", "create", "The New Channel Name", "WI"}
+	assertArgs(t, invocation.Args, wantArgs)
+}
+
+func TestParserKeepsZulipMentionsWithSpacesAsSingleArguments(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		input    string
+		wantArgs []string
+	}{
+		{
+			name:     "user mention",
+			input:    `role set @**The User Name** admin`,
+			wantArgs: []string{"set", "@**The User Name**", "admin"},
+		},
+		{
+			name:     "silent user mention",
+			input:    `role set @_**The User Name** admin`,
+			wantArgs: []string{"set", "@_**The User Name**", "admin"},
+		},
+		{
+			name:     "channel mention",
+			input:    `group channel add #**The Channel Name** WI`,
+			wantArgs: []string{"channel", "add", "#**The Channel Name**", "WI"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			invocation, err := command.Parse(tt.input)
+			if err != nil {
+				t.Fatalf("Parse() failed: %v", err)
+			}
+			assertArgs(t, invocation.Args, tt.wantArgs)
+		})
+	}
+}
+
 func TestParserHandlesLeadingAndTrailingWhitespace(t *testing.T) {
 	t.Parallel()
 
@@ -40,6 +87,18 @@ func TestParserHandlesLeadingAndTrailingWhitespace(t *testing.T) {
 	}
 	if len(invocation.Args) != 0 {
 		t.Fatalf("Args = %#v, want []", invocation.Args)
+	}
+}
+
+func assertArgs(t *testing.T, got []string, want []string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("Args = %#v, want %#v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("Args[%d] = %q, want %q", i, got[i], want[i])
+		}
 	}
 }
 
