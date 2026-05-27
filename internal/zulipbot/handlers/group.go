@@ -242,6 +242,7 @@ func (h *GroupHandler) Metadata() command.Metadata {
 	}
 }
 
+//nolint:funlen // Command dispatch lists each supported group subcommand explicitly.
 func (h *GroupHandler) Handle(ctx context.Context, req command.Request) (command.Result, error) {
 	h.logger.DebugContext(ctx, "handling group command",
 		"parsed_args_type", fmt.Sprintf("%T", req.ParsedArgs),
