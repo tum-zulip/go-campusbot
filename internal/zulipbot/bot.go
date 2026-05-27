@@ -262,7 +262,7 @@ func (bot *Bot) Run(ctx context.Context) (bool, error) {
 		}
 		bot.logger.WarnContext(
 			ctx,
-			"Zulip event queue expired; registering a new queue; events may have been missed",
+			"Zulip event queue expired or was pruned; registering a new queue; events may have been missed",
 			"queue_id", state.QueueID,
 			"last_event_id", state.LastEventID,
 		)
@@ -286,7 +286,7 @@ func (bot *Bot) consumeQueue(ctx context.Context, state QueueState) (bool, bool,
 
 	eventCh, connectErr := queue.Connect(queueCtx, state.QueueID, state.LastEventID)
 	if connectErr != nil {
-		if isBadEventQueueID(connectErr) {
+		if isRecoverableEventQueueError(connectErr) {
 			return false, true, nil
 		}
 		return false, false, fmt.Errorf("connect to Zulip event queue: %w", connectErr)
@@ -322,7 +322,7 @@ func (bot *Bot) consumeQueue(ctx context.Context, state QueueState) (bool, bool,
 				return true, false, nil
 			}
 		case pollErr := <-errs:
-			if isBadEventQueueID(pollErr) {
+			if isRecoverableEventQueueError(pollErr) {
 				return false, true, nil
 			}
 			bot.logger.WarnContext(ctx, "Zulip event poll failed", "error", pollErr)
@@ -1684,4 +1684,27 @@ func isBadEventQueueID(err error) bool {
 	}
 	var coded zulip.CodedError
 	return errors.As(err, &coded) && coded.Code == "BAD_EVENT_QUEUE_ID"
+}
+
+func isPrunedEventQueueError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var coded zulip.CodedError
+	if errors.As(err, &coded) {
+		return coded.Code == "BAD_REQUEST" && strings.Contains(coded.Msg, "already been pruned")
+	}
+	var apiErr *zulip.APIError
+	if errors.As(err, &apiErr) {
+		body := string(apiErr.Body())
+		return strings.Contains(body, `"code":"BAD_REQUEST"`) &&
+			strings.Contains(body, "already been pruned")
+	}
+	message := err.Error()
+	return strings.Contains(message, "BAD_REQUEST") &&
+		strings.Contains(message, "already been pruned")
+}
+
+func isRecoverableEventQueueError(err error) bool {
+	return isBadEventQueueID(err) || isPrunedEventQueueError(err)
 }

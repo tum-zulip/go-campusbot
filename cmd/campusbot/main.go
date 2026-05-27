@@ -21,6 +21,7 @@ import (
 
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot"
 	storagedb "github.com/tum-zulip/go-campusbot/internal/zulipbot/storage/db"
+	"github.com/tum-zulip/go-campusbot/internal/zulipcache"
 )
 
 const (
@@ -83,26 +84,45 @@ func main() {
 	defer stop()
 
 	startupCtx, cancelStartup := context.WithTimeout(runCtx, startupTimeout)
-	client, err := newZulipClient(zuliprc, zulipLogger)
+	userGroupsCache := zulipcache.NewUserGroups(zulipcache.DefaultUserGroupsTTL)
+	streamsCache := zulipcache.NewStreams(zulipcache.DefaultStreamsTTL)
+	client, err := newZulipClient(zuliprc, zulipLogger, userGroupsCache, streamsCache)
 	if err != nil {
 		cancelStartup()
 		logger.ErrorContext(runCtx, "failed to create Zulip client", "error", err)
 		os.Exit(exitFailure)
 	}
+	if err := userGroupsCache.Start(runCtx, client, logger); err != nil {
+		cancelStartup()
+		logger.ErrorContext(runCtx, "failed to start user-groups cache", "error", err)
+		os.Exit(exitFailure)
+	}
+	if err := streamsCache.Start(runCtx, client, logger); err != nil {
+		cancelStartup()
+		_ = userGroupsCache.Close()
+		logger.ErrorContext(runCtx, "failed to start streams cache", "error", err)
+		os.Exit(exitFailure)
+	}
 	db, err := openDatabase(dbPath)
 	if err != nil {
 		cancelStartup()
+		_ = streamsCache.Close()
+		_ = userGroupsCache.Close()
 		logger.ErrorContext(runCtx, "failed to open database", "error", err)
 		os.Exit(exitFailure)
 	}
 	if err := storagedb.ConfigureSQLite(startupCtx, db); err != nil {
 		cancelStartup()
+		_ = streamsCache.Close()
+		_ = userGroupsCache.Close()
 		_ = db.Close()
 		logger.ErrorContext(runCtx, "failed to configure database", "error", err)
 		os.Exit(exitFailure)
 	}
 	if err := storagedb.InitSchema(startupCtx, db); err != nil {
 		cancelStartup()
+		_ = streamsCache.Close()
+		_ = userGroupsCache.Close()
 		_ = db.Close()
 		logger.ErrorContext(runCtx, "failed to initialize database schema", "error", err)
 		os.Exit(exitFailure)
@@ -120,11 +140,19 @@ func main() {
 	)
 	cancelStartup()
 	if err != nil {
+		_ = streamsCache.Close()
+		_ = userGroupsCache.Close()
 		_ = db.Close()
 		logger.ErrorContext(runCtx, "failed to initialize Zulip bot", "error", err)
 		os.Exit(exitFailure)
 	}
 	defer func() {
+		if err := streamsCache.Close(); err != nil {
+			logger.Warn("failed to close streams cache", "error", err)
+		}
+		if err := userGroupsCache.Close(); err != nil {
+			logger.Warn("failed to close user-groups cache", "error", err)
+		}
 		if err := bot.Close(); err != nil {
 			logger.Warn("failed to close bot", "error", err)
 		}
@@ -156,7 +184,12 @@ func main() {
 	}
 }
 
-func newZulipClient(rcPath string, logger *slog.Logger) (zulipclient.Client, error) {
+func newZulipClient(
+	rcPath string,
+	logger *slog.Logger,
+	userGroupsCache *zulipcache.UserGroups,
+	streamsCache *zulipcache.Streams,
+) (zulipclient.Client, error) {
 	rc, err := zulip.NewZulipRCFromFile(rcPath)
 	if err != nil {
 		return nil, fmt.Errorf("load Zulip config %q: %w", rcPath, err)
@@ -165,7 +198,7 @@ func newZulipClient(rcPath string, logger *slog.Logger) (zulipclient.Client, err
 		rc,
 		zulipclient.WithClientName(zulipbot.DefaultClientName),
 		zulipclient.WithLogger(logger),
-		zulipclient.WithHTTPClient(newRetryableHTTPClient(rc)),
+		zulipclient.WithHTTPClient(newRetryableHTTPClient(rc, userGroupsCache, streamsCache)),
 		zulipclient.WithMaxRetries(zulipClientMaxRetries),
 		zulipclient.SkipWarnOnInsecureTLS(),
 	)
@@ -175,10 +208,18 @@ func newZulipClient(rcPath string, logger *slog.Logger) (zulipclient.Client, err
 	return client, nil
 }
 
-func newRetryableHTTPClient(rc *zulip.RC) *http.Client {
+func newRetryableHTTPClient(
+	rc *zulip.RC,
+	userGroupsCache *zulipcache.UserGroups,
+	streamsCache *zulipcache.Streams,
+) *http.Client {
 	defaultTransport, ok := http.DefaultTransport.(*http.Transport)
 	if !ok {
-		return &http.Client{Transport: resettableBodyTransport{base: http.DefaultTransport}}
+		return &http.Client{
+			Transport: userGroupsCache.RoundTripper(streamsCache.RoundTripper(resettableBodyTransport{
+				base: http.DefaultTransport,
+			})),
+		}
 	}
 	transport := defaultTransport.Clone()
 	if rc.Insecure != nil && *rc.Insecure {
@@ -190,7 +231,7 @@ func newRetryableHTTPClient(rc *zulip.RC) *http.Client {
 		transport.TLSClientConfig.InsecureSkipVerify = true
 	}
 	return &http.Client{
-		Transport: resettableBodyTransport{base: transport},
+		Transport: userGroupsCache.RoundTripper(streamsCache.RoundTripper(resettableBodyTransport{base: transport})),
 	}
 }
 
