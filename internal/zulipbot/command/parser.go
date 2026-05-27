@@ -13,6 +13,24 @@ type Invocation struct {
 	RawArgs string
 }
 
+type ChainOperator string
+
+const (
+	ChainAlways ChainOperator = ""
+	ChainAnd    ChainOperator = "&&"
+	ChainOr     ChainOperator = "||"
+	ChainThen   ChainOperator = ";"
+)
+
+type ChainSegment struct {
+	Operator   ChainOperator
+	Invocation Invocation
+}
+
+type Chain struct {
+	Segments []ChainSegment
+}
+
 // Parse parses content as a command invocation.
 // The entire message content is treated as the command — no prefix is required.
 // Empty or whitespace-only content returns ErrNotCommand.
@@ -44,6 +62,34 @@ func Parse(content string) (Invocation, error) {
 	}, nil
 }
 
+// ParseChain parses content as one or more command invocations connected by
+// shell-style command chaining operators.
+func ParseChain(content string) (Chain, error) {
+	parts, err := splitChain(content)
+	if err != nil {
+		return Chain{}, fmt.Errorf("%w: %w", ErrMalformed, err)
+	}
+	if len(parts) == 0 {
+		return Chain{}, ErrNotCommand
+	}
+
+	segments := make([]ChainSegment, 0, len(parts))
+	for i, part := range parts {
+		invocation, err := Parse(part.content)
+		if err != nil {
+			return Chain{}, err
+		}
+		if i == 0 {
+			part.operator = ChainAlways
+		}
+		segments = append(segments, ChainSegment{
+			Operator:   part.operator,
+			Invocation: invocation,
+		})
+	}
+	return Chain{Segments: segments}, nil
+}
+
 func validCommandName(value string) bool {
 	if value == "" {
 		return false
@@ -58,6 +104,92 @@ func validCommandName(value string) bool {
 		return false
 	}
 	return true
+}
+
+type chainPart struct {
+	operator ChainOperator
+	content  string
+}
+
+//nolint:funlen,gocognit // mirrors splitArgs so quote and escape behavior stays local and explicit.
+func splitChain(value string) ([]chainPart, error) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return nil, nil
+	}
+
+	var parts []chainPart
+	var current strings.Builder
+	operator := ChainAlways
+	var quote rune
+	escaped := false
+
+	flush := func(next ChainOperator) error {
+		content := strings.TrimSpace(current.String())
+		if content == "" {
+			return errors.New("empty command in chain")
+		}
+		parts = append(parts, chainPart{operator: operator, content: content})
+		current.Reset()
+		operator = next
+		return nil
+	}
+
+	runes := []rune(trimmed)
+	for i := 0; i < len(runes); i++ {
+		r := runes[i]
+		if escaped {
+			current.WriteRune(r)
+			escaped = false
+			continue
+		}
+		if r == '\\' {
+			current.WriteRune(r)
+			escaped = true
+			continue
+		}
+		if quote != 0 {
+			current.WriteRune(r)
+			if r == quote {
+				quote = 0
+			}
+			continue
+		}
+		if r == '\'' || r == '"' {
+			current.WriteRune(r)
+			quote = r
+			continue
+		}
+		switch {
+		case r == '&' && i+1 < len(runes) && runes[i+1] == '&':
+			if err := flush(ChainAnd); err != nil {
+				return nil, err
+			}
+			i++
+		case r == '|' && i+1 < len(runes) && runes[i+1] == '|':
+			if err := flush(ChainOr); err != nil {
+				return nil, err
+			}
+			i++
+		case r == ';':
+			if err := flush(ChainThen); err != nil {
+				return nil, err
+			}
+		default:
+			current.WriteRune(r)
+		}
+	}
+
+	if escaped {
+		return nil, errors.New("trailing escape character")
+	}
+	if quote != 0 {
+		return nil, errors.New("unterminated quoted argument")
+	}
+	if err := flush(ChainAlways); err != nil {
+		return nil, err
+	}
+	return parts, nil
 }
 
 //nolint:funlen,gocognit // small shell-like scanner; splitting would spread parser state across helpers

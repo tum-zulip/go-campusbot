@@ -44,10 +44,7 @@ const (
 	originUnsubscribe    = "UnsubscribeFromChannelGroup"
 )
 
-const (
-	deleteQueueTimeout                 = 5 * time.Second
-	zulipAdministratorsSystemGroupName = "role:administrators"
-)
+const zulipAdministratorsSystemGroupName = "role:administrators"
 
 // Client is the campusbot Zulip client. It is a drop-in replacement for
 // client.Client and additionally exposes channel-group endpoints.
@@ -231,9 +228,13 @@ func (s *channelGroups) initializeChannelGroups(ctx context.Context) error {
 			if err = s.deleteChannelGroup(ctx, group.ID); err != nil {
 				return err
 			}
-			s.logger.InfoContext(ctx, "removed channel group with missing or deactivated user group",
-				"channel_group_id", group.ID,
-				"user_group_exists", ok,
+			s.logger.InfoContext(
+				ctx,
+				"removed channel group with missing or deactivated user group",
+				"channel_group_id",
+				group.ID,
+				"user_group_exists",
+				ok,
 			)
 			continue
 		}
@@ -311,9 +312,15 @@ func (s *channelGroups) channelGroupEventQueueState(
 		return channelGroupEventQueueState{}, false, nil
 	}
 	if err != nil {
-		return channelGroupEventQueueState{}, false, fmt.Errorf("read channel-group event queue state: %w", err)
+		return channelGroupEventQueueState{}, false, fmt.Errorf(
+			"read channel-group event queue state: %w",
+			err,
+		)
 	}
-	return channelGroupEventQueueState{QueueID: row.QueueID, LastEventID: row.LastEventID}, true, nil
+	return channelGroupEventQueueState{
+		QueueID:     row.QueueID,
+		LastEventID: row.LastEventID,
+	}, true, nil
 }
 
 func (s *channelGroups) saveChannelGroupEventQueueState(
@@ -347,7 +354,9 @@ func (s *channelGroups) ensureChannelGroupEventQueue(ctx context.Context) (strin
 	return s.registerAndSaveChannelGroupEventQueue(ctx)
 }
 
-func (s *channelGroups) registerAndSaveChannelGroupEventQueue(ctx context.Context) (string, int64, error) {
+func (s *channelGroups) registerAndSaveChannelGroupEventQueue(
+	ctx context.Context,
+) (string, int64, error) {
 	queueID, lastEventID, err := s.registerChannelGroupEventQueue(ctx)
 	if err != nil {
 		return "", 0, err
@@ -384,7 +393,12 @@ func (s *channelGroups) registerChannelGroupEventQueue(ctx context.Context) (str
 	return *resp.QueueID, resp.LastEventID, nil
 }
 
-func (s *channelGroups) runChannelGroupEventListener(ctx context.Context, queueID string, lastEventID int64) {
+//nolint:funlen // event queue replacement flow is easier to follow without splitting retry state across helpers.
+func (s *channelGroups) runChannelGroupEventListener(
+	ctx context.Context,
+	queueID string,
+	lastEventID int64,
+) {
 	for {
 		var retry bool
 		var err error
@@ -393,7 +407,12 @@ func (s *channelGroups) runChannelGroupEventListener(ctx context.Context, queueI
 			return
 		}
 		if err != nil && !retry {
-			s.logger.WarnContext(ctx, "failed to consume channel-group Zulip event queue", "error", err)
+			s.logger.WarnContext(
+				ctx,
+				"failed to consume channel-group Zulip event queue",
+				"error",
+				err,
+			)
 			if !waitChannelGroupEventQueueRetry(ctx) {
 				return
 			}
@@ -414,9 +433,16 @@ func (s *channelGroups) runChannelGroupEventListener(ctx context.Context, queueI
 			err,
 		)
 		if clearErr := s.queries.ClearChannelGroupEventQueueState(ctx); clearErr != nil {
-			s.logger.WarnContext(ctx, "failed to clear expired channel-group event queue state", "error", clearErr)
+			s.logger.WarnContext(
+				ctx,
+				"failed to clear expired channel-group event queue state",
+				"error",
+				clearErr,
+			)
 		}
-		newQueueID, replacementLastEventID, registerErr := s.registerAndSaveChannelGroupEventQueue(ctx)
+		newQueueID, replacementLastEventID, registerErr := s.registerAndSaveChannelGroupEventQueue(
+			ctx,
+		)
 		if registerErr != nil {
 			s.logger.WarnContext(
 				ctx,
@@ -458,7 +484,12 @@ func (s *channelGroups) consumeChannelGroupEventQueue(
 	}
 	defer func() {
 		if closeErr := queue.Close(); closeErr != nil {
-			s.logger.WarnContext(ctx, "failed to close channel-group Zulip event queue", "error", closeErr)
+			s.logger.WarnContext(
+				ctx,
+				"failed to close channel-group Zulip event queue",
+				"error",
+				closeErr,
+			)
 		}
 	}()
 
@@ -475,7 +506,12 @@ func (s *channelGroups) consumeChannelGroupEventQueue(
 			if isBadChannelGroupEventQueueID(pollErr) {
 				return true, lastEventID, pollErr
 			}
-			s.logger.WarnContext(ctx, "failed to poll channel-group Zulip event queue", "error", pollErr)
+			s.logger.WarnContext(
+				ctx,
+				"failed to poll channel-group Zulip event queue",
+				"error",
+				pollErr,
+			)
 		}
 	}
 }
@@ -555,17 +591,6 @@ func isBadChannelGroupEventQueueID(err error) bool {
 	return errors.As(err, &coded) && coded.Code == "BAD_EVENT_QUEUE_ID"
 }
 
-func (s *channelGroups) deleteChannelGroupEventQueue(queueID string) {
-	if queueID == "" {
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), deleteQueueTimeout)
-	defer cancel()
-	if _, _, err := s.base.DeleteQueue(ctx).QueueID(queueID).Execute(); err != nil {
-		s.logger.WarnContext(ctx, "failed to delete channel-group Zulip event queue", "queue_id", queueID, "error", err)
-	}
-}
-
 func (s *channelGroups) handleChannelGroupEvent(ctx context.Context, event events.Event) error {
 	switch event := event.(type) {
 	case events.ChannelDeleteEvent:
@@ -631,15 +656,28 @@ func (s *channelGroups) removeChannelFromChannelGroups(ctx context.Context, chan
 	if err != nil {
 		return err
 	}
-	s.logger.InfoContext(ctx, "removed deleted channel from channel groups", "channel_id", channelID)
+	s.logger.InfoContext(
+		ctx,
+		"removed deleted channel from channel groups",
+		"channel_id",
+		channelID,
+	)
 	return nil
 }
 
-func (s *channelGroups) removeDeletedUserGroupChannelGroup(ctx context.Context, userGroupID int64) error {
+func (s *channelGroups) removeDeletedUserGroupChannelGroup(
+	ctx context.Context,
+	userGroupID int64,
+) error {
 	if err := s.deleteChannelGroup(ctx, userGroupID); err != nil {
 		return err
 	}
-	s.logger.InfoContext(ctx, "removed channel group for deleted user group", "channel_group_id", userGroupID)
+	s.logger.InfoContext(
+		ctx,
+		"removed channel group for deleted user group",
+		"channel_group_id",
+		userGroupID,
+	)
 	return nil
 }
 
@@ -696,7 +734,10 @@ func (s *channelGroups) CreateChannelGroupExecute(
 		var rollbackErrs []error
 		if dbGroupCreated {
 			if err := s.deleteChannelGroup(r.ctx, group.ID); err != nil {
-				rollbackErrs = append(rollbackErrs, fmt.Errorf("delete local channel group %d: %w", group.ID, err))
+				rollbackErrs = append(
+					rollbackErrs,
+					fmt.Errorf("delete local channel group %d: %w", group.ID, err),
+				)
 			}
 		}
 		if createdChannelFolderID != 0 {
@@ -709,7 +750,10 @@ func (s *channelGroups) CreateChannelGroupExecute(
 		}
 		if createdUserGroup {
 			if _, _, err := s.base.DeactivateUserGroup(r.ctx, group.ID).Execute(); err != nil {
-				rollbackErrs = append(rollbackErrs, fmt.Errorf("deactivate user group %d: %w", group.ID, err))
+				rollbackErrs = append(
+					rollbackErrs,
+					fmt.Errorf("deactivate user group %d: %w", group.ID, err),
+				)
 			}
 		}
 		if len(rollbackErrs) == 0 {
@@ -930,7 +974,11 @@ func (s *channelGroups) UpdateChannelGroupChannels(
 	ctx context.Context,
 	channelGroupID int64,
 ) UpdateChannelGroupChannelsRequest {
-	return UpdateChannelGroupChannelsRequest{ctx: ctx, apiService: s, channelGroupID: channelGroupID}
+	return UpdateChannelGroupChannelsRequest{
+		ctx:            ctx,
+		apiService:     s,
+		channelGroupID: channelGroupID,
+	}
 }
 
 func (s *channelGroups) UpdateChannelGroupChannelsExecute(
@@ -959,7 +1007,12 @@ func (s *channelGroups) UpdateChannelGroupChannelsExecute(
 		}
 	}
 
-	finalState, err := s.updateGroupChannels(r.ctx, r.channelGroupID, r.addChannelIDs, r.deleteChannelIDs)
+	finalState, err := s.updateGroupChannels(
+		r.ctx,
+		r.channelGroupID,
+		r.addChannelIDs,
+		r.deleteChannelIDs,
+	)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1104,7 +1157,11 @@ func (s *channelGroups) GetChannelGroupSubscribers(
 	ctx context.Context,
 	channelGroupID int64,
 ) GetChannelGroupSubscribersRequest {
-	return GetChannelGroupSubscribersRequest{ctx: ctx, apiService: s, channelGroupID: channelGroupID}
+	return GetChannelGroupSubscribersRequest{
+		ctx:            ctx,
+		apiService:     s,
+		channelGroupID: channelGroupID,
+	}
 }
 
 func (s *channelGroups) GetChannelGroupSubscribersExecute(
@@ -1144,7 +1201,9 @@ func (s *channelGroups) GetIsChannelGroupSubscriberExecute(
 	if err != nil {
 		return nil, nil, err
 	}
-	resp, _, err := s.base.GetIsUserGroupMember(r.ctx, group.ID, r.userID).DirectMemberOnly(true).Execute()
+	resp, _, err := s.base.GetIsUserGroupMember(r.ctx, group.ID, r.userID).
+		DirectMemberOnly(true).
+		Execute()
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1183,7 +1242,11 @@ func (s *channelGroups) SubscribeToChannelGroupExecute(
 		return nil, nil, err
 	}
 
-	latestState, touchedChannels, err := s.subscribeUsersToCurrentChannelGroupChannels(r.ctx, r.channelGroupID, userIDs)
+	latestState, touchedChannels, err := s.subscribeUsersToCurrentChannelGroupChannels(
+		r.ctx,
+		r.channelGroupID,
+		userIDs,
+	)
 	if err != nil {
 		_, _, _ = s.base.UpdateUserGroupMembers(r.ctx, group.ID).Delete(userIDs).Execute()
 		_ = s.unsubscribeUsersFromChannels(r.ctx, touchedChannels, userIDs)
@@ -1205,7 +1268,11 @@ func (s *channelGroups) UnsubscribeFromChannelGroup(
 	ctx context.Context,
 	channelGroupID int64,
 ) UnsubscribeFromChannelGroupRequest {
-	return UnsubscribeFromChannelGroupRequest{ctx: ctx, apiService: s, channelGroupID: channelGroupID}
+	return UnsubscribeFromChannelGroupRequest{
+		ctx:            ctx,
+		apiService:     s,
+		channelGroupID: channelGroupID,
+	}
 }
 
 //nolint:funlen // unsubscribe rollback/concurrency handling is easier to audit in one flow
@@ -1227,7 +1294,12 @@ func (s *channelGroups) UnsubscribeFromChannelGroupExecute(
 	}
 
 	if !r.keepChannels && len(group.ChannelIDs) > 0 {
-		if err = s.unsubscribeUsersFromChannelGroupChannels(r.ctx, r.channelGroupID, group.ChannelIDs, userIDs); err != nil {
+		if err = s.unsubscribeUsersFromChannelGroupChannels(
+			r.ctx,
+			r.channelGroupID,
+			group.ChannelIDs,
+			userIDs,
+		); err != nil {
 			return nil, nil, err
 		}
 	}
@@ -1246,10 +1318,15 @@ func (s *channelGroups) UnsubscribeFromChannelGroupExecute(
 		}
 		addedWhileUnsubscribing := removeInt64s(finalState.ChannelIDs, group.ChannelIDs)
 		if len(addedWhileUnsubscribing) > 0 {
-			s.logger.DebugContext(r.ctx, "removing unsubscribed users from channels added concurrently",
-				"channel_group_id", r.channelGroupID,
-				"channel_ids", addedWhileUnsubscribing,
-				"user_ids", userIDs,
+			s.logger.DebugContext(
+				r.ctx,
+				"removing unsubscribed users from channels added concurrently",
+				"channel_group_id",
+				r.channelGroupID,
+				"channel_ids",
+				addedWhileUnsubscribing,
+				"user_ids",
+				userIDs,
 			)
 			if err = s.unsubscribeUsersFromChannelGroupChannels(
 				r.ctx,
@@ -1368,7 +1445,11 @@ func (s *channelGroups) updateGroupChannels(
 	return group, err
 }
 
-func (s *channelGroups) addChannelsToFolder(ctx context.Context, channelIDs []int64, channelFolderID int64) error {
+func (s *channelGroups) addChannelsToFolder(
+	ctx context.Context,
+	channelIDs []int64,
+	channelFolderID int64,
+) error {
 	for _, channelID := range uniqueInt64s(channelIDs) {
 		channelResp, _, err := s.base.GetChannelByID(ctx, channelID).Execute()
 		if err != nil {
@@ -1391,7 +1472,11 @@ func (s *channelGroups) addChannelsToFolder(ctx context.Context, channelIDs []in
 	return nil
 }
 
-func (s *channelGroups) removeChannelsFromFolder(ctx context.Context, channelIDs []int64, channelFolderID int64) error {
+func (s *channelGroups) removeChannelsFromFolder(
+	ctx context.Context,
+	channelIDs []int64,
+	channelFolderID int64,
+) error {
 	for _, channelID := range uniqueInt64s(channelIDs) {
 		channelResp, _, err := s.base.GetChannelByID(ctx, channelID).Execute()
 		if err != nil {
@@ -1454,10 +1539,13 @@ func (s *channelGroups) setChannelGroupFolder(
 	channelFolderID sql.NullInt64,
 ) error {
 	return s.withTx(ctx, func(q *channelgroupdb.Queries) error {
-		return q.UpdateChannelGroupChannelFolder(ctx, channelgroupdb.UpdateChannelGroupChannelFolderParams{
-			ID:              channelGroupID,
-			ChannelFolderID: channelFolderID,
-		})
+		return q.UpdateChannelGroupChannelFolder(
+			ctx,
+			channelgroupdb.UpdateChannelGroupChannelFolderParams{
+				ID:              channelGroupID,
+				ChannelFolderID: channelFolderID,
+			},
+		)
 	})
 }
 
@@ -1631,7 +1719,10 @@ func (s *channelGroups) unsubscribeUsersFromChannelGroupChannels(
 		if _, ok := targetChannels[row.ChannelID]; !ok {
 			continue
 		}
-		sharedChannelsByGroup[row.ChannelGroupID] = append(sharedChannelsByGroup[row.ChannelGroupID], row.ChannelID)
+		sharedChannelsByGroup[row.ChannelGroupID] = append(
+			sharedChannelsByGroup[row.ChannelGroupID],
+			row.ChannelID,
+		)
 	}
 	if len(sharedChannelsByGroup) == 0 {
 		return s.unsubscribeUsersFromChannels(ctx, channelIDs, userIDs)
@@ -1645,7 +1736,9 @@ func (s *channelGroups) unsubscribeUsersFromChannelGroupChannels(
 		}
 		for _, userID := range userIDs {
 			if containsInt64(members, userID) {
-				coveredChannelsByUser[userID] = append(coveredChannelsByUser[userID], sharedChannelIDs...)
+				coveredChannelsByUser[userID] = append(
+					coveredChannelsByUser[userID],
+					sharedChannelIDs...)
 			}
 		}
 	}
@@ -1747,7 +1840,10 @@ func (s *channelGroups) subscribedChannelIDs(ctx context.Context) (map[int64]str
 	return channelIDs, nil
 }
 
-func (s *channelGroups) withUserGroupName(ctx context.Context, group ChannelGroup) (ChannelGroup, error) {
+func (s *channelGroups) withUserGroupName(
+	ctx context.Context,
+	group ChannelGroup,
+) (ChannelGroup, error) {
 	groups, err := s.withUserGroupNames(ctx, []ChannelGroup{group})
 	if err != nil {
 		return ChannelGroup{}, err
@@ -1755,7 +1851,10 @@ func (s *channelGroups) withUserGroupName(ctx context.Context, group ChannelGrou
 	return groups[0], nil
 }
 
-func (s *channelGroups) withUserGroupNames(ctx context.Context, groups []ChannelGroup) ([]ChannelGroup, error) {
+func (s *channelGroups) withUserGroupNames(
+	ctx context.Context,
+	groups []ChannelGroup,
+) ([]ChannelGroup, error) {
 	if len(groups) == 0 {
 		return groups, nil
 	}
@@ -1819,16 +1918,24 @@ func cloneChannelGroup(group ChannelGroup) ChannelGroup {
 	return group
 }
 
-func (s *channelGroups) administratorsGroupSetting(ctx context.Context) (zulip.GroupSettingValue, error) {
+func (s *channelGroups) administratorsGroupSetting(
+	ctx context.Context,
+) (zulip.GroupSettingValue, error) {
 	resp, _, err := s.base.GetUserGroups(ctx).IncludeDeactivatedGroups(false).Execute()
 	if err != nil {
-		return zulip.GroupSettingValue{}, fmt.Errorf("resolve Zulip administrators system group: %w", err)
+		return zulip.GroupSettingValue{}, fmt.Errorf(
+			"resolve Zulip administrators system group: %w",
+			err,
+		)
 	}
 	if resp == nil {
-		return zulip.GroupSettingValue{}, errors.New("resolve Zulip administrators system group: empty response")
+		return zulip.GroupSettingValue{}, errors.New(
+			"resolve Zulip administrators system group: empty response",
+		)
 	}
 	for _, group := range resp.UserGroups {
-		if group.IsSystemGroup && group.Name == zulipAdministratorsSystemGroupName && !group.Deactivated {
+		if group.IsSystemGroup && group.Name == zulipAdministratorsSystemGroupName &&
+			!group.Deactivated {
 			groupID := group.ID
 			return zulip.GroupSettingValue{GroupID: &groupID}, nil
 		}
@@ -1932,7 +2039,9 @@ type APIChannelGroups interface {
 	// CreateChannelGroup creates a new channel group, optionally
 	// pre-populated with channels and initial subscribers.
 	CreateChannelGroup(ctx context.Context) CreateChannelGroupRequest
-	CreateChannelGroupExecute(r CreateChannelGroupRequest) (*CreateChannelGroupResponse, *http.Response, error)
+	CreateChannelGroupExecute(
+		r CreateChannelGroupRequest,
+	) (*CreateChannelGroupResponse, *http.Response, error)
 
 	// ImportZulipUserGroup records an existing Zulip user group as a local
 	// channel group, without creating a new Zulip user group. Idempotent.
@@ -1940,18 +2049,25 @@ type APIChannelGroups interface {
 
 	// GetChannelGroups lists channel groups visible to the acting user.
 	GetChannelGroups(ctx context.Context) GetChannelGroupsRequest
-	GetChannelGroupsExecute(r GetChannelGroupsRequest) (*GetChannelGroupsResponse, *http.Response, error)
+	GetChannelGroupsExecute(
+		r GetChannelGroupsRequest,
+	) (*GetChannelGroupsResponse, *http.Response, error)
 
 	// GetChannelGroup fetches a single channel group by ID.
 	GetChannelGroup(ctx context.Context, channelGroupID int64) GetChannelGroupRequest
-	GetChannelGroupExecute(r GetChannelGroupRequest) (*GetChannelGroupResponse, *http.Response, error)
+	GetChannelGroupExecute(
+		r GetChannelGroupRequest,
+	) (*GetChannelGroupResponse, *http.Response, error)
 	DeleteChannelGroup(ctx context.Context, channelGroupID int64) error
 
 	// --- Channel membership inside a group --------------------------------
 	// "Members" of a channel group are channels. Subscribers are tracked
 	// in the backing Zulip user group.
 
-	GetChannelGroupChannels(ctx context.Context, channelGroupID int64) GetChannelGroupChannelsRequest
+	GetChannelGroupChannels(
+		ctx context.Context,
+		channelGroupID int64,
+	) GetChannelGroupChannelsRequest
 	GetChannelGroupChannelsExecute(
 		r GetChannelGroupChannelsRequest,
 	) (*GetChannelGroupChannelsResponse, *http.Response, error)
@@ -1967,20 +2083,33 @@ type APIChannelGroups interface {
 
 	// UpdateChannelGroupChannels adds and/or removes channels in a single
 	// operation.
-	UpdateChannelGroupChannels(ctx context.Context, channelGroupID int64) UpdateChannelGroupChannelsRequest
-	UpdateChannelGroupChannelsExecute(r UpdateChannelGroupChannelsRequest) (*zulip.Response, *http.Response, error)
+	UpdateChannelGroupChannels(
+		ctx context.Context,
+		channelGroupID int64,
+	) UpdateChannelGroupChannelsRequest
+	UpdateChannelGroupChannelsExecute(
+		r UpdateChannelGroupChannelsRequest,
+	) (*zulip.Response, *http.Response, error)
 
 	// UpdateChannelGroupFolder creates, removes, assigns, or unassigns the
 	// Zulip channel folder associated with a channel group.
-	UpdateChannelGroupFolder(ctx context.Context, channelGroupID int64) UpdateChannelGroupFolderRequest
-	UpdateChannelGroupFolderExecute(r UpdateChannelGroupFolderRequest) (*zulip.Response, *http.Response, error)
+	UpdateChannelGroupFolder(
+		ctx context.Context,
+		channelGroupID int64,
+	) UpdateChannelGroupFolderRequest
+	UpdateChannelGroupFolderExecute(
+		r UpdateChannelGroupFolderRequest,
+	) (*zulip.Response, *http.Response, error)
 
 	// --- Subscribers ------------------------------------------------------
 	// Subscribing a user (principal) to a channel group materializes
 	// subscriptions to every channel currently in the group. Unsubscribing
 	// removes them from every channel in the group.
 
-	GetChannelGroupSubscribers(ctx context.Context, channelGroupID int64) GetChannelGroupSubscribersRequest
+	GetChannelGroupSubscribers(
+		ctx context.Context,
+		channelGroupID int64,
+	) GetChannelGroupSubscribersRequest
 	GetChannelGroupSubscribersExecute(
 		r GetChannelGroupSubscribersRequest,
 	) (*GetChannelGroupSubscribersResponse, *http.Response, error)
@@ -1994,12 +2123,18 @@ type APIChannelGroups interface {
 		r GetIsChannelGroupSubscriberRequest,
 	) (*GetIsChannelGroupSubscriberResponse, *http.Response, error)
 
-	SubscribeToChannelGroup(ctx context.Context, channelGroupID int64) SubscribeToChannelGroupRequest
+	SubscribeToChannelGroup(
+		ctx context.Context,
+		channelGroupID int64,
+	) SubscribeToChannelGroupRequest
 	SubscribeToChannelGroupExecute(
 		r SubscribeToChannelGroupRequest,
 	) (*SubscribeToChannelGroupResponse, *http.Response, error)
 
-	UnsubscribeFromChannelGroup(ctx context.Context, channelGroupID int64) UnsubscribeFromChannelGroupRequest
+	UnsubscribeFromChannelGroup(
+		ctx context.Context,
+		channelGroupID int64,
+	) UnsubscribeFromChannelGroupRequest
 	UnsubscribeFromChannelGroupExecute(
 		r UnsubscribeFromChannelGroupRequest,
 	) (*UnsubscribeFromChannelGroupResponse, *http.Response, error)
@@ -2052,7 +2187,9 @@ func (r CreateChannelGroupRequest) ChannelIDs(ids []int64) CreateChannelGroupReq
 	return r
 }
 
-func (r CreateChannelGroupRequest) InitialSubscribers(p zulip.Principals) CreateChannelGroupRequest {
+func (r CreateChannelGroupRequest) InitialSubscribers(
+	p zulip.Principals,
+) CreateChannelGroupRequest {
 	r.initialSubscribers = &p
 	return r
 }
@@ -2150,7 +2287,9 @@ type UpdateChannelGroupChannelsRequest struct {
 
 // Add specifies channels to add to the group. The server is expected to
 // subscribe every current group subscriber to each added channel.
-func (r UpdateChannelGroupChannelsRequest) Add(channelIDs []int64) UpdateChannelGroupChannelsRequest {
+func (r UpdateChannelGroupChannelsRequest) Add(
+	channelIDs []int64,
+) UpdateChannelGroupChannelsRequest {
 	r.addChannelIDs = &channelIDs
 	return r
 }
@@ -2158,7 +2297,9 @@ func (r UpdateChannelGroupChannelsRequest) Add(channelIDs []int64) UpdateChannel
 // Delete specifies channels to remove from the group. The server is expected
 // to unsubscribe every current group subscriber from each removed channel
 // (unless they are subscribed to it via another path).
-func (r UpdateChannelGroupChannelsRequest) Delete(channelIDs []int64) UpdateChannelGroupChannelsRequest {
+func (r UpdateChannelGroupChannelsRequest) Delete(
+	channelIDs []int64,
+) UpdateChannelGroupChannelsRequest {
 	r.deleteChannelIDs = &channelIDs
 	return r
 }
@@ -2255,7 +2396,9 @@ type SubscribeToChannelGroupRequest struct {
 
 // Principals selects which users to subscribe. This implementation requires
 // user ID principals so it can update the backing Zulip user group.
-func (r SubscribeToChannelGroupRequest) Principals(p zulip.Principals) SubscribeToChannelGroupRequest {
+func (r SubscribeToChannelGroupRequest) Principals(
+	p zulip.Principals,
+) SubscribeToChannelGroupRequest {
 	r.principals = &p
 	return r
 }
@@ -2278,7 +2421,9 @@ type UnsubscribeFromChannelGroupRequest struct {
 
 // Principals selects which users to unsubscribe. This implementation requires
 // user ID principals so it can update the backing Zulip user group.
-func (r UnsubscribeFromChannelGroupRequest) Principals(p zulip.Principals) UnsubscribeFromChannelGroupRequest {
+func (r UnsubscribeFromChannelGroupRequest) Principals(
+	p zulip.Principals,
+) UnsubscribeFromChannelGroupRequest {
 	r.principals = &p
 	return r
 }

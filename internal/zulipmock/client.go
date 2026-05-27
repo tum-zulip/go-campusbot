@@ -65,6 +65,7 @@ type state struct {
 	ownUser         zulip.User
 	users           map[int64]zulip.User
 	lastMessage     *SentMessage
+	typingStatuses  []TypingStatus
 	channels        map[int64]channelState
 	channelIDs      map[string]int64
 	channelFolders  map[int64]zulip.ChannelFolder
@@ -190,6 +191,12 @@ type SentMessage struct {
 	Topic         string
 }
 
+type TypingStatus struct {
+	Recipient     zulip.Recipient
+	RecipientType *zulip.RecipientType
+	Op            zulip.TypingStatusOp
+}
+
 var _ client.Client = Client{}
 
 func NewClient() Client {
@@ -308,6 +315,16 @@ func (c Client) LastSentMessage() *SentMessage {
 	}
 	copy := *state.lastMessage
 	return &copy
+}
+
+func (c Client) TypingStatuses() []TypingStatus {
+	state := c.ensureState()
+	state.mu.Lock()
+	defer state.mu.Unlock()
+
+	statuses := make([]TypingStatus, len(state.typingStatuses))
+	copy(statuses, state.typingStatuses)
+	return statuses
 }
 
 func (c Client) DeleteUserGroupForTest(userGroupID int64) {
@@ -596,6 +613,15 @@ func requestRecipientTypePtr[T any](request T, name string) *zulip.RecipientType
 	return (*zulip.RecipientType)(unsafe.Pointer(field.Pointer()))
 }
 
+func requestTypingStatusOpPtr[T any](request T, name string) *zulip.TypingStatusOp {
+	v := reflect.ValueOf(request)
+	field := v.FieldByName(name)
+	if field.IsNil() {
+		return nil
+	}
+	return (*zulip.TypingStatusOp)(unsafe.Pointer(field.Pointer()))
+}
+
 func requestClient[T any](request T) Client {
 	v := reflect.ValueOf(&request).Elem()
 	field := v.FieldByName("apiService")
@@ -749,25 +775,31 @@ func (c Client) CreateChannelExecute(r channels.CreateChannelRequest) (*channels
 	if name == "" {
 		return nil, nil, fmt.Errorf("name is required")
 	}
+	if _, ok := state.channelIDs[name]; ok {
+		return nil, nil, zulip.CodedError{
+			Response: zulip.Response{
+				Result: zulip.ResponseError,
+				Msg:    fmt.Sprintf("Channel %q already exists", name),
+			},
+			Code: "CHANNEL_ALREADY_EXISTS",
+		}
+	}
 	description := ""
 	if v := requestStringPtr(r, "description"); v != nil {
 		description = *v
 	}
 
-	channelID, ok := state.channelIDs[name]
-	if !ok {
-		channelID = state.nextChannelID
-		state.nextChannelID++
-		state.channels[channelID] = channelState{
-			channel: zulip.Channel{
-				ChannelID:   channelID,
-				Name:        name,
-				Description: description,
-			},
-			subscribers: map[int64]bool{},
-		}
-		state.channelIDs[name] = channelID
+	channelID := state.nextChannelID
+	state.nextChannelID++
+	state.channels[channelID] = channelState{
+		channel: zulip.Channel{
+			ChannelID:   channelID,
+			Name:        name,
+			Description: description,
+		},
+		subscribers: map[int64]bool{},
 	}
+	state.channelIDs[name] = channelID
 
 	if subscribers := requestInt64SlicePtr(r, "subscribers"); subscribers != nil {
 		channel := state.channels[channelID]
@@ -881,6 +913,17 @@ func (c Client) CreateUserGroupExecute(r users.CreateUserGroupRequest) (*users.C
 	}
 	if name == "" {
 		return nil, nil, fmt.Errorf("name is required")
+	}
+	for _, group := range state.userGroups {
+		if group.group.Name == name {
+			return nil, nil, zulip.CodedError{
+				Response: zulip.Response{
+					Result: zulip.ResponseError,
+					Msg:    fmt.Sprintf("User group %q already exists.", name),
+				},
+				Code: "BAD_REQUEST",
+			}
+		}
 	}
 	description := ""
 	if v := requestStringPtr(r, "description"); v != nil {
@@ -1710,11 +1753,34 @@ func (Client) SendMessageExecute(r messages.SendMessageRequest) (*messages.SendM
 	state.nextMessageID = messageID + 1
 	return &messages.SendMessageResponse{Response: successResponse(), ID: messageID}, nil, nil
 }
-func (Client) SetTypingStatus(_ context.Context) users.SetTypingStatusRequest {
-	return withAPIService(users.SetTypingStatusRequest{}, Client{})
+func (c Client) SetTypingStatus(ctx context.Context) users.SetTypingStatusRequest {
+	return withContext(withAPIService(users.SetTypingStatusRequest{}, c), ctx)
 }
-func (Client) SetTypingStatusExecute(_ users.SetTypingStatusRequest) (*zulip.Response, *http.Response, error) {
-	return nil, nil, nil
+func (Client) SetTypingStatusExecute(r users.SetTypingStatusRequest) (*zulip.Response, *http.Response, error) {
+	client := requestClient(r)
+	state := client.ensureState()
+	state.mu.Lock()
+	defer state.mu.Unlock()
+
+	recipient := zulip.Recipient{}
+	if value := requestRecipientPtr(r, "to"); value != nil {
+		recipient = *value
+	}
+	var recipientType *zulip.RecipientType
+	if value := requestRecipientTypePtr(r, "recipientType"); value != nil {
+		valueCopy := *value
+		recipientType = &valueCopy
+	}
+	op := zulip.TypingStatusOp("")
+	if value := requestTypingStatusOpPtr(r, "op"); value != nil {
+		op = *value
+	}
+	state.typingStatuses = append(state.typingStatuses, TypingStatus{
+		Recipient:     recipient,
+		RecipientType: recipientType,
+		Op:            op,
+	})
+	return &zulip.Response{Result: zulip.ResponseSuccess}, nil, nil
 }
 func (Client) SetTypingStatusForMessageEdit(_ context.Context, _arg1 int64) users.SetTypingStatusForMessageEditRequest {
 	return withAPIService(users.SetTypingStatusForMessageEditRequest{}, Client{})
@@ -1873,6 +1939,9 @@ func (c Client) UpdateChannelExecute(r channels.UpdateChannelRequest) (*zulip.Re
 		id := *folderID
 		channel.channel.FolderID = &id
 	}
+	if isArchived := requestBoolPtr(r, "isArchived"); isArchived != nil {
+		channel.channel.IsArchived = *isArchived
+	}
 	state.channels[channelID] = channel
 	resp := successResponse()
 	return &resp, nil, nil
@@ -2006,11 +2075,25 @@ func (Client) UpdateUserByEmailExecute(_ users.UpdateUserByEmailRequest) (*zulip
 func (Client) UpdateUserExecute(_ users.UpdateUserRequest) (*zulip.Response, *http.Response, error) {
 	return nil, nil, nil
 }
-func (Client) UpdateUserGroup(_ context.Context, _arg1 int64) users.UpdateUserGroupRequest {
-	return withAPIService(users.UpdateUserGroupRequest{}, Client{})
+func (c Client) UpdateUserGroup(ctx context.Context, userGroupID int64) users.UpdateUserGroupRequest {
+	return withInt64Field(withContext(withAPIService(users.UpdateUserGroupRequest{}, c), ctx), "userGroupID", userGroupID)
 }
-func (Client) UpdateUserGroupExecute(_ users.UpdateUserGroupRequest) (*zulip.Response, *http.Response, error) {
-	return nil, nil, nil
+func (c Client) UpdateUserGroupExecute(r users.UpdateUserGroupRequest) (*zulip.Response, *http.Response, error) {
+	state := c.ensureState()
+	state.mu.Lock()
+	defer state.mu.Unlock()
+
+	id := requestInt64(r, "userGroupID")
+	group, ok := state.userGroups[id]
+	if !ok {
+		return nil, nil, fmt.Errorf("user group %d not found", id)
+	}
+	if deactivated := requestBoolPtr(r, "deactivated"); deactivated != nil {
+		group.group.Deactivated = *deactivated
+	}
+	state.userGroups[id] = group
+	resp := successResponse()
+	return &resp, nil, nil
 }
 func (c Client) UpdateUserGroupMembers(ctx context.Context, userGroupID int64) users.UpdateUserGroupMembersRequest {
 	return withInt64Field(withContext(withAPIService(users.UpdateUserGroupMembersRequest{}, c), ctx), "userGroupID", userGroupID)

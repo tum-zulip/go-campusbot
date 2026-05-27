@@ -237,7 +237,7 @@ func equalInt64s(a, b []int64) bool {
 	if len(a) != len(b) {
 		return false
 	}
-	for i := range a {
+	for i := range b {
 		if a[i] != b[i] {
 			return false
 		}
@@ -249,7 +249,7 @@ func equalStrings(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
 	}
-	for i := range a {
+	for i := range b {
 		if a[i] != b[i] {
 			return false
 		}

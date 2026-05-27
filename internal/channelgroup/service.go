@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/tum-zulip/go-zulip/zulip"
+	"github.com/tum-zulip/go-zulip/zulip/api/channels"
 )
 
 // GroupService provides simple user-oriented subscribe/unsubscribe for channel groups.
@@ -180,13 +182,42 @@ func (s *GroupService) CreateChannelAndAddToGroup(
 		Subscribers([]int64{ownUserResp.User.UserID}).
 		Execute()
 	if err != nil {
-		return 0, fmt.Errorf("create channel %q: %w", channelName, err)
+		if !isDuplicateZulipChannelError(err) {
+			return 0, fmt.Errorf("create channel %q: %w", channelName, err)
+		}
+		channelIDResp, _, getErr := s.client.GetChannelID(ctx).Channel(channelName).Execute()
+		if getErr != nil {
+			return 0, fmt.Errorf("get existing channel %q: %w", channelName, getErr)
+		}
+		if _, _, subscribeErr := s.client.Subscribe(ctx).
+			Subscriptions([]channels.SubscriptionRequest{{Name: channelName}}).
+			Principals(zulip.UserIDsAsPrincipals(ownUserResp.User.UserID)).
+			Execute(); subscribeErr != nil {
+			return 0, fmt.Errorf("subscribe bot to existing channel %q: %w", channelName, subscribeErr)
+		}
+		channelResp = &channels.CreateChannelResponse{ID: channelIDResp.ChannelID}
 	}
 
 	if err := s.AddChannelToGroup(ctx, channelGroupID, channelResp.ID); err != nil {
 		return 0, fmt.Errorf("add channel %d to group %d: %w", channelResp.ID, channelGroupID, err)
 	}
 	return channelResp.ID, nil
+}
+
+func isDuplicateZulipChannelError(err error) bool {
+	var coded zulip.CodedError
+	if errors.As(err, &coded) {
+		if coded.Code == "CHANNEL_ALREADY_EXISTS" {
+			return true
+		}
+		return strings.Contains(coded.Msg, "Channel") &&
+			strings.Contains(coded.Msg, "already exists")
+	}
+
+	message := err.Error()
+	return strings.Contains(message, "Channel") &&
+		strings.Contains(message, "already exists") &&
+		strings.Contains(message, "CHANNEL_ALREADY_EXISTS")
 }
 
 // AddChannelToGroup adds a channel to a channel group, subscribing all current group members to it.

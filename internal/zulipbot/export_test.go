@@ -4,11 +4,22 @@ import (
 	"context"
 	"time"
 
+	realtimeevents "github.com/tum-zulip/go-zulip/zulip/api/real_time_events"
+	"github.com/tum-zulip/go-zulip/zulip/events"
+
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/command"
 )
 
 func (bot *Bot) Dispatch(ctx context.Context, req command.Request) command.Result {
 	return bot.dispatch(ctx, req)
+}
+
+func (bot *Bot) DispatchChain(ctx context.Context, req command.Request, chain command.Chain) command.Result {
+	return bot.dispatchChain(ctx, req, chain)
+}
+
+func (bot *Bot) HandleMessage(ctx context.Context, event events.MessageEvent) error {
+	return bot.handleMessage(ctx, event, realtimeevents.NewEventQueue(bot.client))
 }
 
 func (bot *Bot) SetStartedAtForTest(t time.Time) {

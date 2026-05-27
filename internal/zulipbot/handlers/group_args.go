@@ -23,6 +23,11 @@ type GroupCreateArgs struct {
 	EmojiName string `desc:"Emoji representing this group, written as :name:" arg:"emoji_name"`
 }
 
+type GroupRemoveArgs struct {
+	Force     bool   `arg:"-f"         desc:"Archive assigned channels and folders before removing"`
+	ShortName string `arg:"short_name" desc:"Group short name to remove"`
+}
+
 type GroupMappingListArgs struct{}
 
 type GroupMappingSetArgs struct {
@@ -81,6 +86,7 @@ var GroupArgSpec = command.SubcmdSpec{ //nolint:gochecknoglobals // package-leve
 	"subscribe":   GroupSubscribeArgs{},
 	"unsubscribe": GroupUnsubscribeArgs{},
 	"create":      GroupCreateArgs{},
+	"remove":      GroupRemoveArgs{},
 	"mapping": command.SubcmdSpec{
 		"list":    GroupMappingListArgs{},
 		"set":     GroupMappingSetArgs{},

@@ -192,3 +192,55 @@ func TestParserUnknownCommandNameIsStillParsed(t *testing.T) {
 		t.Fatalf("Name = %q, want hello", invocation.Name)
 	}
 }
+
+func TestParserParsesCommandChains(t *testing.T) {
+	t.Parallel()
+
+	chain, err := command.ParseChain(`status && bogus || help ; config get "some;key"`)
+	if err != nil {
+		t.Fatalf("ParseChain() failed: %v", err)
+	}
+	if len(chain.Segments) != 4 {
+		t.Fatalf("Segments = %#v, want 4", chain.Segments)
+	}
+
+	want := []struct {
+		operator command.ChainOperator
+		name     string
+		args     []string
+	}{
+		{operator: command.ChainAlways, name: "status"},
+		{operator: command.ChainAnd, name: "bogus"},
+		{operator: command.ChainOr, name: "help"},
+		{operator: command.ChainThen, name: "config", args: []string{"get", "some;key"}},
+	}
+	for i, wantSegment := range want {
+		got := chain.Segments[i]
+		if got.Operator != wantSegment.operator {
+			t.Fatalf("Segments[%d].Operator = %q, want %q", i, got.Operator, wantSegment.operator)
+		}
+		if got.Invocation.Name != wantSegment.name {
+			t.Fatalf("Segments[%d].Name = %q, want %q", i, got.Invocation.Name, wantSegment.name)
+		}
+		assertArgs(t, got.Invocation.Args, wantSegment.args)
+	}
+}
+
+func TestParserRejectsMalformedCommandChains(t *testing.T) {
+	t.Parallel()
+
+	tests := []string{
+		"status &&",
+		"status ; ; help",
+		"status || && help",
+	}
+	for _, input := range tests {
+		t.Run(input, func(t *testing.T) {
+			t.Parallel()
+			_, err := command.ParseChain(input)
+			if !errors.Is(err, command.ErrMalformed) {
+				t.Fatalf("ParseChain(%q) error = %v, want ErrMalformed", input, err)
+			}
+		})
+	}
+}

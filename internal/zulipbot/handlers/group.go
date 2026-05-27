@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/tum-zulip/go-zulip/zulip"
+	"github.com/tum-zulip/go-zulip/zulip/api/channels"
 
 	"github.com/tum-zulip/go-campusbot/internal/channelgroup"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/command"
@@ -84,7 +85,9 @@ func (h *GroupHandler) emojiGroupMappingByShortName(
 	return row, true, nil
 }
 
-func (h *GroupHandler) announcementState(ctx context.Context) (storagedb.AnnouncementState, bool, error) {
+func (h *GroupHandler) announcementState(
+	ctx context.Context,
+) (storagedb.AnnouncementState, bool, error) {
 	row, err := h.queries.GetAnnouncementState(ctx)
 	if errors.Is(err, sql.ErrNoRows) {
 		return storagedb.AnnouncementState{}, false, nil
@@ -154,6 +157,7 @@ func (h *GroupHandler) Metadata() command.Metadata {
 		AdminUsage: "group subscribe <course_short_name>\n" +
 			"group unsubscribe [-k] <course_short_name>\n" +
 			"group create <short_name> <:emoji_name:>\n" +
+			"group remove [-f] <short_name>\n" +
 			"group mapping <list|set <short_name> <zulip_user_group> <:emoji_name:>|disable <short_name>>\n" +
 			"group channel <add|remove|create> <channel_mention_or_name> <short_name>\n" +
 			"group folder <add|remove|assign|unassign> <short_name>\n" +
@@ -171,6 +175,8 @@ func (h *GroupHandler) Handle(ctx context.Context, req command.Request) (command
 		return h.handleUnsubscribe(ctx, req, args)
 	case GroupCreateArgs:
 		return h.handleCreate(ctx, req, args)
+	case GroupRemoveArgs:
+		return h.handleRemove(ctx, req, args)
 	case GroupMappingListArgs:
 		return h.handleMappingList(ctx, req)
 	case GroupMappingSetArgs:
@@ -186,11 +192,29 @@ func (h *GroupHandler) Handle(ctx context.Context, req command.Request) (command
 	case GroupFolderAddArgs:
 		return h.handleFolderModify(ctx, req, args.ShortName, h.addFolderToGroup, "Added channel folder to **%s**.")
 	case GroupFolderRemoveArgs:
-		return h.handleFolderModify(ctx, req, args.ShortName, h.removeFolderFromGroup, "Removed channel folder from **%s**.")
+		return h.handleFolderModify(
+			ctx,
+			req,
+			args.ShortName,
+			h.removeFolderFromGroup,
+			"Removed channel folder from **%s**.",
+		)
 	case GroupFolderAssignArgs:
-		return h.handleFolderModify(ctx, req, args.ShortName, h.assignFolderToGroup, "Assigned channel folder for **%s**.")
+		return h.handleFolderModify(
+			ctx,
+			req,
+			args.ShortName,
+			h.assignFolderToGroup,
+			"Assigned channel folder for **%s**.",
+		)
 	case GroupFolderUnassignArgs:
-		return h.handleFolderModify(ctx, req, args.ShortName, h.unassignFolderFromGroup, "Unassigned channel folder for **%s**.")
+		return h.handleFolderModify(
+			ctx,
+			req,
+			args.ShortName,
+			h.unassignFolderFromGroup,
+			"Unassigned channel folder for **%s**.",
+		)
 	case GroupAnnounceArgs:
 		return h.runAnnounce(ctx, req)
 	case GroupAnnounceSetMessageArgs:
@@ -214,7 +238,9 @@ func (h *GroupHandler) handleCreate(
 	shortName := args.ShortName
 	emojiName, err := parseEmojiName(args.EmojiName)
 	if strings.TrimSpace(shortName) == "" || err != nil {
-		return command.Result{}, command.NewUserError("Usage: `group create <short_name> <:emoji_name:>`")
+		return command.Result{}, command.NewUserError(
+			"Usage: `group create <short_name> <:emoji_name:>`",
+		)
 	}
 	if err := h.ensureMappingDoesNotExist(ctx, shortName, emojiName); err != nil {
 		return command.Result{}, err
@@ -223,14 +249,24 @@ func (h *GroupHandler) handleCreate(
 	channelGroupID, err := h.createChannelGroup(ctx, shortName, true)
 	if err != nil {
 		if isDuplicateZulipUserGroupError(err) {
-			return command.Result{}, command.NewUserError(
-				fmt.Sprintf(
-					"Zulip user group `%s` already exists. Mention the existing user group with `group mapping set`.",
-					shortName,
-				),
-			)
+			var reuseErr error
+			channelGroupID, reuseErr = h.reuseArchivedChannelGroup(ctx, shortName)
+			switch {
+			case reuseErr == nil:
+				// Continue below and create the emoji mapping for the reused group.
+			case !errors.Is(reuseErr, errArchivedChannelGroupNotFound):
+				return command.Result{}, fmt.Errorf("reuse archived channel group: %w", reuseErr)
+			default:
+				return command.Result{}, command.NewUserError(
+					fmt.Sprintf(
+						"Zulip user group `%s` already exists. Mention the existing user group with `group mapping set`.",
+						shortName,
+					),
+				)
+			}
+		} else {
+			return command.Result{}, fmt.Errorf("create channel group: %w", err)
 		}
-		return command.Result{}, fmt.Errorf("create channel group: %w", err)
 	}
 	createdMapping := false
 	rollback := func(cause error) error {
@@ -268,14 +304,147 @@ func (h *GroupHandler) handleCreate(
 	h.triggerAnnouncementUpdate(ctx)
 
 	return command.Result{
-		Content: fmt.Sprintf("Created channel group **%s** with Zulip user group ID %d and mapped `%s` → :%s:.",
-			shortName, channelGroupID, shortName, emojiName),
+		Content: fmt.Sprintf(
+			"Created channel group **%s** with Zulip user group ID %d and mapped `%s` → :%s:.",
+			shortName,
+			channelGroupID,
+			shortName,
+			emojiName,
+		),
 	}, nil
+}
+
+//nolint:funlen // Keeps the remove flow in one transaction-oriented handler.
+func (h *GroupHandler) handleRemove(
+	ctx context.Context,
+	req command.Request,
+	args GroupRemoveArgs,
+) (command.Result, error) {
+	if err := h.auth.Check(ctx, req.Actor, command.PermAdmin); err != nil {
+		return command.Result{}, command.NewUserError("permission denied")
+	}
+
+	shortName := args.ShortName
+	mapping, found, err := h.emojiGroupMappingByShortName(ctx, shortName)
+	if err != nil {
+		return command.Result{}, err
+	}
+	if !found {
+		return command.Result{}, command.NewUserError(
+			fmt.Sprintf("Unknown channel group %q.", shortName),
+		)
+	}
+
+	groupResp, _, err := h.client.GetChannelGroup(ctx, mapping.ChannelGroupID).Execute()
+	if err != nil {
+		if errors.Is(err, channelgroup.ErrChannelGroupNotFound) {
+			return command.Result{}, command.NewUserError(
+				fmt.Sprintf("Channel group for `%s` is already missing.", shortName),
+			)
+		}
+		return command.Result{}, fmt.Errorf("get channel group %d: %w", mapping.ChannelGroupID, err)
+	}
+	group := groupResp.ChannelGroup
+
+	if !args.Force && (len(group.ChannelIDs) > 0 || group.ChannelFolderID != nil) {
+		return command.Result{}, command.NewUserError(
+			fmt.Sprintf(
+				"Channel group `%s` still has %d channel(s) or a channel folder assigned. Remove them first or use `group remove -f %s` to archive them.",
+				shortName,
+				len(group.ChannelIDs),
+				shortName,
+			),
+		)
+	}
+
+	archivedChannelCount := 0
+	if args.Force {
+		var err error
+		archivedChannelCount, err = h.archiveGroupChannelsAndFolder(ctx, group)
+		if err != nil {
+			if userErr, ok := folderUserError(err, mapping.ShortName); ok {
+				return command.Result{}, userErr
+			}
+			return command.Result{}, fmt.Errorf("archive channel group contents: %w", err)
+		}
+	}
+
+	if err := h.client.DeleteChannelGroup(ctx, mapping.ChannelGroupID); err != nil {
+		return command.Result{}, fmt.Errorf("delete channel group %d: %w", mapping.ChannelGroupID, err)
+	}
+	if err := h.queries.DeleteEmojiGroupMappingByShortName(ctx, shortName); err != nil {
+		return command.Result{}, fmt.Errorf("delete emoji group mapping %q: %w", shortName, err)
+	}
+
+	h.triggerAnnouncementUpdate(ctx)
+
+	if args.Force {
+		return command.Result{
+			Content: fmt.Sprintf(
+				"Removed channel group **%s** and archived %d exclusive channel(s) plus its folder.",
+				shortName,
+				archivedChannelCount,
+			),
+		}, nil
+	}
+	return command.Result{Content: fmt.Sprintf("Removed channel group **%s**.", shortName)}, nil
+}
+
+func (h *GroupHandler) archiveGroupChannelsAndFolder(
+	ctx context.Context,
+	group channelgroup.ChannelGroup,
+) (int, error) {
+	if group.ChannelFolderID != nil {
+		if _, _, err := h.client.UpdateChannelGroupFolder(ctx, group.ID).Remove().Execute(); err != nil {
+			return 0, fmt.Errorf("archive channel folder for channel group %d: %w", group.ID, err)
+		}
+	}
+	exclusiveChannelIDs, err := h.exclusiveGroupChannelIDs(ctx, group)
+	if err != nil {
+		return 0, err
+	}
+	for _, channelID := range exclusiveChannelIDs {
+		if _, _, err := h.client.UpdateChannel(ctx, channelID).IsArchived(true).Execute(); err != nil {
+			return 0, fmt.Errorf("archive channel %d: %w", channelID, err)
+		}
+	}
+	return len(exclusiveChannelIDs), nil
+}
+
+func (h *GroupHandler) exclusiveGroupChannelIDs(
+	ctx context.Context,
+	group channelgroup.ChannelGroup,
+) ([]int64, error) {
+	groupsResp, _, err := h.client.GetChannelGroups(ctx).Execute()
+	if err != nil {
+		return nil, fmt.Errorf("list channel groups: %w", err)
+	}
+	shared := make(map[int64]struct{})
+	for _, otherGroup := range groupsResp.ChannelGroups {
+		if otherGroup.ID == group.ID {
+			continue
+		}
+		for _, channelID := range otherGroup.ChannelIDs {
+			shared[channelID] = struct{}{}
+		}
+	}
+	exclusive := make([]int64, 0, len(group.ChannelIDs))
+	for _, channelID := range group.ChannelIDs {
+		if _, ok := shared[channelID]; ok {
+			continue
+		}
+		exclusive = append(exclusive, channelID)
+	}
+	return exclusive, nil
 }
 
 // createChannelGroup creates a Zulip user group and tracks it locally as a
 // channel group, subscribing the bot's own user as the initial member.
-func (h *GroupHandler) createChannelGroup(ctx context.Context, name string, createChannelFolder bool) (int64, error) {
+func (h *GroupHandler) createChannelGroup(
+	ctx context.Context,
+	name string,
+	createChannelFolder bool,
+) (int64, error) {
 	ownUserResp, _, err := h.client.GetOwnUser(ctx).Execute()
 	if err != nil {
 		return 0, fmt.Errorf("get own Zulip user for channel group %q: %w", name, err)
@@ -294,7 +463,35 @@ func (h *GroupHandler) createChannelGroup(ctx context.Context, name string, crea
 	return resp.ChannelGroupID, nil
 }
 
-func (h *GroupHandler) ensureMappingDoesNotExist(ctx context.Context, shortName, emojiName string) error {
+var errArchivedChannelGroupNotFound = errors.New("archived channel group not found")
+
+func (h *GroupHandler) reuseArchivedChannelGroup(ctx context.Context, name string) (int64, error) {
+	resp, _, err := h.client.GetUserGroups(ctx).IncludeDeactivatedGroups(true).Execute()
+	if err != nil {
+		return 0, fmt.Errorf("list Zulip user groups: %w", err)
+	}
+	for _, group := range resp.UserGroups {
+		if group.Name != name {
+			continue
+		}
+		if !group.Deactivated || group.IsSystemGroup {
+			continue
+		}
+		if _, _, err := h.client.UpdateUserGroup(ctx, group.ID).Deactivated(false).Execute(); err != nil {
+			return 0, fmt.Errorf("reactivate archived Zulip user group %d: %w", group.ID, err)
+		}
+		if err := h.client.ImportZulipUserGroup(ctx, group.ID); err != nil {
+			return 0, fmt.Errorf("import archived Zulip user group %d: %w", group.ID, err)
+		}
+		return group.ID, nil
+	}
+	return 0, errArchivedChannelGroupNotFound
+}
+
+func (h *GroupHandler) ensureMappingDoesNotExist(
+	ctx context.Context,
+	shortName, emojiName string,
+) error {
 	mappings, err := h.queries.ListAllEmojiGroupMappings(ctx)
 	if err != nil {
 		return err
@@ -303,7 +500,8 @@ func (h *GroupHandler) ensureMappingDoesNotExist(ctx context.Context, shortName,
 		if mapping.ShortName == shortName {
 			return command.NewUserError(fmt.Sprintf("Mapping `%s` already exists.", shortName))
 		}
-		if mapping.Enabled != 0 && mapping.EmojiName == emojiName && mapping.ReactionType == "unicode_emoji" {
+		if mapping.Enabled != 0 && mapping.EmojiName == emojiName &&
+			mapping.ReactionType == "unicode_emoji" {
 			return command.NewUserError(
 				fmt.Sprintf("Emoji :%s: is already mapped to `%s`.", emojiName, mapping.ShortName),
 			)
@@ -342,6 +540,22 @@ func isDuplicateZulipUserGroupError(err error) bool {
 		strings.Contains(message, "BAD_REQUEST")
 }
 
+func isDuplicateZulipChannelError(err error) bool {
+	var coded zulip.CodedError
+	if errors.As(err, &coded) {
+		if coded.Code == "CHANNEL_ALREADY_EXISTS" {
+			return true
+		}
+		return strings.Contains(coded.Msg, "Channel") &&
+			strings.Contains(coded.Msg, "already exists")
+	}
+
+	message := err.Error()
+	return strings.Contains(message, "Channel") &&
+		strings.Contains(message, "already exists") &&
+		strings.Contains(message, "CHANNEL_ALREADY_EXISTS")
+}
+
 func (h *GroupHandler) handleSubscribe(
 	ctx context.Context,
 	req command.Request,
@@ -354,7 +568,9 @@ func (h *GroupHandler) handleSubscribe(
 		return command.Result{}, err
 	}
 	if !found {
-		return command.Result{}, command.NewUserError(unknownGroupMessage(ctx, h.auth, req, shortName))
+		return command.Result{}, command.NewUserError(
+			unknownGroupMessage(ctx, h.auth, req, shortName),
+		)
 	}
 
 	if _, _, err := h.client.SubscribeToChannelGroup(ctx, mapping.ChannelGroupID).
@@ -381,7 +597,9 @@ func (h *GroupHandler) handleUnsubscribe(
 		return command.Result{}, err
 	}
 	if !found {
-		return command.Result{}, command.NewUserError(unknownGroupMessage(ctx, h.auth, req, shortName))
+		return command.Result{}, command.NewUserError(
+			unknownGroupMessage(ctx, h.auth, req, shortName),
+		)
 	}
 
 	req2 := h.client.UnsubscribeFromChannelGroup(ctx, mapping.ChannelGroupID).
@@ -391,14 +609,20 @@ func (h *GroupHandler) handleUnsubscribe(
 	}
 	if _, _, err := req2.Execute(); err != nil {
 		if keepChannels {
-			return command.Result{}, fmt.Errorf("unsubscribe user from group (keep channels): %w", err)
+			return command.Result{}, fmt.Errorf(
+				"unsubscribe user from group (keep channels): %w",
+				err,
+			)
 		}
 		return command.Result{}, fmt.Errorf("unsubscribe user from group: %w", err)
 	}
 
 	if keepChannels {
 		return command.Result{
-			Content: fmt.Sprintf("You have been unsubscribed from **%s** (channels kept).", mapping.ShortName),
+			Content: fmt.Sprintf(
+				"You have been unsubscribed from **%s** (channels kept).",
+				mapping.ShortName,
+			),
 		}, nil
 	}
 	return command.Result{
@@ -408,7 +632,9 @@ func (h *GroupHandler) handleUnsubscribe(
 
 // listVisibleZulipUserGroups returns the user groups visible to the bot account
 // in Zulip, excluding deactivated and system groups. Sorted by ID.
-func (h *GroupHandler) listVisibleZulipUserGroups(ctx context.Context) ([]channelgroup.ZulipUserGroupSummary, error) {
+func (h *GroupHandler) listVisibleZulipUserGroups(
+	ctx context.Context,
+) ([]channelgroup.ZulipUserGroupSummary, error) {
 	resp, _, err := h.client.GetUserGroups(ctx).IncludeDeactivatedGroups(false).Execute()
 	if err != nil {
 		return nil, fmt.Errorf("list zulip user groups: %w", err)
@@ -444,9 +670,17 @@ func (h *GroupHandler) channelGroupExists(ctx context.Context, channelGroupID in
 }
 
 // unknownGroupMessage returns a permission-safe error message for an unknown channel group.
-func unknownGroupMessage(ctx context.Context, auth command.Authorizer, req command.Request, shortName string) string {
+func unknownGroupMessage(
+	ctx context.Context,
+	auth command.Authorizer,
+	req command.Request,
+	shortName string,
+) string {
 	if auth.Check(ctx, req.Actor, command.PermAdmin) == nil {
-		return fmt.Sprintf("Unknown channel group %q. Use `group mapping list` to see available groups.", shortName)
+		return fmt.Sprintf(
+			"Unknown channel group %q. Use `group mapping list` to see available groups.",
+			shortName,
+		)
 	}
 	return fmt.Sprintf(
 		"Unknown channel group %q. Use `help group` to see the command format, or ask an admin to check available groups.",
@@ -454,7 +688,10 @@ func unknownGroupMessage(ctx context.Context, auth command.Authorizer, req comma
 	)
 }
 
-func (h *GroupHandler) handleMappingList(ctx context.Context, req command.Request) (command.Result, error) {
+func (h *GroupHandler) handleMappingList(
+	ctx context.Context,
+	req command.Request,
+) (command.Result, error) {
 	if err := h.auth.Check(ctx, req.Actor, command.PermAdmin); err != nil {
 		return command.Result{}, command.NewUserError("permission denied")
 	}
@@ -480,15 +717,17 @@ func (h *GroupHandler) handleMappingList(ctx context.Context, req command.Reques
 		} else if !exists {
 			annotation = " [missing channel group]"
 		}
-		b.WriteString(fmt.Sprintf("- `%s`: :%s: → group %d [%s]%s\n",
-			m.ShortName, m.EmojiName, m.ChannelGroupID, status, annotation))
+		fmt.Fprintf(&b, "- `%s`: :%s: → group %d [%s]%s\n",
+			m.ShortName, m.EmojiName, m.ChannelGroupID, status, annotation)
 	}
 	return command.Result{Content: strings.TrimSpace(b.String())}, nil
 }
 
 // validateEnabledMappings returns the list of enabled mappings that reference a
 // missing channel group.
-func (h *GroupHandler) validateEnabledMappings(ctx context.Context) ([]storagedb.EmojiGroupMapping, error) {
+func (h *GroupHandler) validateEnabledMappings(
+	ctx context.Context,
+) ([]storagedb.EmojiGroupMapping, error) {
 	mappings, err := h.queries.ListEnabledEmojiGroupMappings(ctx)
 	if err != nil {
 		return nil, err
@@ -506,6 +745,7 @@ func (h *GroupHandler) validateEnabledMappings(ctx context.Context) ([]storagedb
 	return invalid, nil
 }
 
+//nolint:funlen // validation, import, and persistence form one user-facing command flow.
 func (h *GroupHandler) handleMappingSet(
 	ctx context.Context,
 	req command.Request,
@@ -519,7 +759,9 @@ func (h *GroupHandler) handleMappingSet(
 	emojiName, emojiErr := parseEmojiName(args.EmojiName)
 
 	if channelGroupID <= 0 {
-		return command.Result{}, command.NewUserError("zulip_user_group must resolve to a valid Zulip user group")
+		return command.Result{}, command.NewUserError(
+			"zulip_user_group must resolve to a valid Zulip user group",
+		)
 	}
 	if emojiErr != nil {
 		return command.Result{}, command.NewUserError(
@@ -568,7 +810,10 @@ func (h *GroupHandler) handleMappingSet(
 	}, nil
 }
 
-func (h *GroupHandler) ensureEnabledEmojiMappingAvailable(ctx context.Context, shortName, emojiName string) error {
+func (h *GroupHandler) ensureEnabledEmojiMappingAvailable(
+	ctx context.Context,
+	shortName, emojiName string,
+) error {
 	mappings, err := h.queries.ListEnabledEmojiGroupMappings(ctx)
 	if err != nil {
 		return err
@@ -586,7 +831,10 @@ func (h *GroupHandler) ensureEnabledEmojiMappingAvailable(ctx context.Context, s
 	return nil
 }
 
-func (h *GroupHandler) ensureZulipUserIsVisibleUserGroup(ctx context.Context, user zulip.User) error {
+func (h *GroupHandler) ensureZulipUserIsVisibleUserGroup(
+	ctx context.Context,
+	user zulip.User,
+) error {
 	groups, err := h.listVisibleZulipUserGroups(ctx)
 	if err != nil {
 		return fmt.Errorf("verify Zulip user group %d: %w", user.UserID, err)
@@ -621,7 +869,10 @@ func (h *GroupHandler) zulipGroupVisible(ctx context.Context, userGroupID int64)
 	return false, nil
 }
 
-func (h *GroupHandler) ensureChannelGroupImported(ctx context.Context, channelGroupID int64) (bool, error) {
+func (h *GroupHandler) ensureChannelGroupImported(
+	ctx context.Context,
+	channelGroupID int64,
+) (bool, error) {
 	exists, err := h.channelGroupExists(ctx, channelGroupID)
 	if err != nil {
 		return false, fmt.Errorf("verify channel group %d exists: %w", channelGroupID, err)
@@ -670,7 +921,10 @@ func (h *GroupHandler) handleMappingDisable(
 	}, nil
 }
 
-func (h *GroupHandler) runAnnounce(ctx context.Context, req command.Request) (command.Result, error) {
+func (h *GroupHandler) runAnnounce(
+	ctx context.Context,
+	req command.Request,
+) (command.Result, error) {
 	if err := h.auth.Check(ctx, req.Actor, command.PermAdmin); err != nil {
 		return command.Result{}, command.NewUserError("permission denied")
 	}
@@ -681,7 +935,10 @@ func (h *GroupHandler) runAnnounce(ctx context.Context, req command.Request) (co
 	if len(invalid) > 0 {
 		var refs []string
 		for _, m := range invalid {
-			refs = append(refs, fmt.Sprintf("%s -> channel_group_id=%d", m.ShortName, m.ChannelGroupID))
+			refs = append(
+				refs,
+				fmt.Sprintf("%s -> channel_group_id=%d", m.ShortName, m.ChannelGroupID),
+			)
 		}
 		return command.Result{}, command.NewUserError(fmt.Sprintf(
 			"Cannot update announcement: enabled mapping(s) reference missing channel group(s): %s. "+
@@ -752,7 +1009,10 @@ func (h *GroupHandler) handleAnnounceSetMessage(
 	}, nil
 }
 
-func (h *GroupHandler) handleAnnounceInspect(ctx context.Context, req command.Request) (command.Result, error) {
+func (h *GroupHandler) handleAnnounceInspect(
+	ctx context.Context,
+	req command.Request,
+) (command.Result, error) {
 	if err := h.auth.Check(ctx, req.Actor, command.PermAdmin); err != nil {
 		return command.Result{}, command.NewUserError("permission denied")
 	}
@@ -768,10 +1028,10 @@ func (h *GroupHandler) handleAnnounceInspect(ctx context.Context, req command.Re
 	b.WriteString("**Announcement configuration:**\n")
 
 	if ok && state.MessageID.Valid {
-		b.WriteString(fmt.Sprintf("- message_id: %d ✓\n", state.MessageID.Int64))
+		fmt.Fprintf(&b, "- message_id: %d ✓\n", state.MessageID.Int64)
 		b.WriteString("- mode: **edit existing message** (channel_id and topic not required)\n")
 		if state.UpdatedAt != "" {
-			b.WriteString(fmt.Sprintf("- last updated: %s\n", state.UpdatedAt))
+			fmt.Fprintf(&b, "- last updated: %s\n", state.UpdatedAt)
 		}
 	} else {
 		b.WriteString("- message_id: not set\n")
@@ -779,13 +1039,13 @@ func (h *GroupHandler) handleAnnounceInspect(ctx context.Context, req command.Re
 	}
 
 	if channelOK {
-		b.WriteString(fmt.Sprintf("- channel_id: %d\n", channelID))
+		fmt.Fprintf(&b, "- channel_id: %d\n", channelID)
 	} else {
 		b.WriteString("- channel_id: not configured\n")
 	}
 
 	if topicOK {
-		b.WriteString(fmt.Sprintf("- topic: %s\n", topic))
+		fmt.Fprintf(&b, "- topic: %s\n", topic)
 	} else {
 		b.WriteString("- topic: not configured\n")
 	}
@@ -809,7 +1069,9 @@ func (h *GroupHandler) handleChannelModify(
 		return command.Result{}, err
 	}
 	if !found {
-		return command.Result{}, command.NewUserError(fmt.Sprintf("Unknown channel group %q.", shortName))
+		return command.Result{}, command.NewUserError(
+			fmt.Sprintf("Unknown channel group %q.", shortName),
+		)
 	}
 
 	if err := op(ctx, mapping.ChannelGroupID, channelID); err != nil {
@@ -821,7 +1083,10 @@ func (h *GroupHandler) handleChannelModify(
 	return command.Result{Content: fmt.Sprintf(successFmt, channelID, mapping.ShortName)}, nil
 }
 
-func (h *GroupHandler) addChannelToGroup(ctx context.Context, channelGroupID, channelID int64) error {
+func (h *GroupHandler) addChannelToGroup(
+	ctx context.Context,
+	channelGroupID, channelID int64,
+) error {
 	_, _, err := h.client.UpdateChannelGroupChannels(ctx, channelGroupID).
 		Add([]int64{channelID}).
 		Execute()
@@ -831,12 +1096,20 @@ func (h *GroupHandler) addChannelToGroup(ctx context.Context, channelGroupID, ch
 	return nil
 }
 
-func (h *GroupHandler) removeChannelFromGroup(ctx context.Context, channelGroupID, channelID int64) error {
+func (h *GroupHandler) removeChannelFromGroup(
+	ctx context.Context,
+	channelGroupID, channelID int64,
+) error {
 	_, _, err := h.client.UpdateChannelGroupChannels(ctx, channelGroupID).
 		Delete([]int64{channelID}).
 		Execute()
 	if err != nil {
-		return fmt.Errorf("remove channel %d from channel group %d: %w", channelID, channelGroupID, err)
+		return fmt.Errorf(
+			"remove channel %d from channel group %d: %w",
+			channelID,
+			channelGroupID,
+			err,
+		)
 	}
 	return nil
 }
@@ -857,7 +1130,9 @@ func (h *GroupHandler) handleFolderModify(
 		return command.Result{}, err
 	}
 	if !found {
-		return command.Result{}, command.NewUserError(fmt.Sprintf("Unknown channel group %q.", shortName))
+		return command.Result{}, command.NewUserError(
+			fmt.Sprintf("Unknown channel group %q.", shortName),
+		)
 	}
 
 	if err := op(ctx, mapping.ChannelGroupID); err != nil {
@@ -968,7 +1243,9 @@ func (h *GroupHandler) handleChannelCreate(
 		return command.Result{}, err
 	}
 	if !found {
-		return command.Result{}, command.NewUserError(fmt.Sprintf("Unknown channel group %q.", shortName))
+		return command.Result{}, command.NewUserError(
+			fmt.Sprintf("Unknown channel group %q.", shortName),
+		)
 	}
 
 	channelID, err := h.createChannelAndAddToGroup(ctx, channelName, mapping.ChannelGroupID)
@@ -1004,7 +1281,20 @@ func (h *GroupHandler) createChannelAndAddToGroup(
 		Subscribers([]int64{ownUserResp.User.UserID}).
 		Execute()
 	if err != nil {
-		return 0, fmt.Errorf("create channel %q: %w", channelName, err)
+		if !isDuplicateZulipChannelError(err) {
+			return 0, fmt.Errorf("create channel %q: %w", channelName, err)
+		}
+		channelIDResp, _, getErr := h.client.GetChannelID(ctx).Channel(channelName).Execute()
+		if getErr != nil {
+			return 0, fmt.Errorf("get existing channel %q: %w", channelName, getErr)
+		}
+		if _, _, subscribeErr := h.client.Subscribe(ctx).
+			Subscriptions([]channels.SubscriptionRequest{{Name: channelName}}).
+			Principals(zulip.UserIDsAsPrincipals(ownUserResp.User.UserID)).
+			Execute(); subscribeErr != nil {
+			return 0, fmt.Errorf("subscribe bot to existing channel %q: %w", channelName, subscribeErr)
+		}
+		channelResp = &channels.CreateChannelResponse{ID: channelIDResp.ChannelID}
 	}
 	if err := h.addChannelToGroup(ctx, channelGroupID, channelResp.ID); err != nil {
 		return 0, fmt.Errorf("add channel %d to group %d: %w", channelResp.ID, channelGroupID, err)

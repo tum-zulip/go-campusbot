@@ -19,7 +19,7 @@ GENERATED := \
 	internal/channelgroup/db/querier.go \
 	internal/channelgroup/db/query.sql.go
 
-.PHONY: build generate lint debug clean
+.PHONY: build generate lint debug verbose clean
 
 .DEFAULT_GOAL := build
 
@@ -38,6 +38,9 @@ lint: $(GENERATED)
 
 debug: build
 	$(BINARY) --log-level debug $(ARGS)
+
+verbose: build
+	$(BINARY) --log-level verbose $(ARGS)
 
 clean:
 	rm -rf bin

@@ -32,7 +32,10 @@ func Apply(ctx context.Context, cfg Config) error {
 		return fmt.Errorf("%s migration table must not be empty", packageName(cfg.PackageName))
 	}
 	if cfg.CurrentVersion <= 0 {
-		return fmt.Errorf("%s current schema version must be positive", packageName(cfg.PackageName))
+		return fmt.Errorf(
+			"%s current schema version must be positive",
+			packageName(cfg.PackageName),
+		)
 	}
 	if cfg.BaselineName == "" {
 		return fmt.Errorf("%s schema baseline name must not be empty", packageName(cfg.PackageName))
@@ -65,7 +68,8 @@ func Apply(ctx context.Context, cfg Config) error {
 	}
 
 	var name string
-	if err := cfg.DB.QueryRowContext(ctx, "SELECT name FROM "+table+" WHERE version = ?", cfg.CurrentVersion).Scan(&name); err != nil {
+	if err := cfg.DB.QueryRowContext(ctx, "SELECT name FROM "+table+" WHERE version = ?", cfg.CurrentVersion).
+		Scan(&name); err != nil {
 		return fmt.Errorf("read %s schema baseline name: %w", packageName(cfg.PackageName), err)
 	}
 	if name != cfg.BaselineName {

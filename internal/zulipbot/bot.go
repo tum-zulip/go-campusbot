@@ -209,13 +209,22 @@ func (bot *Bot) Run(ctx context.Context) (bool, error) {
 	}
 	if notify {
 		if notifyErr := bot.NotifyRestartComplete(ctx); notifyErr != nil {
-			bot.logger.WarnContext(ctx, "restart completion notification failed", "error", notifyErr)
+			bot.logger.WarnContext(
+				ctx,
+				"restart completion notification failed",
+				"error",
+				notifyErr,
+			)
 		}
 	} else if markErr := bot.MarkRestartComplete(ctx); markErr != nil {
 		bot.logger.WarnContext(ctx, "failed to mark restart complete", "error", markErr)
 	}
 
-	if deleted, err := bot.cleanupProcessedMessages(ctx, processedMessageRetention, processedMessageMaxRows); err != nil {
+	if deleted, err := bot.cleanupProcessedMessages(
+		ctx,
+		processedMessageRetention,
+		processedMessageMaxRows,
+	); err != nil {
 		bot.logger.WarnContext(ctx, "failed to clean processed message cache", "error", err)
 	} else if deleted > 0 {
 		bot.logger.DebugContext(ctx, "cleaned processed message cache", "deleted", deleted)
@@ -299,7 +308,7 @@ func (bot *Bot) consumeQueue(ctx context.Context, state QueueState) (bool, bool,
 				bot.logger.WarnContext(ctx, "received nil Zulip event")
 				continue
 			}
-			if err := bot.handleEvent(ctx, event, &state); err != nil {
+			if err := bot.handleEvent(ctx, event, &state, queue); err != nil {
 				bot.logger.ErrorContext(ctx, "failed to handle Zulip event",
 					"event_id", event.GetID(),
 					"event_type", event.GetType(),
@@ -343,40 +352,106 @@ func (bot *Bot) Close() error {
 	return nil
 }
 
-// dispatch resolves and executes a command request. Static commands (help,
+func (bot *Bot) dispatch(ctx context.Context, req command.Request) command.Result {
+	result, _ := bot.dispatchOne(ctx, req)
+	return result
+}
+
+func (bot *Bot) dispatchChain(
+	ctx context.Context,
+	req command.Request,
+	chain command.Chain,
+) command.Result {
+	var contents []string
+	var afterResponses []func(context.Context) error
+	previousSucceeded := true
+
+	for _, segment := range chain.Segments {
+		if !shouldDispatchChained(segment.Operator, previousSucceeded) {
+			continue
+		}
+
+		req.Invocation = segment.Invocation
+		req.ParsedArgs = nil
+		result, succeeded := bot.dispatchOne(ctx, req)
+		previousSucceeded = succeeded
+		if result.Content != "" {
+			contents = append(contents, result.Content)
+		}
+		if result.AfterResponse != nil {
+			afterResponses = append(afterResponses, result.AfterResponse)
+		}
+	}
+
+	var afterResponse func(context.Context) error
+	if len(afterResponses) > 0 {
+		afterResponse = func(ctx context.Context) error {
+			for _, afterResponse := range afterResponses {
+				if err := afterResponse(ctx); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+	}
+
+	return command.Result{
+		Content:       strings.Join(contents, "\n\n"),
+		AfterResponse: afterResponse,
+	}
+}
+
+func shouldDispatchChained(operator command.ChainOperator, previousSucceeded bool) bool {
+	switch operator {
+	case command.ChainAlways, command.ChainThen:
+		return true
+	case command.ChainAnd:
+		return previousSucceeded
+	case command.ChainOr:
+		return !previousSucceeded
+	}
+	return true
+}
+
+// dispatchOne resolves and executes a command request. Static commands (help,
 // status, restart) are handled directly; everything else goes through the
-// registry.
+// registry. The returned bool is the command-chain status: true means later
+// && commands should run, false means later || commands should run.
 //
 //nolint:funlen // dispatch is the central command boundary; splitting would obscure the command flow
-func (bot *Bot) dispatch(ctx context.Context, req command.Request) command.Result {
+func (bot *Bot) dispatchOne(ctx context.Context, req command.Request) (command.Result, bool) {
 	name := req.Invocation.Name
 
 	if !bot.accepting.Load() {
-		return command.Result{Content: "The bot is restarting and is not accepting new commands right now."}
+		return command.Result{
+			Content: "The bot is restarting and is not accepting new commands right now.",
+		}, false
 	}
 
 	switch name {
 	case "help":
-		return bot.handleHelp(ctx, req)
+		return bot.handleHelp(ctx, req), true
 	case "status":
-		return bot.handleStatus(ctx, req)
+		return bot.handleStatus(ctx, req), true
 	case "restart":
-		return bot.handleRestart(ctx, req)
+		return bot.handleRestart(ctx, req), true
 	case "config":
 		if err := bot.Check(ctx, req.Actor, configMeta.Permission); err != nil {
 			if errors.Is(err, command.ErrPermissionUnavailable) {
-				return command.Result{Content: "I cannot verify permissions right now, so I will not run that command."}
+				return command.Result{
+					Content: "I cannot verify permissions right now, so I will not run that command.",
+				}, false
 			}
-			return command.Result{Content: "permission denied"}
+			return command.Result{Content: "permission denied"}, false
 		}
-		return bot.handleConfig(ctx, req)
+		return bot.handleConfig(ctx, req), true
 	}
 
 	handler, ok := bot.registry.Lookup(name)
 	if !ok {
 		return command.Result{
 			Content: fmt.Sprintf("Unknown command %q. Use `help` to see supported commands.", name),
-		}
+		}, false
 	}
 
 	meta := handler.Metadata()
@@ -392,9 +467,11 @@ func (bot *Bot) dispatch(ctx context.Context, req command.Request) command.Resul
 			err,
 		)
 		if errors.Is(err, command.ErrPermissionUnavailable) {
-			return command.Result{Content: "I cannot verify permissions right now, so I will not run that command."}
+			return command.Result{
+				Content: "I cannot verify permissions right now, so I will not run that command.",
+			}, false
 		}
-		return command.Result{Content: "permission denied"}
+		return command.Result{Content: "permission denied"}, false
 	}
 
 	if meta.ArgSpec != nil && bot.argParser != nil {
@@ -402,22 +479,29 @@ func (bot *Bot) dispatch(ctx context.Context, req command.Request) command.Resul
 		if parseErr != nil {
 			var userErr command.UserError
 			if errors.As(parseErr, &userErr) {
-				return command.Result{Content: userErr.Message}
+				return command.Result{Content: userErr.Message}, false
 			}
-			bot.logger.ErrorContext(ctx, "arg parsing failed", "command", meta.Name, "error", parseErr)
-			return command.Result{Content: "Command failed because of an internal error."}
+			bot.logger.ErrorContext(
+				ctx,
+				"arg parsing failed",
+				"command",
+				meta.Name,
+				"error",
+				parseErr,
+			)
+			return command.Result{Content: "Command failed because of an internal error."}, false
 		}
 		req.ParsedArgs = parsed
 	}
 
 	result, err := handler.Handle(ctx, req)
 	if err == nil {
-		return result
+		return result, true
 	}
 
 	var userErr command.UserError
 	if errors.As(err, &userErr) {
-		return command.Result{Content: userErr.Message}
+		return command.Result{Content: userErr.Message}, false
 	}
 
 	bot.logger.ErrorContext(
@@ -430,7 +514,7 @@ func (bot *Bot) dispatch(ctx context.Context, req command.Request) command.Resul
 		"error",
 		err,
 	)
-	return command.Result{Content: "Command failed because of an internal error."}
+	return command.Result{Content: "Command failed because of an internal error."}, false
 }
 
 // --- Static command handlers ----------------------------------------------
@@ -602,7 +686,12 @@ func sortMetas(metas []command.Metadata) {
 
 // --- Messaging / client wrappers ------------------------------------------
 
-func (bot *Bot) SendChannelMessage(ctx context.Context, channelID int64, topic string, content string) (int64, error) {
+func (bot *Bot) SendChannelMessage(
+	ctx context.Context,
+	channelID int64,
+	topic string,
+	content string,
+) (int64, error) {
 	if ctx == nil {
 		return 0, errors.New(errContextRequired)
 	}
@@ -630,7 +719,11 @@ func (bot *Bot) SendChannelMessage(ctx context.Context, channelID int64, topic s
 	return resp.ID, nil
 }
 
-func (bot *Bot) sendDirectMessage(ctx context.Context, userIDs []int64, content string) (int64, error) {
+func (bot *Bot) sendDirectMessage(
+	ctx context.Context,
+	userIDs []int64,
+	content string,
+) (int64, error) {
 	if ctx == nil {
 		return 0, errors.New(errContextRequired)
 	}
@@ -654,7 +747,11 @@ func (bot *Bot) sendDirectMessage(ctx context.Context, userIDs []int64, content 
 	return resp.ID, nil
 }
 
-func (bot *Bot) sendReply(ctx context.Context, target command.ReplyTarget, content string) (int64, error) {
+func (bot *Bot) sendReply(
+	ctx context.Context,
+	target command.ReplyTarget,
+	content string,
+) (int64, error) {
 	if err := target.Validate(); err != nil {
 		return 0, err
 	}
@@ -834,10 +931,17 @@ func (bot *Bot) saveEventQueueState(ctx context.Context, state QueueState) error
 	return nil
 }
 
-func (bot *Bot) cleanupProcessedMessages(ctx context.Context, retention time.Duration, maxRows int) (int64, error) {
+func (bot *Bot) cleanupProcessedMessages(
+	ctx context.Context,
+	retention time.Duration,
+	maxRows int,
+) (int64, error) {
 	var deleted int64
 	if retention > 0 {
-		count, err := bot.queries.DeleteExpiredProcessedMessages(ctx, formatTime(time.Now().Add(-retention)))
+		count, err := bot.queries.DeleteExpiredProcessedMessages(
+			ctx,
+			formatTime(time.Now().Add(-retention)),
+		)
 		if err != nil {
 			return 0, fmt.Errorf("delete expired processed messages: %w", err)
 		}
@@ -938,7 +1042,12 @@ func (bot *Bot) markRestartInProgress(ctx context.Context, id int64) error {
 	return nil
 }
 
-func (bot *Bot) completeRestartRequest(ctx context.Context, id int64, completionMessageID int64, failure string) error {
+func (bot *Bot) completeRestartRequest(
+	ctx context.Context,
+	id int64,
+	completionMessageID int64,
+	failure string,
+) error {
 	if id <= 0 {
 		return errors.New("restart request ID must be positive")
 	}
@@ -993,7 +1102,11 @@ func (bot *Bot) announcementState(ctx context.Context) (storagedb.AnnouncementSt
 	return row, true, nil
 }
 
-func (bot *Bot) reactionProcessed(ctx context.Context, messageID, userID int64, emojiName, op string) (bool, error) {
+func (bot *Bot) reactionProcessed(
+	ctx context.Context,
+	messageID, userID int64,
+	emojiName, op string,
+) (bool, error) {
 	_, err := bot.queries.IsReactionProcessed(ctx, storagedb.IsReactionProcessedParams{
 		MessageID: messageID,
 		UserID:    userID,
@@ -1009,7 +1122,11 @@ func (bot *Bot) reactionProcessed(ctx context.Context, messageID, userID int64, 
 	return true, nil
 }
 
-func (bot *Bot) markReactionProcessed(ctx context.Context, messageID, userID int64, emojiName, op string) error {
+func (bot *Bot) markReactionProcessed(
+	ctx context.Context,
+	messageID, userID int64,
+	emojiName, op string,
+) error {
 	if err := bot.queries.MarkReactionProcessed(ctx, storagedb.MarkReactionProcessedParams{
 		MessageID:   messageID,
 		UserID:      userID,
@@ -1026,10 +1143,13 @@ func (bot *Bot) emojiGroupMappingByEmoji(
 	ctx context.Context,
 	emojiName, reactionType string,
 ) (storagedb.EmojiGroupMapping, bool, error) {
-	row, err := bot.queries.GetEmojiGroupMappingByEmoji(ctx, storagedb.GetEmojiGroupMappingByEmojiParams{
-		EmojiName:    emojiName,
-		ReactionType: reactionType,
-	})
+	row, err := bot.queries.GetEmojiGroupMappingByEmoji(
+		ctx,
+		storagedb.GetEmojiGroupMappingByEmojiParams{
+			EmojiName:    emojiName,
+			ReactionType: reactionType,
+		},
+	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return storagedb.EmojiGroupMapping{}, false, nil
 	}
@@ -1130,7 +1250,12 @@ func (bot *Bot) deleteQueue(ctx context.Context, queueID string) error {
 	return nil
 }
 
-func (bot *Bot) handleEvent(ctx context.Context, event events.Event, state *QueueState) error {
+func (bot *Bot) handleEvent(
+	ctx context.Context,
+	event events.Event,
+	state *QueueState,
+	queue realtimeevents.EventQueue,
+) error {
 	//nolint:exhaustive // unsupported event types intentionally fall through to the default state update
 	switch event.GetType() {
 	case events.EventTypeHeartbeat:
@@ -1141,7 +1266,7 @@ func (bot *Bot) handleEvent(ctx context.Context, event events.Event, state *Queu
 		if !ok {
 			return fmt.Errorf("message event has unexpected Go type %T", event)
 		}
-		if err := bot.handleMessage(ctx, messageEvent); err != nil {
+		if err := bot.handleMessage(ctx, messageEvent, queue); err != nil {
 			return err
 		}
 		state.LastEventID = event.GetID()
@@ -1161,7 +1286,12 @@ func (bot *Bot) handleEvent(ctx context.Context, event events.Event, state *Queu
 	}
 }
 
-func (bot *Bot) handleMessage(ctx context.Context, event events.MessageEvent) error {
+//nolint:funlen // message handling is a single transactional flow with distinct early exits
+func (bot *Bot) handleMessage(
+	ctx context.Context,
+	event events.MessageEvent,
+	queue realtimeevents.EventQueue,
+) error {
 	msg := event.Message
 	if msg.SenderID == bot.ownUser.UserID {
 		return nil
@@ -1175,11 +1305,16 @@ func (bot *Bot) handleMessage(ctx context.Context, event events.MessageEvent) er
 		return err
 	}
 	if alreadyProcessed {
-		bot.logger.DebugContext(ctx, "skipping already processed Zulip message", "message_id", msg.ID)
+		bot.logger.DebugContext(
+			ctx,
+			"skipping already processed Zulip message",
+			"message_id",
+			msg.ID,
+		)
 		return nil
 	}
 
-	invocation, err := command.Parse(msg.Content)
+	chain, err := command.ParseChain(msg.Content)
 	if errors.Is(err, command.ErrNotCommand) {
 		return nil
 	}
@@ -1189,27 +1324,24 @@ func (bot *Bot) handleMessage(ctx context.Context, event events.MessageEvent) er
 		return targetErr
 	}
 
-	if err == nil {
-		bot.logger.InfoContext(ctx, "command received", "command", invocation.Name, "actor_user_id", msg.SenderID)
+	bot.logCommandReceived(ctx, msg, chain, err)
+	notifier := bot.startTyping(ctx, target, queue)
+	if notifier != nil {
+		defer bot.stopTyping(notifier)
 	}
 
 	if err != nil {
-		if sendErr := bot.send(ctx, target, "Malformed command. Use `help` to see supported commands."); sendErr != nil {
+		if sendErr := bot.send(
+			ctx,
+			target,
+			"Malformed command. Use `help` to see supported commands.",
+		); sendErr != nil {
 			return sendErr
 		}
 		return bot.markMessageProcessed(ctx, msg.ID)
 	}
 
-	result := bot.dispatch(ctx, command.Request{
-		Invocation: invocation,
-		Actor: command.Actor{
-			UserID:   msg.SenderID,
-			Email:    msg.SenderEmail,
-			FullName: msg.SenderFullName,
-		},
-		MessageID: msg.ID,
-		Target:    target,
-	})
+	result := bot.dispatchChain(ctx, commandRequestFromMessage(msg, target), chain)
 	if result.Content != "" {
 		if err := bot.send(ctx, target, result.Content); err != nil {
 			return err
@@ -1222,6 +1354,80 @@ func (bot *Bot) handleMessage(ctx context.Context, event events.MessageEvent) er
 		return result.AfterResponse(ctx)
 	}
 	return nil
+}
+
+func (bot *Bot) startTyping(
+	ctx context.Context,
+	target command.ReplyTarget,
+	queue realtimeevents.EventQueue,
+) *realtimeevents.TypingNotifier {
+	if queue == nil {
+		return nil
+	}
+	recipient, err := typingRecipient(target)
+	if err != nil {
+		bot.logger.WarnContext(ctx, "failed to resolve Zulip typing recipient", "error", err)
+		return nil
+	}
+	notifier, err := queue.StartTyping(ctx, bot.client, recipient)
+	if err != nil {
+		bot.logger.WarnContext(ctx, "failed to start Zulip typing indicator", "error", err)
+		return nil
+	}
+	return notifier
+}
+
+func (bot *Bot) stopTyping(notifier *realtimeevents.TypingNotifier) {
+	if err := notifier.Close(); err != nil {
+		bot.logger.WarnContext(context.Background(), "failed to stop Zulip typing indicator", "error", err)
+	}
+}
+
+func typingRecipient(target command.ReplyTarget) (zulip.Recipient, error) {
+	if err := target.Validate(); err != nil {
+		return zulip.Recipient{}, err
+	}
+	switch target.Kind {
+	case command.ReplyKindChannel:
+		return zulip.ChannelAsRecipient(target.ChannelID), nil
+	case command.ReplyKindDirect:
+		return zulip.UsersAsRecipient(target.UserIDs), nil
+	default:
+		return zulip.Recipient{}, errors.New("unsupported reply target kind")
+	}
+}
+
+func commandRequestFromMessage(msg zulip.Message, target command.ReplyTarget) command.Request {
+	return command.Request{
+		Actor: command.Actor{
+			UserID:   msg.SenderID,
+			Email:    msg.SenderEmail,
+			FullName: msg.SenderFullName,
+		},
+		MessageID: msg.ID,
+		Target:    target,
+	}
+}
+
+func (bot *Bot) logCommandReceived(
+	ctx context.Context,
+	msg zulip.Message,
+	chain command.Chain,
+	parseErr error,
+) {
+	if parseErr != nil {
+		return
+	}
+	bot.logger.InfoContext(
+		ctx,
+		"command received",
+		"command",
+		chain.Segments[0].Invocation.Name,
+		"chain_length",
+		len(chain.Segments),
+		"actor_user_id",
+		msg.SenderID,
+	)
 }
 
 //nolint:funlen // reaction handling is a single transactional flow with distinct early exits
@@ -1250,7 +1456,13 @@ func (bot *Bot) handleReaction(ctx context.Context, event events.ReactionEvent) 
 	}
 	opStr := string(op)
 
-	processed, err := bot.reactionProcessed(ctx, event.MessageID, event.UserID, event.EmojiName, opStr)
+	processed, err := bot.reactionProcessed(
+		ctx,
+		event.MessageID,
+		event.UserID,
+		event.EmojiName,
+		opStr,
+	)
 	if err != nil {
 		return err
 	}
@@ -1258,7 +1470,11 @@ func (bot *Bot) handleReaction(ctx context.Context, event events.ReactionEvent) 
 		return nil
 	}
 
-	mapping, found, err := bot.emojiGroupMappingByEmoji(ctx, event.EmojiName, string(event.ReactionType))
+	mapping, found, err := bot.emojiGroupMappingByEmoji(
+		ctx,
+		event.EmojiName,
+		string(event.ReactionType),
+	)
 	if err != nil {
 		return err
 	}
@@ -1282,14 +1498,26 @@ func (bot *Bot) handleReaction(ctx context.Context, event events.ReactionEvent) 
 			bot.logger.ErrorContext(
 				ctx,
 				"reaction group operation failed: channel group missing; recording as handled to avoid retry loop",
-				"user_id", event.UserID,
-				"group_short_name", mapping.ShortName,
-				"channel_group_id", mapping.ChannelGroupID,
-				"op", opStr,
-				"message_id", event.MessageID,
-				"error", opErr,
+				"user_id",
+				event.UserID,
+				"group_short_name",
+				mapping.ShortName,
+				"channel_group_id",
+				mapping.ChannelGroupID,
+				"op",
+				opStr,
+				"message_id",
+				event.MessageID,
+				"error",
+				opErr,
 			)
-			if markErr := bot.markReactionProcessed(ctx, event.MessageID, event.UserID, event.EmojiName, opStr); markErr != nil {
+			if markErr := bot.markReactionProcessed(
+				ctx,
+				event.MessageID,
+				event.UserID,
+				event.EmojiName,
+				opStr,
+			); markErr != nil {
 				return markErr
 			}
 			return nil
@@ -1318,7 +1546,14 @@ func (bot *Bot) send(ctx context.Context, target command.ReplyTarget, content st
 	if err != nil {
 		return err
 	}
-	bot.logger.DebugContext(ctx, "sent command response", "message_id", messageID, "target_kind", target.Kind)
+	bot.logger.DebugContext(
+		ctx,
+		"sent command response",
+		"message_id",
+		messageID,
+		"target_kind",
+		target.Kind,
+	)
 	return nil
 }
 

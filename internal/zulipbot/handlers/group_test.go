@@ -26,7 +26,12 @@ import (
 // setAnnouncementConfig persists the announcement channel/topic config so the
 // handler's storage-backed lookups return them. Pass channelID<=0 or topic=""
 // to leave that key unset.
-func setAnnouncementConfig(t *testing.T, queries *storagedb.Queries, channelID int64, topic string) {
+func setAnnouncementConfig(
+	t *testing.T,
+	queries *storagedb.Queries,
+	channelID int64,
+	topic string,
+) {
 	t.Helper()
 	if channelID > 0 {
 		if err := queries.SetConfigValue(context.Background(), storagedb.SetConfigValueParams{
@@ -79,18 +84,26 @@ func openGroupTestStorage(t *testing.T) (*sql.DB, *storagedb.Queries) {
 	return db, storagedb.New(db)
 }
 
-func seedGroupMapping(t *testing.T, queries *storagedb.Queries, shortName, emojiName string, channelGroupID int64) {
+func seedGroupMapping(
+	t *testing.T,
+	queries *storagedb.Queries,
+	shortName, emojiName string,
+	channelGroupID int64,
+) {
 	t.Helper()
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	err := queries.UpsertEmojiGroupMapping(context.Background(), storagedb.UpsertEmojiGroupMappingParams{
-		ShortName:      shortName,
-		ChannelGroupID: channelGroupID,
-		EmojiName:      emojiName,
-		ReactionType:   "unicode_emoji",
-		Enabled:        1,
-		CreatedAt:      now,
-		UpdatedAt:      now,
-	})
+	err := queries.UpsertEmojiGroupMapping(
+		context.Background(),
+		storagedb.UpsertEmojiGroupMappingParams{
+			ShortName:      shortName,
+			ChannelGroupID: channelGroupID,
+			EmojiName:      emojiName,
+			ReactionType:   "unicode_emoji",
+			Enabled:        1,
+			CreatedAt:      now,
+			UpdatedAt:      now,
+		},
+	)
 	if err != nil {
 		t.Fatalf("UpsertEmojiGroupMapping() failed: %v", err)
 	}
@@ -108,7 +121,11 @@ func getGroupMappingByShortName(
 	return row, err == nil, err
 }
 
-func saveAnnouncementState(ctx context.Context, queries *storagedb.Queries, messageID *int64) error {
+func saveAnnouncementState(
+	ctx context.Context,
+	queries *storagedb.Queries,
+	messageID *int64,
+) error {
 	var id sql.NullInt64
 	if messageID != nil {
 		id = sql.NullInt64{Int64: *messageID, Valid: true}
@@ -126,6 +143,15 @@ func makeGroupRequest(parsedArgs any) command.Request {
 		MessageID:  1,
 		Target:     command.ReplyTarget{Kind: command.ReplyKindDirect, UserIDs: []int64{123}},
 	}
+}
+
+func containsInt64(values []int64, needle int64) bool {
+	for _, value := range values {
+		if value == needle {
+			return true
+		}
+	}
+	return false
 }
 
 // newChannelGroupClient builds a channelgroup.Client backed by a fresh
@@ -159,7 +185,12 @@ func newChannelGroupClient(t *testing.T) (channelgroup.Client, zulipmock.Client)
 // seedChannelGroup creates a Zulip user group and imports it locally so the
 // returned ID is fully usable as a channel group (channelGroupExists returns
 // true, channel and subscriber operations succeed).
-func seedChannelGroup(t *testing.T, client channelgroup.Client, base zulipmock.Client, name string) int64 {
+func seedChannelGroup(
+	t *testing.T,
+	client channelgroup.Client,
+	base zulipmock.Client,
+	name string,
+) int64 {
 	t.Helper()
 	resp, _, err := base.CreateUserGroup(context.Background()).
 		Name(name).
@@ -324,7 +355,10 @@ func TestGroupUnsubscribeKeepChannels(t *testing.T) {
 	}
 
 	h := env.handler(allowAll{})
-	result, err := h.Handle(ctx, makeGroupRequest(handlers.GroupUnsubscribeArgs{KeepChannels: true, ShortName: "WI"}))
+	result, err := h.Handle(
+		ctx,
+		makeGroupRequest(handlers.GroupUnsubscribeArgs{KeepChannels: true, ShortName: "WI"}),
+	)
 	if err != nil {
 		t.Fatalf("Handle() failed: %v", err)
 	}
@@ -365,9 +399,13 @@ func TestGroupSubscribeUnknownGroupNoneUserDoesNotLeakAdminHint(t *testing.T) {
 		t.Fatalf("expected UserError for unknown group, got %T: %v", err, err)
 	}
 	if strings.Contains(userErr.Message, "group mapping list") {
-		t.Errorf("normal user error must not mention 'group mapping list', got: %q", userErr.Message)
+		t.Errorf(
+			"normal user error must not mention 'group mapping list', got: %q",
+			userErr.Message,
+		)
 	}
-	if !strings.Contains(userErr.Message, "help group") && !strings.Contains(userErr.Message, "admin") {
+	if !strings.Contains(userErr.Message, "help group") &&
+		!strings.Contains(userErr.Message, "admin") {
 		t.Errorf("normal user error should suggest help or admin, got: %q", userErr.Message)
 	}
 }
@@ -400,7 +438,10 @@ func TestGroupUnsubscribeUnknownGroupNoneUserDoesNotLeakAdminHint(t *testing.T) 
 		t.Fatalf("expected UserError for unknown group, got %T: %v", err, err)
 	}
 	if strings.Contains(userErr.Message, "group mapping list") {
-		t.Errorf("normal user unsubscribe error must not mention 'group mapping list', got: %q", userErr.Message)
+		t.Errorf(
+			"normal user unsubscribe error must not mention 'group mapping list', got: %q",
+			userErr.Message,
+		)
 	}
 }
 
@@ -424,7 +465,10 @@ func TestGroupCreateAdminCreatesChannelGroupAndMapping(t *testing.T) {
 	env := newGroupTestEnv(t)
 
 	h := env.handler(allowAll{})
-	result, err := h.Handle(ctx, makeGroupRequest(handlers.GroupCreateArgs{ShortName: "PGDP", EmojiName: ":books:"}))
+	result, err := h.Handle(
+		ctx,
+		makeGroupRequest(handlers.GroupCreateArgs{ShortName: "PGDP", EmojiName: ":books:"}),
+	)
 	if err != nil {
 		t.Fatalf("Handle() failed: %v", err)
 	}
@@ -437,10 +481,159 @@ func TestGroupCreateAdminCreatesChannelGroupAndMapping(t *testing.T) {
 	}
 	// The created channel group should exist locally.
 	if _, _, err := env.client.GetChannelGroup(ctx, mapping.ChannelGroupID).Execute(); err != nil {
-		t.Errorf("expected channel group %d to exist after create, got %v", mapping.ChannelGroupID, err)
+		t.Errorf(
+			"expected channel group %d to exist after create, got %v",
+			mapping.ChannelGroupID,
+			err,
+		)
 	}
 	if !strings.Contains(result.Content, "PGDP") || !strings.Contains(result.Content, "books") {
 		t.Errorf("expected created group response with name and emoji, got: %s", result.Content)
+	}
+}
+
+func TestGroupRemoveEmptyGroup(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env := newGroupTestEnv(t)
+	groupID := seedChannelGroup(t, env.client, env.base, "WI")
+	seedGroupMapping(t, env.queries, "WI", "wi", groupID)
+
+	h := env.handler(allowAll{})
+	result, err := h.Handle(ctx, makeGroupRequest(handlers.GroupRemoveArgs{ShortName: "WI"}))
+	if err != nil {
+		t.Fatalf("Handle() failed: %v", err)
+	}
+	if !strings.Contains(result.Content, "Removed channel group") {
+		t.Fatalf("unexpected result content: %q", result.Content)
+	}
+	if _, _, err = env.client.GetChannelGroup(ctx, groupID).Execute(); !errors.Is(
+		err,
+		channelgroup.ErrChannelGroupNotFound,
+	) {
+		t.Fatalf("GetChannelGroup error = %v, want ErrChannelGroupNotFound", err)
+	}
+	if _, found, err := getGroupMappingByShortName(ctx, env.queries, "WI"); err != nil || found {
+		t.Fatalf("mapping found = %t, err = %v; want not found", found, err)
+	}
+}
+
+func TestGroupRemoveRejectsAssignedChannelsWithoutForce(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env, groupID := newCourseTestEnv(t)
+	channelID := seedChannel(t, env.base, "wi-channel")
+	if _, _, err := env.client.UpdateChannelGroupChannels(ctx, groupID).Add([]int64{channelID}).Execute(); err != nil {
+		t.Fatalf("pre-add channel %d to group %d: %v", channelID, groupID, err)
+	}
+
+	h := env.handler(allowAll{})
+	_, err := h.Handle(ctx, makeGroupRequest(handlers.GroupRemoveArgs{ShortName: "WI"}))
+	var userErr command.UserError
+	if !errors.As(err, &userErr) {
+		t.Fatalf("expected UserError, got %T: %v", err, err)
+	}
+	if !strings.Contains(userErr.Message, "group remove -f WI") {
+		t.Fatalf("expected force hint, got %q", userErr.Message)
+	}
+	if _, _, err = env.client.GetChannelGroup(ctx, groupID).Execute(); err != nil {
+		t.Fatalf("group should still exist: %v", err)
+	}
+}
+
+func TestGroupRemoveForceArchivesChannelsAndFolder(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env, groupID := newCourseTestEnv(t)
+	channelID := seedChannel(t, env.base, "wi-channel")
+	if _, _, err := env.client.UpdateChannelGroupChannels(ctx, groupID).Add([]int64{channelID}).Execute(); err != nil {
+		t.Fatalf("pre-add channel %d to group %d: %v", channelID, groupID, err)
+	}
+	if _, _, err := env.client.UpdateChannelGroupFolder(ctx, groupID).Add().Execute(); err != nil {
+		t.Fatalf("pre-add folder to group %d: %v", groupID, err)
+	}
+	group, _, err := env.client.GetChannelGroup(ctx, groupID).Execute()
+	if err != nil {
+		t.Fatalf("GetChannelGroup: %v", err)
+	}
+	if group.ChannelGroup.ChannelFolderID == nil {
+		t.Fatal("channel folder ID = nil after group folder add")
+	}
+	folderID := *group.ChannelGroup.ChannelFolderID
+
+	h := env.handler(allowAll{})
+	result, err := h.Handle(ctx, makeGroupRequest(handlers.GroupRemoveArgs{Force: true, ShortName: "WI"}))
+	if err != nil {
+		t.Fatalf("Handle() failed: %v", err)
+	}
+	if !strings.Contains(result.Content, "archived 1 exclusive channel") {
+		t.Fatalf("unexpected result content: %q", result.Content)
+	}
+	if _, _, err = env.client.GetChannelGroup(ctx, groupID).Execute(); !errors.Is(
+		err,
+		channelgroup.ErrChannelGroupNotFound,
+	) {
+		t.Fatalf("GetChannelGroup error = %v, want ErrChannelGroupNotFound", err)
+	}
+	channel, _, err := env.base.GetChannelByID(ctx, channelID).Execute()
+	if err != nil {
+		t.Fatalf("GetChannelByID: %v", err)
+	}
+	if !channel.Channel.IsArchived {
+		t.Fatal("channel was not archived")
+	}
+	if channel.Channel.FolderID != nil {
+		t.Fatalf("channel folder ID = %v, want nil", channel.Channel.FolderID)
+	}
+	folders, _, err := env.base.GetChannelFolders(ctx).IncludeArchived(true).Execute()
+	if err != nil {
+		t.Fatalf("GetChannelFolders: %v", err)
+	}
+	for _, folder := range folders.ChannelFolders {
+		if folder.ID == folderID {
+			if !folder.IsArchived {
+				t.Fatalf("folder %d was not archived", folderID)
+			}
+			return
+		}
+	}
+	t.Fatalf("folder %d not found", folderID)
+}
+
+func TestGroupRemoveForceDoesNotArchiveChannelsSharedWithOtherGroups(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env, groupID := newCourseTestEnv(t)
+	otherGroupID := seedChannelGroup(t, env.client, env.base, "Other")
+	channelID := seedChannel(t, env.base, "shared-channel")
+	if _, _, err := env.client.UpdateChannelGroupChannels(ctx, groupID).Add([]int64{channelID}).Execute(); err != nil {
+		t.Fatalf("pre-add channel %d to group %d: %v", channelID, groupID, err)
+	}
+	if _, _, err := env.client.UpdateChannelGroupChannels(ctx, otherGroupID).Add([]int64{channelID}).Execute(); err != nil {
+		t.Fatalf("pre-add channel %d to group %d: %v", channelID, otherGroupID, err)
+	}
+
+	h := env.handler(allowAll{})
+	result, err := h.Handle(ctx, makeGroupRequest(handlers.GroupRemoveArgs{Force: true, ShortName: "WI"}))
+	if err != nil {
+		t.Fatalf("Handle() failed: %v", err)
+	}
+	if !strings.Contains(result.Content, "archived 0 exclusive channel") {
+		t.Fatalf("unexpected result content: %q", result.Content)
+	}
+	channel, _, err := env.base.GetChannelByID(ctx, channelID).Execute()
+	if err != nil {
+		t.Fatalf("GetChannelByID: %v", err)
+	}
+	if channel.Channel.IsArchived {
+		t.Fatal("shared channel was archived")
+	}
+	otherGroup, _, err := env.client.GetChannelGroup(ctx, otherGroupID).Execute()
+	if err != nil {
+		t.Fatalf("GetChannelGroup(other): %v", err)
+	}
+	if !containsInt64(otherGroup.ChannelGroup.ChannelIDs, channelID) {
+		t.Fatalf("shared channel %d was removed from other group %+v", channelID, otherGroup.ChannelGroup)
 	}
 }
 
@@ -450,7 +643,10 @@ func TestGroupCreateRequiresColonWrappedEmojiName(t *testing.T) {
 	env := newGroupTestEnv(t)
 
 	h := env.handler(allowAll{})
-	_, err := h.Handle(ctx, makeGroupRequest(handlers.GroupCreateArgs{ShortName: "PGDP", EmojiName: "books"}))
+	_, err := h.Handle(
+		ctx,
+		makeGroupRequest(handlers.GroupCreateArgs{ShortName: "PGDP", EmojiName: "books"}),
+	)
 	var userErr command.UserError
 	if !errors.As(err, &userErr) {
 		t.Fatalf("expected UserError for bare emoji name, got %T: %v", err, err)
@@ -473,13 +669,58 @@ func TestGroupCreateDuplicateZulipUserGroupReturnsUserError(t *testing.T) {
 	})
 
 	h := env.handler(allowAll{})
-	_, err := h.Handle(ctx, makeGroupRequest(handlers.GroupCreateArgs{ShortName: "pgdp2", EmojiName: ":books:"}))
+	_, err := h.Handle(
+		ctx,
+		makeGroupRequest(handlers.GroupCreateArgs{ShortName: "pgdp2", EmojiName: ":books:"}),
+	)
 	var userErr command.UserError
 	if !errors.As(err, &userErr) {
 		t.Fatalf("expected UserError for duplicate group, got %T: %v", err, err)
 	}
-	if !strings.Contains(userErr.Message, "already exists") || !strings.Contains(userErr.Message, "group mapping set") {
+	if !strings.Contains(userErr.Message, "already exists") ||
+		!strings.Contains(userErr.Message, "group mapping set") {
 		t.Fatalf("expected duplicate group guidance, got: %q", userErr.Message)
+	}
+}
+
+func TestGroupCreateReusesArchivedZulipUserGroup(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env := newGroupTestEnv(t)
+	groupID := seedZulipUserGroup(t, env.base, "ONE", []int64{1})
+	if _, _, err := env.base.DeactivateUserGroup(ctx, groupID).Execute(); err != nil {
+		t.Fatalf("DeactivateUserGroup(%d): %v", groupID, err)
+	}
+
+	h := env.handler(allowAll{})
+	result, err := h.Handle(
+		ctx,
+		makeGroupRequest(handlers.GroupCreateArgs{ShortName: "ONE", EmojiName: ":books:"}),
+	)
+	if err != nil {
+		t.Fatalf("Handle() failed: %v", err)
+	}
+	if strings.Contains(result.Content, "group mapping set") {
+		t.Fatalf("expected archived group reuse, got duplicate guidance: %q", result.Content)
+	}
+	mapping, ok, err := getGroupMappingByShortName(ctx, env.queries, "ONE")
+	if err != nil {
+		t.Fatalf("get mapping: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected mapping for reused archived group")
+	}
+	if mapping.ChannelGroupID != groupID {
+		t.Fatalf("mapping channel group ID = %d, want %d", mapping.ChannelGroupID, groupID)
+	}
+	groups, _, err := env.base.GetUserGroups(ctx).IncludeDeactivatedGroups(true).Execute()
+	if err != nil {
+		t.Fatalf("GetUserGroups: %v", err)
+	}
+	for _, group := range groups.UserGroups {
+		if group.ID == groupID && group.Deactivated {
+			t.Fatalf("reused group %d is still deactivated", groupID)
+		}
 	}
 }
 
@@ -489,7 +730,10 @@ func TestGroupCreateDeniedForNoneUser(t *testing.T) {
 	env := newGroupTestEnv(t)
 
 	h := env.handler(denyAll{})
-	_, err := h.Handle(ctx, makeGroupRequest(handlers.GroupCreateArgs{ShortName: "PGDP", EmojiName: ":books:"}))
+	_, err := h.Handle(
+		ctx,
+		makeGroupRequest(handlers.GroupCreateArgs{ShortName: "PGDP", EmojiName: ":books:"}),
+	)
 	var userErr command.UserError
 	if !errors.As(err, &userErr) {
 		t.Fatalf("expected UserError for denied create, got %T: %v", err, err)
@@ -527,11 +771,21 @@ func TestGroupMappingSetAutoImportsWhenZulipVisibleButNotLocal(t *testing.T) {
 	}
 	// Local channel group now exists.
 	if _, _, err := env.client.GetChannelGroup(ctx, groupID).Execute(); err != nil {
-		t.Errorf("expected channel group %d to exist locally after auto-import, got %v", groupID, err)
+		t.Errorf(
+			"expected channel group %d to exist locally after auto-import, got %v",
+			groupID,
+			err,
+		)
 	}
 	m, ok, err := getGroupMappingByShortName(ctx, env.queries, "PGDP")
 	if err != nil || !ok || m.ChannelGroupID != groupID {
-		t.Fatalf("expected mapping stored with channel group %d, got m=%+v ok=%v err=%v", groupID, m, ok, err)
+		t.Fatalf(
+			"expected mapping stored with channel group %d, got m=%+v ok=%v err=%v",
+			groupID,
+			m,
+			ok,
+			err,
+		)
 	}
 	if announcementHash(t, env.queries) == "" {
 		t.Error("expected announcement message to be updated after successful mapping set")
@@ -545,7 +799,11 @@ func TestGroupMappingSetParsesUserGroupMention(t *testing.T) {
 	groupID := seedZulipUserGroup(t, env.base, "PGDP", []int64{1})
 	parser := command.NewArgParser(groupArgResolver{Client: env.base})
 
-	parsed, err := parser.Parse(ctx, handlers.GroupArgSpec, []string{"mapping", "set", "PGDP", "@**PGDP**", ":math:"})
+	parsed, err := parser.Parse(
+		ctx,
+		handlers.GroupArgSpec,
+		[]string{"mapping", "set", "PGDP", "@**PGDP**", ":math:"},
+	)
 	if err != nil {
 		t.Fatalf("Parse() failed: %v", err)
 	}
@@ -565,7 +823,11 @@ func TestGroupMappingSetRejectsNumericUserGroupID(t *testing.T) {
 	groupID := seedZulipUserGroup(t, env.base, "PGDP", []int64{1})
 	parser := command.NewArgParser(groupArgResolver{Client: env.base})
 
-	_, err := parser.Parse(ctx, handlers.GroupArgSpec, []string{"mapping", "set", "PGDP", itoa(groupID), ":math:"})
+	_, err := parser.Parse(
+		ctx,
+		handlers.GroupArgSpec,
+		[]string{"mapping", "set", "PGDP", itoa(groupID), ":math:"},
+	)
 	var userErr command.UserError
 	if !errors.As(err, &userErr) {
 		t.Fatalf("expected UserError, got %T: %v", err, err)
@@ -653,11 +915,20 @@ func TestGroupMappingSetSkipsAutoImportWhenAlreadyLocal(t *testing.T) {
 		t.Fatalf("Handle() failed: %v", err)
 	}
 	if strings.Contains(strings.ToLower(result.Content), "imported") {
-		t.Errorf("success message must not mention import when no import happened, got: %q", result.Content)
+		t.Errorf(
+			"success message must not mention import when no import happened, got: %q",
+			result.Content,
+		)
 	}
 	m, ok, err := getGroupMappingByShortName(ctx, env.queries, "NEWCOURSE")
 	if err != nil || !ok || m.ChannelGroupID != groupID {
-		t.Fatalf("expected mapping stored with channel group %d, got m=%+v ok=%v err=%v", groupID, m, ok, err)
+		t.Fatalf(
+			"expected mapping stored with channel group %d, got m=%+v ok=%v err=%v",
+			groupID,
+			m,
+			ok,
+			err,
+		)
 	}
 }
 
@@ -684,16 +955,25 @@ func TestGroupMappingSetRejectsWhenZulipDoesNotKnowGroup(t *testing.T) {
 		t.Fatalf("expected UserError for invisible Zulip group, got %T: %v", err, err)
 	}
 	if !strings.Contains(userErr.Message, "not a visible Zulip user group") {
-		t.Errorf("error should say group is not a visible Zulip user group, got: %q", userErr.Message)
+		t.Errorf(
+			"error should say group is not a visible Zulip user group, got: %q",
+			userErr.Message,
+		)
 	}
 	if strings.Contains(userErr.Message, "group available") {
-		t.Errorf("error should not hint admins to run removed `group available`, got: %q", userErr.Message)
+		t.Errorf(
+			"error should not hint admins to run removed `group available`, got: %q",
+			userErr.Message,
+		)
 	}
 	if _, ok, err := getGroupMappingByShortName(ctx, env.queries, "PGDP"); err != nil || ok {
 		t.Errorf("expected mapping not to be stored, got err=%v, ok=%v", err, ok)
 	}
 	if env.base.LastSentMessage() != nil {
-		t.Errorf("expected no message sent on rejected mapping, got %+v", env.base.LastSentMessage())
+		t.Errorf(
+			"expected no message sent on rejected mapping, got %+v",
+			env.base.LastSentMessage(),
+		)
 	}
 }
 
@@ -749,7 +1029,13 @@ func TestGroupMappingSetAcceptsExistingChannelGroup(t *testing.T) {
 	}
 	m, ok, err := getGroupMappingByShortName(ctx, env.queries, "NEWCOURSE")
 	if err != nil || !ok || m.ChannelGroupID != groupID {
-		t.Fatalf("expected mapping stored with channel group %d, got m=%+v ok=%v err=%v", groupID, m, ok, err)
+		t.Fatalf(
+			"expected mapping stored with channel group %d, got m=%+v ok=%v err=%v",
+			groupID,
+			m,
+			ok,
+			err,
+		)
 	}
 }
 
@@ -815,7 +1101,11 @@ func TestGroupAnnounceRejectsInvalidEnabledMapping(t *testing.T) {
 	_, err := h.Handle(ctx, makeGroupRequest(handlers.GroupAnnounceArgs{}))
 	var userErr command.UserError
 	if !errors.As(err, &userErr) {
-		t.Fatalf("expected UserError when an enabled mapping references a missing channel group, got %T: %v", err, err)
+		t.Fatalf(
+			"expected UserError when an enabled mapping references a missing channel group, got %T: %v",
+			err,
+			err,
+		)
 	}
 	if !strings.Contains(userErr.Message, "PGDP") || !strings.Contains(userErr.Message, "9999") {
 		t.Errorf("error should list invalid mapping PGDP/9999, got: %q", userErr.Message)
@@ -888,7 +1178,8 @@ func TestGroupMappingListAnnotatesMissingChannelGroups(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Handle() failed: %v", err)
 	}
-	if !strings.Contains(result.Content, "PGDP") || !strings.Contains(result.Content, "missing channel group") {
+	if !strings.Contains(result.Content, "PGDP") ||
+		!strings.Contains(result.Content, "missing channel group") {
 		t.Errorf("expected PGDP to be flagged as missing, got:\n%s", result.Content)
 	}
 	if strings.Contains(strings.SplitN(result.Content, "WI", 2)[1], "missing channel group") {
@@ -948,7 +1239,10 @@ func TestGroupAnnounceSetMessageValid(t *testing.T) {
 	env := newGroupTestEnv(t)
 
 	h := env.handler(allowAll{})
-	result, err := h.Handle(ctx, makeGroupRequest(handlers.GroupAnnounceSetMessageArgs{MessageID: 12345}))
+	result, err := h.Handle(
+		ctx,
+		makeGroupRequest(handlers.GroupAnnounceSetMessageArgs{MessageID: 12345}),
+	)
 	if err != nil {
 		t.Fatalf("Handle() failed: %v", err)
 	}
@@ -1002,10 +1296,16 @@ func TestGroupMetadataAdminUsageIsSet(t *testing.T) {
 		t.Errorf("AdminUsage should mention 'announce', got: %q", meta.AdminUsage)
 	}
 	if strings.Contains(meta.AdminUsage, "group available") {
-		t.Errorf("AdminUsage must NOT mention removed 'group available' command, got: %q", meta.AdminUsage)
+		t.Errorf(
+			"AdminUsage must NOT mention removed 'group available' command, got: %q",
+			meta.AdminUsage,
+		)
 	}
 	if strings.Contains(meta.AdminUsage, "group list") {
-		t.Errorf("AdminUsage must NOT mention removed 'group list' command, got: %q", meta.AdminUsage)
+		t.Errorf(
+			"AdminUsage must NOT mention removed 'group list' command, got: %q",
+			meta.AdminUsage,
+		)
 	}
 }
 
@@ -1199,7 +1499,11 @@ func TestGroupChannelAddParsesChannelMention(t *testing.T) {
 	channelID := seedChannel(t, env.base, "wi-channel")
 	parser := command.NewArgParser(groupArgResolver{Client: env.base})
 
-	parsed, err := parser.Parse(ctx, handlers.GroupArgSpec, []string{"channel", "add", "#**wi-channel**", "WI"})
+	parsed, err := parser.Parse(
+		ctx,
+		handlers.GroupArgSpec,
+		[]string{"channel", "add", "#**wi-channel**", "WI"},
+	)
 	if err != nil {
 		t.Fatalf("Parse() failed: %v", err)
 	}
@@ -1219,7 +1523,11 @@ func TestGroupChannelAddRejectsNumericChannelID(t *testing.T) {
 	channelID := seedChannel(t, env.base, "wi-channel")
 	parser := command.NewArgParser(groupArgResolver{Client: env.base})
 
-	_, err := parser.Parse(ctx, handlers.GroupArgSpec, []string{"channel", "add", itoa(channelID), "WI"})
+	_, err := parser.Parse(
+		ctx,
+		handlers.GroupArgSpec,
+		[]string{"channel", "add", itoa(channelID), "WI"},
+	)
 	var userErr command.UserError
 	if !errors.As(err, &userErr) {
 		t.Fatalf("expected UserError, got %T: %v", err, err)
@@ -1258,8 +1566,13 @@ func TestGroupFolderAddAssignsExistingChannels(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetChannelByID: %v", err)
 	}
-	if channel.Channel.FolderID == nil || *channel.Channel.FolderID != *group.ChannelGroup.ChannelFolderID {
-		t.Fatalf("channel folder ID = %v, want %d", channel.Channel.FolderID, *group.ChannelGroup.ChannelFolderID)
+	if channel.Channel.FolderID == nil ||
+		*channel.Channel.FolderID != *group.ChannelGroup.ChannelFolderID {
+		t.Fatalf(
+			"channel folder ID = %v, want %d",
+			channel.Channel.FolderID,
+			*group.ChannelGroup.ChannelFolderID,
+		)
 	}
 }
 
@@ -1297,7 +1610,11 @@ func TestGroupFolderUnassignUserErrorForChannelInDifferentFolder(t *testing.T) {
 		t.Fatalf("GetChannelByID: %v", err)
 	}
 	if channel.Channel.FolderID == nil || *channel.Channel.FolderID != otherFolder.ChannelFolderID {
-		t.Fatalf("channel folder ID = %v, want %d", channel.Channel.FolderID, otherFolder.ChannelFolderID)
+		t.Fatalf(
+			"channel folder ID = %v, want %d",
+			channel.Channel.FolderID,
+			otherFolder.ChannelFolderID,
+		)
 	}
 }
 
@@ -1320,7 +1637,9 @@ func TestGroupFolderRemoveUserErrorForChannelOutsideGroupInFolder(t *testing.T) 
 	if group.ChannelGroup.ChannelFolderID == nil {
 		t.Fatal("channel folder ID = nil after group folder add")
 	}
-	if _, _, err = env.base.UpdateChannel(ctx, extraChannelID).FolderID(*group.ChannelGroup.ChannelFolderID).Execute(); err != nil {
+	if _, _, err = env.base.UpdateChannel(ctx, extraChannelID).
+		FolderID(*group.ChannelGroup.ChannelFolderID).
+		Execute(); err != nil {
 		t.Fatalf("move extra channel to group folder: %v", err)
 	}
 
@@ -1418,7 +1737,9 @@ func TestGroupChannelCreate(t *testing.T) {
 
 	result, err := h.Handle(
 		ctx,
-		makeGroupRequest(handlers.GroupChannelCreateArgs{ChannelName: "new-channel", ShortName: "WI"}),
+		makeGroupRequest(
+			handlers.GroupChannelCreateArgs{ChannelName: "new-channel", ShortName: "WI"},
+		),
 	)
 	if err != nil {
 		t.Fatalf("Handle() failed: %v", err)
@@ -1435,6 +1756,34 @@ func TestGroupChannelCreate(t *testing.T) {
 	}
 }
 
+func TestGroupChannelCreateReusesExistingChannel(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env, groupID := newCourseTestEnv(t)
+	channelID := seedChannel(t, env.base, "existing-channel")
+	h := env.handler(allowAll{})
+
+	result, err := h.Handle(
+		ctx,
+		makeGroupRequest(
+			handlers.GroupChannelCreateArgs{ChannelName: "existing-channel", ShortName: "WI"},
+		),
+	)
+	if err != nil {
+		t.Fatalf("Handle() failed: %v", err)
+	}
+	if !strings.Contains(result.Content, "existing-channel") {
+		t.Errorf("expected result to mention channel name, got: %s", result.Content)
+	}
+	resp, _, err := env.client.GetChannelGroupChannels(ctx, groupID).Execute()
+	if err != nil {
+		t.Fatalf("GetChannelGroupChannels: %v", err)
+	}
+	if len(resp.ChannelIDs) != 1 || resp.ChannelIDs[0] != channelID {
+		t.Fatalf("group channels = %+v, want [%d]", resp.ChannelIDs, channelID)
+	}
+}
+
 func TestGroupChannelCreateUnknownGroup(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -1443,7 +1792,9 @@ func TestGroupChannelCreateUnknownGroup(t *testing.T) {
 
 	_, err := h.Handle(
 		ctx,
-		makeGroupRequest(handlers.GroupChannelCreateArgs{ChannelName: "new-channel", ShortName: "UNKNOWN"}),
+		makeGroupRequest(
+			handlers.GroupChannelCreateArgs{ChannelName: "new-channel", ShortName: "UNKNOWN"},
+		),
 	)
 	if err == nil {
 		t.Fatal("expected error for unknown group")
@@ -1458,7 +1809,9 @@ func TestGroupChannelCreatePermissionDenied(t *testing.T) {
 
 	_, err := h.Handle(
 		ctx,
-		makeGroupRequest(handlers.GroupChannelCreateArgs{ChannelName: "new-channel", ShortName: "WI"}),
+		makeGroupRequest(
+			handlers.GroupChannelCreateArgs{ChannelName: "new-channel", ShortName: "WI"},
+		),
 	)
 	if err == nil {
 		t.Fatal("expected error for non-admin user")

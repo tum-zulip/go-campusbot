@@ -2,12 +2,14 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"database/sql"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -45,7 +47,7 @@ func init() {
 	flag.StringVar(&zuliprc, "zuliprc", zuliprc, "path to zuliprc")
 	flag.StringVar(&dbPath, "db", dbPath, "path to SQLite database")
 	flag.BoolVar(&dryRunRestart, "dry-run-restart", false, "log restart exec arguments without exec-ing")
-	flag.StringVar(&logLevel, "log-level", logLevel, "log level: debug, info, warn, error")
+	flag.StringVar(&logLevel, "log-level", logLevel, "log level: verbose, debug, info, warn, error")
 	flag.Usage = func() {
 		fmt.Fprintf(flag.CommandLine.Output(), "Usage: campusbot [run] [flags]\n\n")
 		fmt.Fprintln(flag.CommandLine.Output(), "Start the Zulip campus bot.")
@@ -60,18 +62,19 @@ func main() {
 	}
 	flag.Parse()
 
-	level, err := parseLogLevel(logLevel)
+	logConfig, err := parseLogLevel(logLevel)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	logger := setupLogger(os.Stderr, level)
+	logger := setupLogger(os.Stderr, logConfig.BotLevel)
+	zulipLogger := newLogger(os.Stderr, logConfig.ZulipClientLevel)
 
 	runCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	startupCtx, cancelStartup := context.WithTimeout(runCtx, startupTimeout)
-	client, err := newZulipClient(zuliprc, logger)
+	client, err := newZulipClient(zuliprc, zulipLogger)
 	if err != nil {
 		cancelStartup()
 		logger.ErrorContext(runCtx, "failed to create Zulip client", "error", err)
@@ -153,11 +156,52 @@ func newZulipClient(rcPath string, logger *slog.Logger) (zulipclient.Client, err
 		rc,
 		zulipclient.WithClientName(zulipbot.DefaultClientName),
 		zulipclient.WithLogger(logger),
+		zulipclient.WithHTTPClient(newRetryableHTTPClient(rc)),
+		zulipclient.SkipWarnOnInsecureTLS(),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create Zulip client: %w", err)
 	}
 	return client, nil
+}
+
+func newRetryableHTTPClient(rc *zulip.RC) *http.Client {
+	defaultTransport, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		return &http.Client{Transport: resettableBodyTransport{base: http.DefaultTransport}}
+	}
+	transport := defaultTransport.Clone()
+	if rc.Insecure != nil && *rc.Insecure {
+		if transport.TLSClientConfig == nil {
+			transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+		} else {
+			transport.TLSClientConfig = transport.TLSClientConfig.Clone()
+		}
+		transport.TLSClientConfig.InsecureSkipVerify = true
+	}
+	return &http.Client{
+		Transport: resettableBodyTransport{base: transport},
+	}
+}
+
+type resettableBodyTransport struct {
+	base http.RoundTripper
+}
+
+func (t resettableBodyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.GetBody != nil {
+		body, err := req.GetBody()
+		if err != nil {
+			return nil, err
+		}
+		req.Body = body
+	}
+
+	base := t.base
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	return base.RoundTrip(req)
 }
 
 func openDatabase(path string) (*sql.DB, error) {
@@ -206,26 +250,37 @@ func execRestart(exec execFunc) error {
 	return exec(executable, os.Args, os.Environ())
 }
 
-func parseLogLevel(s string) (slog.Level, error) {
+type logConfig struct {
+	BotLevel         slog.Level
+	ZulipClientLevel slog.Level
+}
+
+func parseLogLevel(s string) (logConfig, error) {
 	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "verbose":
+		return logConfig{BotLevel: slog.LevelDebug, ZulipClientLevel: slog.LevelDebug}, nil
 	case "debug":
-		return slog.LevelDebug, nil
+		return logConfig{BotLevel: slog.LevelDebug, ZulipClientLevel: slog.LevelInfo}, nil
 	case "info":
-		return slog.LevelInfo, nil
+		return logConfig{BotLevel: slog.LevelInfo, ZulipClientLevel: slog.LevelInfo}, nil
 	case "warn", "warning":
-		return slog.LevelWarn, nil
+		return logConfig{BotLevel: slog.LevelWarn, ZulipClientLevel: slog.LevelWarn}, nil
 	case "error":
-		return slog.LevelError, nil
+		return logConfig{BotLevel: slog.LevelError, ZulipClientLevel: slog.LevelError}, nil
 	default:
-		return 0, fmt.Errorf("unknown log level %q (want debug, info, warn, or error)", s)
+		return logConfig{}, fmt.Errorf("unknown log level %q (want verbose, debug, info, warn, or error)", s)
 	}
 }
 
 func setupLogger(w io.Writer, level slog.Level) *slog.Logger {
-	handler := slog.NewTextHandler(w, &slog.HandlerOptions{Level: level})
-	logger := slog.New(handler)
+	logger := newLogger(w, level)
 	slog.SetDefault(logger)
 	return logger
+}
+
+func newLogger(w io.Writer, level slog.Level) *slog.Logger {
+	handler := slog.NewTextHandler(w, &slog.HandlerOptions{Level: level})
+	return slog.New(handler)
 }
 
 func envOrDefault(name, fallback string) string {
