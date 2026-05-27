@@ -185,6 +185,8 @@ func (bot *Bot) RestartRequested() bool {
 
 // Run consumes the Zulip event queue via realtimeevents.EventQueue, recovering
 // expired queues by re-registering. Returns true if a restart was requested.
+//
+//nolint:funlen,gocognit // event-loop branching is clearer kept with the queue lifecycle it controls
 func (bot *Bot) Run(ctx context.Context) (bool, error) {
 	if bot.repo == nil {
 		return false, errors.New("Bot.Run requires a repository (use NewBot)")
@@ -327,6 +329,8 @@ func (bot *Bot) Close() error {
 // dispatch resolves and executes a command request. Static commands (help,
 // status, restart) are handled directly; everything else goes through the
 // registry.
+//
+//nolint:funlen // dispatch is the central command boundary; splitting would obscure the command flow
 func (bot *Bot) dispatch(ctx context.Context, req command.Request) command.Result {
 	name := req.Invocation.Name
 
@@ -414,6 +418,7 @@ func (bot *Bot) dispatch(ctx context.Context, req command.Request) command.Resul
 
 // --- Static command handlers ----------------------------------------------
 
+//nolint:gochecknoglobals // static command metadata
 var (
 	helpMeta = command.Metadata{
 		Name:       "help",
@@ -970,13 +975,17 @@ func (bot *Bot) handleMessage(ctx context.Context, event events.MessageEvent) er
 	return nil
 }
 
+//nolint:funlen // reaction handling is a single transactional flow with distinct early exits
 func (bot *Bot) handleReaction(ctx context.Context, event events.ReactionEvent) error {
 	if bot.groupSubscriber == nil {
 		return nil
 	}
 
 	announcementState, ok, err := bot.repo.GetAnnouncementState(ctx)
-	if err != nil || !ok || announcementState.MessageID == nil {
+	if err != nil {
+		return err
+	}
+	if !ok || announcementState.MessageID == nil {
 		return nil
 	}
 	if event.MessageID != *announcementState.MessageID {
@@ -1009,11 +1018,14 @@ func (bot *Bot) handleReaction(ctx context.Context, event events.ReactionEvent) 
 	}
 
 	var opErr error
+	//nolint:exhaustive // only add/remove reaction events change channel group membership
 	switch op {
 	case events.EventOpAdd:
 		opErr = bot.groupSubscriber.SubscribeUser(ctx, event.UserID, mapping.ChannelGroupID)
 	case events.EventOpRemove:
 		opErr = bot.groupSubscriber.UnsubscribeUser(ctx, event.UserID, mapping.ChannelGroupID)
+	default:
+		return bot.repo.MarkReactionProcessed(ctx, event.MessageID, event.UserID, event.EmojiName, opStr)
 	}
 
 	if opErr != nil {

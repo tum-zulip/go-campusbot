@@ -23,15 +23,12 @@ type GroupCreateArgs struct {
 	EmojiName string `desc:"Emoji representing this group"`
 }
 
-// GroupAvailableArgs covers "group available" which takes no arguments.
-type GroupAvailableArgs struct{}
-
 type GroupMappingListArgs struct{}
 
 type GroupMappingSetArgs struct {
-	ShortName    string `desc:"Group short name"`
-	ZulipGroupID int64  `desc:"Zulip user group ID"`
-	EmojiName    string `desc:"Emoji name for the mapping"`
+	ShortName  string     `desc:"Group short name"`
+	ZulipGroup zulip.User `desc:"Zulip user group mention"   arg:"zulip_user_group" mention_only:"true"`
+	EmojiName  string     `desc:"Emoji name for the mapping"`
 }
 
 type GroupMappingDisableArgs struct {
@@ -68,7 +65,6 @@ var GroupArgSpec = command.SubcmdSpec{ //nolint:gochecknoglobals // package-leve
 	"subscribe":   GroupSubscribeArgs{},
 	"unsubscribe": GroupUnsubscribeArgs{},
 	"create":      GroupCreateArgs{},
-	"available":   GroupAvailableArgs{},
 	"mapping": command.SubcmdSpec{
 		"list":    GroupMappingListArgs{},
 		"set":     GroupMappingSetArgs{},

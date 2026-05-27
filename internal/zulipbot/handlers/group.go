@@ -99,8 +99,7 @@ func (h *GroupHandler) Metadata() command.Metadata {
 		AdminUsage: "group subscribe <course_short_name>\n" +
 			"group unsubscribe [-k] <course_short_name>\n" +
 			"group create <short_name> <emoji_name>\n" +
-			"group available                       (user groups visible in Zulip — use the IDs with `group mapping set`)\n" +
-			"group mapping <list|set <short_name> <zulip_user_group_id> <emoji_name>|disable <short_name>>\n" +
+			"group mapping <list|set <short_name> <zulip_user_group> <emoji_name>|disable <short_name>>\n" +
 			"group channel <add|remove|create> <channel_id_or_name> <short_name>\n" +
 			"group announce [set-message <message_id>|inspect]",
 		Permission: command.PermOpen,
@@ -116,8 +115,6 @@ func (h *GroupHandler) Handle(ctx context.Context, req command.Request) (command
 		return h.handleUnsubscribe(ctx, req, args)
 	case GroupCreateArgs:
 		return h.handleCreate(ctx, req, args)
-	case GroupAvailableArgs:
-		return h.handleAvailable(ctx, req)
 	case GroupMappingListArgs:
 		return h.handleMappingList(ctx, req)
 	case GroupMappingSetArgs:
@@ -164,7 +161,7 @@ func (h *GroupHandler) handleCreate(
 		if isDuplicateZulipUserGroupError(err) {
 			return command.Result{}, command.NewUserError(
 				fmt.Sprintf(
-					"Zulip user group `%s` already exists. Run `group available` to find its ID, then use that ID with `group mapping set`.",
+					"Zulip user group `%s` already exists. Mention the existing user group with `group mapping set`.",
 					shortName,
 				),
 			)
@@ -366,40 +363,6 @@ func (h *GroupHandler) channelGroupExists(ctx context.Context, channelGroupID in
 	return false, fmt.Errorf("check channel group %d exists: %w", channelGroupID, err)
 }
 
-// handleAvailable lists user groups visible in Zulip to the bot account.
-func (h *GroupHandler) handleAvailable(ctx context.Context, req command.Request) (command.Result, error) {
-	if err := h.auth.Check(ctx, req.Actor, command.PermAdmin); err != nil {
-		return command.Result{}, command.NewUserError("permission denied")
-	}
-
-	groups, err := h.listVisibleZulipUserGroups(ctx)
-	if err != nil {
-		return command.Result{}, err
-	}
-	if len(groups) == 0 {
-		return command.Result{Content: "No Zulip channel groups/user groups visible to this bot."}, nil
-	}
-
-	var b strings.Builder
-	b.WriteString("Zulip-visible user groups (use the id with `group mapping set`):\n")
-	for _, g := range groups {
-		name := g.Name
-		if name == "" {
-			name = "(no name)"
-		}
-		line := fmt.Sprintf("- id=%d **%s** (%d members)", g.ID, name, g.MemberCount)
-		if g.Description != "" {
-			line += fmt.Sprintf(" — %s", g.Description)
-		}
-		if g.IsSystemGroup {
-			line += " _(system group)_"
-		}
-		b.WriteString(line)
-		b.WriteByte('\n')
-	}
-	return command.Result{Content: strings.TrimSpace(b.String())}, nil
-}
-
 // unknownGroupMessage returns a permission-safe error message for an unknown channel group.
 func unknownGroupMessage(ctx context.Context, auth command.Authorizer, req command.Request, shortName string) string {
 	if auth.Check(ctx, req.Actor, command.PermAdmin) == nil {
@@ -472,11 +435,14 @@ func (h *GroupHandler) handleMappingSet(
 		return command.Result{}, command.NewUserError("permission denied")
 	}
 	shortName := args.ShortName
-	channelGroupID := args.ZulipGroupID
+	channelGroupID := args.ZulipGroup.UserID
 	emojiName := args.EmojiName
 
 	if channelGroupID <= 0 {
-		return command.Result{}, command.NewUserError("zulip_user_group_id must be a positive integer")
+		return command.Result{}, command.NewUserError("zulip_user_group must resolve to a valid Zulip user group")
+	}
+	if err := h.ensureZulipUserIsVisibleUserGroup(ctx, args.ZulipGroup); err != nil {
+		return command.Result{}, err
 	}
 
 	imported, err := h.ensureChannelGroupImported(ctx, channelGroupID)
@@ -513,6 +479,26 @@ func (h *GroupHandler) handleMappingSet(
 	}, nil
 }
 
+func (h *GroupHandler) ensureZulipUserIsVisibleUserGroup(ctx context.Context, user zulip.User) error {
+	groups, err := h.listVisibleZulipUserGroups(ctx)
+	if err != nil {
+		return fmt.Errorf("verify Zulip user group %d: %w", user.UserID, err)
+	}
+	for _, group := range groups {
+		if group.ID == user.UserID {
+			return nil
+		}
+	}
+	name := user.FullName
+	if name == "" {
+		name = fmt.Sprintf("id=%d", user.UserID)
+	}
+	return command.NewUserError(fmt.Sprintf(
+		"%s is not a visible Zulip user group. Mention a Zulip user group visible to the bot.",
+		name,
+	))
+}
+
 // zulipGroupVisible reports whether the bot can see a user group with the given
 // ID in Zulip.
 func (h *GroupHandler) zulipGroupVisible(ctx context.Context, userGroupID int64) (bool, error) {
@@ -542,7 +528,7 @@ func (h *GroupHandler) ensureChannelGroupImported(ctx context.Context, channelGr
 	}
 	if !visible {
 		return false, command.NewUserError(fmt.Sprintf(
-			"Channel group %d is not visible in Zulip. Run `group available` to see available groups.",
+			"Channel group %d is not visible in Zulip. Mention a Zulip user group visible to the bot.",
 			channelGroupID,
 		))
 	}
@@ -861,6 +847,8 @@ func (h *GroupHandler) triggerAnnouncementUpdate(ctx context.Context) {
 //
 // After a send or edit, the bot's reactions for every enabled mapping are added.
 // Reaction errors are logged but never propagated.
+//
+//nolint:nestif // send-vs-edit branches share state and are clearer than extracting partial flows
 func (h *GroupHandler) ensureAnnouncement(ctx context.Context, target *announceTarget) error {
 	mappings, err := h.repo.ListEnabledEmojiGroupMappings(ctx)
 	if err != nil {

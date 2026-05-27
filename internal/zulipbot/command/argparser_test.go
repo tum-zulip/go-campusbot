@@ -3,6 +3,7 @@ package command_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/tum-zulip/go-zulip/zulip"
@@ -307,6 +308,10 @@ type userArgs struct {
 	User zulip.User `arg:"user_id" desc:"Zulip user"`
 }
 
+type userMentionArgs struct {
+	User zulip.User `arg:"user" mention_only:"true" desc:"Zulip user mention"`
+}
+
 type fakeResolver struct {
 	users    map[int64]zulip.User
 	channels map[int64]zulip.Channel
@@ -390,6 +395,38 @@ func TestArgParserUserMentionWithEmbeddedIDResolution(t *testing.T) {
 	got := result.(userArgs)
 	if got.User.UserID != 42 {
 		t.Fatalf("UserID = %d, want 42", got.User.UserID)
+	}
+}
+
+func TestArgParserUserMentionOnlyAcceptsMention(t *testing.T) {
+	t.Parallel()
+	resolver := &fakeResolver{users: map[int64]zulip.User{
+		42: {UserID: 42, FullName: "The User Name"},
+	}}
+	parser := command.NewArgParser(resolver)
+	result, err := parser.Parse(context.Background(), userMentionArgs{}, []string{`@**The User Name|42**`})
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	got := result.(userMentionArgs)
+	if got.User.UserID != 42 {
+		t.Fatalf("UserID = %d, want 42", got.User.UserID)
+	}
+}
+
+func TestArgParserUserMentionOnlyRejectsInteger(t *testing.T) {
+	t.Parallel()
+	resolver := &fakeResolver{users: map[int64]zulip.User{
+		42: {UserID: 42, FullName: "The User Name"},
+	}}
+	parser := command.NewArgParser(resolver)
+	_, err := parser.Parse(context.Background(), userMentionArgs{}, []string{"42"})
+	var userErr command.UserError
+	if !errors.As(err, &userErr) {
+		t.Fatalf("expected UserError, got %T: %v", err, err)
+	}
+	if !strings.Contains(userErr.Message, "Zulip user mention") {
+		t.Fatalf("expected mention-only error, got %q", userErr.Message)
 	}
 }
 

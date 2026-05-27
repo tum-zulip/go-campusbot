@@ -141,7 +141,7 @@ func seedChannelGroup(t *testing.T, client channelgroup.Client, base zulipmock.C
 }
 
 // seedZulipUserGroup creates a user group in the Zulip mock so that it shows up
-// in client.GetUserGroups (i.e. `group available`). Returns the new group ID.
+// in client.GetUserGroups. Returns the new group ID.
 func seedZulipUserGroup(t *testing.T, base zulipmock.Client, name, description string, members []int64) int64 {
 	t.Helper()
 	resp, _, err := base.CreateUserGroup(context.Background()).
@@ -159,6 +159,26 @@ type groupTestEnv struct {
 	repo   *storage.Repository
 	client channelgroup.Client
 	base   zulipmock.Client
+}
+
+type groupArgResolver struct {
+	zulipmock.Client
+}
+
+func (r groupArgResolver) RenderMessage(ctx context.Context, content string) (string, error) {
+	resp, _, err := r.Client.RenderMessage(ctx).Content(content).Execute()
+	if err != nil {
+		return "", err
+	}
+	return resp.Rendered, nil
+}
+
+func (r groupArgResolver) GetUserByID(ctx context.Context, id int64) (z.User, error) {
+	resp, _, err := r.Client.GetUser(ctx, id).Execute()
+	if err != nil {
+		return z.User{}, err
+	}
+	return resp.User, nil
 }
 
 func newGroupTestEnv(t *testing.T) *groupTestEnv {
@@ -393,7 +413,7 @@ func TestGroupCreateDuplicateZulipUserGroupReturnsUserError(t *testing.T) {
 	if !errors.As(err, &userErr) {
 		t.Fatalf("expected UserError for duplicate group, got %T: %v", err, err)
 	}
-	if !strings.Contains(userErr.Message, "already exists") || !strings.Contains(userErr.Message, "group available") {
+	if !strings.Contains(userErr.Message, "already exists") || !strings.Contains(userErr.Message, "group mapping set") {
 		t.Fatalf("expected duplicate group guidance, got: %q", userErr.Message)
 	}
 }
@@ -414,70 +434,6 @@ func TestGroupCreateDeniedForNoneUser(t *testing.T) {
 	}
 }
 
-func TestGroupAvailableAdminListsZulipVisibleGroups(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	env := newGroupTestEnv(t)
-	pgdpID := seedZulipUserGroup(t, env.base, "PGDP", "Course PGDP",
-		[]int64{
-			1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
-			21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42,
-		})
-	wiID := seedZulipUserGroup(t, env.base, "WI", "", []int64{1, 2, 3, 4, 5, 6, 7})
-
-	h := env.handler(allowAll{})
-	result, err := h.Handle(ctx, makeGroupRequest(handlers.GroupAvailableArgs{}))
-	if err != nil {
-		t.Fatalf("Handle() failed: %v", err)
-	}
-	pgdpLine := "id=" + itoa(pgdpID)
-	wiLine := "id=" + itoa(wiID)
-	if !strings.Contains(result.Content, pgdpLine) || !strings.Contains(result.Content, "PGDP") {
-		t.Errorf("expected output to mention %s/PGDP, got: %s", pgdpLine, result.Content)
-	}
-	if !strings.Contains(result.Content, wiLine) || !strings.Contains(result.Content, "WI") {
-		t.Errorf("expected output to mention %s/WI, got: %s", wiLine, result.Content)
-	}
-	if !strings.Contains(result.Content, "42 members") || !strings.Contains(result.Content, "7 members") {
-		t.Errorf("expected member counts in output, got: %s", result.Content)
-	}
-	if !strings.Contains(result.Content, "Course PGDP") {
-		t.Errorf("expected description in output, got: %s", result.Content)
-	}
-	if strings.Contains(result.Content, "[imported]") || strings.Contains(result.Content, "[not imported]") {
-		t.Errorf("expected no imported/not-imported annotation, got: %s", result.Content)
-	}
-}
-
-func TestGroupAvailableAdminEmpty(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	env := newGroupTestEnv(t)
-
-	h := env.handler(allowAll{})
-	result, err := h.Handle(ctx, makeGroupRequest(handlers.GroupAvailableArgs{}))
-	if err != nil {
-		t.Fatalf("Handle() failed: %v", err)
-	}
-	if !strings.Contains(strings.ToLower(result.Content), "no zulip channel groups") {
-		t.Errorf("expected empty-state message, got: %s", result.Content)
-	}
-}
-
-func TestGroupAvailableDeniedForNoneUser(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	env := newGroupTestEnv(t)
-	seedZulipUserGroup(t, env.base, "X", "", []int64{1})
-
-	h := env.handler(denyAll{})
-	_, err := h.Handle(ctx, makeGroupRequest(handlers.GroupAvailableArgs{}))
-	var userErr command.UserError
-	if !errors.As(err, &userErr) {
-		t.Fatalf("expected UserError for denied access, got %T: %v", err, err)
-	}
-}
-
 func TestGroupMappingSetAutoImportsWhenZulipVisibleButNotLocal(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -492,7 +448,11 @@ func TestGroupMappingSetAutoImportsWhenZulipVisibleButNotLocal(t *testing.T) {
 	h := env.handler(allowAll{})
 	result, err := h.Handle(
 		ctx,
-		makeGroupRequest(handlers.GroupMappingSetArgs{ShortName: "PGDP", ZulipGroupID: groupID, EmojiName: "math"}),
+		makeGroupRequest(handlers.GroupMappingSetArgs{
+			ShortName:  "PGDP",
+			ZulipGroup: z.User{UserID: groupID, FullName: "PGDP"},
+			EmojiName:  "math",
+		}),
 	)
 	if err != nil {
 		t.Fatalf("Handle() failed: %v", err)
@@ -513,6 +473,43 @@ func TestGroupMappingSetAutoImportsWhenZulipVisibleButNotLocal(t *testing.T) {
 	}
 }
 
+func TestGroupMappingSetParsesUserGroupMention(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env := newGroupTestEnv(t)
+	groupID := seedZulipUserGroup(t, env.base, "PGDP", "", []int64{1})
+	parser := command.NewArgParser(groupArgResolver{Client: env.base})
+
+	parsed, err := parser.Parse(ctx, handlers.GroupArgSpec, []string{"mapping", "set", "PGDP", "@**PGDP**", "math"})
+	if err != nil {
+		t.Fatalf("Parse() failed: %v", err)
+	}
+	args, ok := parsed.(handlers.GroupMappingSetArgs)
+	if !ok {
+		t.Fatalf("expected GroupMappingSetArgs, got %T", parsed)
+	}
+	if args.ZulipGroup.UserID != groupID || args.ZulipGroup.FullName != "PGDP" {
+		t.Fatalf("unexpected ZulipGroup: %+v", args.ZulipGroup)
+	}
+}
+
+func TestGroupMappingSetRejectsNumericUserGroupID(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env := newGroupTestEnv(t)
+	groupID := seedZulipUserGroup(t, env.base, "PGDP", "", []int64{1})
+	parser := command.NewArgParser(groupArgResolver{Client: env.base})
+
+	_, err := parser.Parse(ctx, handlers.GroupArgSpec, []string{"mapping", "set", "PGDP", itoa(groupID), "math"})
+	var userErr command.UserError
+	if !errors.As(err, &userErr) {
+		t.Fatalf("expected UserError, got %T: %v", err, err)
+	}
+	if !strings.Contains(userErr.Message, "Zulip user mention") {
+		t.Fatalf("expected mention-only error, got %q", userErr.Message)
+	}
+}
+
 func TestGroupMappingSetSkipsAutoImportWhenAlreadyLocal(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -524,7 +521,11 @@ func TestGroupMappingSetSkipsAutoImportWhenAlreadyLocal(t *testing.T) {
 	result, err := h.Handle(
 		ctx,
 		makeGroupRequest(
-			handlers.GroupMappingSetArgs{ShortName: "NEWCOURSE", ZulipGroupID: groupID, EmojiName: "newemoji"},
+			handlers.GroupMappingSetArgs{
+				ShortName:  "NEWCOURSE",
+				ZulipGroup: z.User{UserID: groupID, FullName: "NEWCOURSE"},
+				EmojiName:  "newemoji",
+			},
 		),
 	)
 	if err != nil {
@@ -551,23 +552,56 @@ func TestGroupMappingSetRejectsWhenZulipDoesNotKnowGroup(t *testing.T) {
 	bogusID := int64(999999)
 	_, err := h.Handle(
 		ctx,
-		makeGroupRequest(handlers.GroupMappingSetArgs{ShortName: "PGDP", ZulipGroupID: bogusID, EmojiName: "math"}),
+		makeGroupRequest(handlers.GroupMappingSetArgs{
+			ShortName:  "PGDP",
+			ZulipGroup: z.User{UserID: bogusID, FullName: "PGDP"},
+			EmojiName:  "math",
+		}),
 	)
 	var userErr command.UserError
 	if !errors.As(err, &userErr) {
 		t.Fatalf("expected UserError for invisible Zulip group, got %T: %v", err, err)
 	}
-	if !strings.Contains(userErr.Message, "not visible in Zulip") {
-		t.Errorf("error should say group is not visible in Zulip, got: %q", userErr.Message)
+	if !strings.Contains(userErr.Message, "not a visible Zulip user group") {
+		t.Errorf("error should say group is not a visible Zulip user group, got: %q", userErr.Message)
 	}
-	if !strings.Contains(userErr.Message, "group available") {
-		t.Errorf("error should hint admins to run `group available`, got: %q", userErr.Message)
+	if strings.Contains(userErr.Message, "group available") {
+		t.Errorf("error should not hint admins to run removed `group available`, got: %q", userErr.Message)
 	}
 	if _, ok, err := env.repo.GetEmojiGroupMappingByShortName(ctx, "PGDP"); err != nil || ok {
 		t.Errorf("expected mapping not to be stored, got err=%v, ok=%v", err, ok)
 	}
 	if env.base.LastSentMessage() != nil {
 		t.Errorf("expected no message sent on rejected mapping, got %+v", env.base.LastSentMessage())
+	}
+}
+
+func TestGroupMappingSetRejectsPlainUser(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env := newGroupTestEnv(t)
+	env.base.AddUser(z.User{UserID: 808, FullName: "Plain User", Email: "plain@example.com"})
+	seedZulipUserGroup(t, env.base, "OtherGroup", "", []int64{1})
+	setAnnouncementConfig(t, env.repo, 1, "t")
+
+	h := env.handler(allowAll{})
+	_, err := h.Handle(
+		ctx,
+		makeGroupRequest(handlers.GroupMappingSetArgs{
+			ShortName:  "PGDP",
+			ZulipGroup: z.User{UserID: 808, FullName: "Plain User"},
+			EmojiName:  "math",
+		}),
+	)
+	var userErr command.UserError
+	if !errors.As(err, &userErr) {
+		t.Fatalf("expected UserError for plain user, got %T: %v", err, err)
+	}
+	if !strings.Contains(userErr.Message, "not a visible Zulip user group") {
+		t.Errorf("error should reject non-group user, got: %q", userErr.Message)
+	}
+	if _, ok, err := env.repo.GetEmojiGroupMappingByShortName(ctx, "PGDP"); err != nil || ok {
+		t.Errorf("expected mapping not to be stored, got err=%v, ok=%v", err, ok)
 	}
 }
 
@@ -582,7 +616,11 @@ func TestGroupMappingSetAcceptsExistingChannelGroup(t *testing.T) {
 	_, err := h.Handle(
 		ctx,
 		makeGroupRequest(
-			handlers.GroupMappingSetArgs{ShortName: "NEWCOURSE", ZulipGroupID: groupID, EmojiName: "newemoji"},
+			handlers.GroupMappingSetArgs{
+				ShortName:  "NEWCOURSE",
+				ZulipGroup: z.User{UserID: groupID, FullName: "NEWCOURSE"},
+				EmojiName:  "newemoji",
+			},
 		),
 	)
 	if err != nil {
@@ -838,8 +876,8 @@ func TestGroupMetadataAdminUsageIsSet(t *testing.T) {
 	if !strings.Contains(meta.AdminUsage, "announce") {
 		t.Errorf("AdminUsage should mention 'announce', got: %q", meta.AdminUsage)
 	}
-	if !strings.Contains(meta.AdminUsage, "group available") {
-		t.Errorf("AdminUsage should mention 'group available', got: %q", meta.AdminUsage)
+	if strings.Contains(meta.AdminUsage, "group available") {
+		t.Errorf("AdminUsage must NOT mention removed 'group available' command, got: %q", meta.AdminUsage)
 	}
 	if strings.Contains(meta.AdminUsage, "group list") {
 		t.Errorf("AdminUsage must NOT mention removed 'group list' command, got: %q", meta.AdminUsage)
@@ -856,12 +894,12 @@ func TestGroupAdminCommandDeniedForNoneUser(t *testing.T) {
 		name       string
 		parsedArgs any
 	}{
-		{"available", handlers.GroupAvailableArgs{}},
 		{"mapping_list", handlers.GroupMappingListArgs{}},
 		{"announce", handlers.GroupAnnounceArgs{}},
 		{"announce_inspect", handlers.GroupAnnounceInspectArgs{}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			_, err := h.Handle(ctx, makeGroupRequest(tc.parsedArgs))
 			var userErr command.UserError
 			if !errors.As(err, &userErr) {

@@ -345,6 +345,7 @@ func (s *channelGroups) CreateChannelGroup(ctx context.Context) CreateChannelGro
 	return CreateChannelGroupRequest{ctx: ctx, apiService: s}
 }
 
+//nolint:funlen,gocognit // request validation and provisioning rollback are kept together for atomicity
 func (s *channelGroups) CreateChannelGroupExecute(
 	r CreateChannelGroupRequest,
 ) (*CreateChannelGroupResponse, *http.Response, error) {
@@ -416,7 +417,7 @@ func (s *channelGroups) CreateChannelGroupExecute(
 			return nil, nil, rollback(err)
 		}
 		channelFolderID = sql.NullInt64{Int64: folderResp.ChannelFolderID, Valid: true}
-		group.ChannelFolderID = &channelFolderID.Int64 //nolint:govet // is currently not used, but the values in the struct should be consistent
+		group.ChannelFolderID = &channelFolderID.Int64
 	}
 
 	if len(group.ChannelIDs) > 0 && len(initialMembers) > 0 {
@@ -746,6 +747,7 @@ func (s *channelGroups) UnsubscribeFromChannelGroup(
 	return UnsubscribeFromChannelGroupRequest{ctx: ctx, apiService: s, channelGroupID: channelGroupID}
 }
 
+//nolint:funlen // unsubscribe rollback/concurrency handling is easier to audit in one flow
 func (s *channelGroups) UnsubscribeFromChannelGroupExecute(
 	r UnsubscribeFromChannelGroupRequest,
 ) (*UnsubscribeFromChannelGroupResponse, *http.Response, error) {

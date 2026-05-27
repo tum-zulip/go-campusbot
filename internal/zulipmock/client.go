@@ -894,6 +894,10 @@ func (c Client) CreateUserGroupExecute(r users.CreateUserGroupRequest) (*users.C
 		CanMentionGroup:       requestGroupSettingValue(r, "canMentionGroup"),
 		CanRemoveMembersGroup: requestGroupSettingValue(r, "canRemoveMembersGroup"),
 	}}
+	state.users[id] = zulip.User{
+		UserID:   id,
+		FullName: name,
+	}
 
 	return &users.CreateUserGroupResponse{Response: successResponse(), GroupID: id}, nil, nil
 }
@@ -1357,6 +1361,12 @@ func (Client) GetUserExecute(r users.GetUserRequest) (*users.GetUserResponse, *h
 
 	userID := requestInt64(r, "userID")
 	user, ok := state.users[userID]
+	if !ok {
+		if group, groupOK := state.userGroups[userID]; groupOK {
+			user = zulip.User{UserID: userID, FullName: group.group.Name}
+			ok = true
+		}
+	}
 	if !ok {
 		return nil, nil, fmt.Errorf("user %d not found", userID)
 	}

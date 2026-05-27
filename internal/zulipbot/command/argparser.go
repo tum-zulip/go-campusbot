@@ -187,7 +187,13 @@ func (p *ArgParser) setField(ctx context.Context, fv reflect.Value, field reflec
 		fv.SetInt(n)
 
 	case field.Type == zulipUserType:
-		n, err := p.userIDFromToken(ctx, argName, token)
+		var n int64
+		var err error
+		if field.Tag.Get("mention_only") == "true" {
+			n, err = p.userIDFromMention(ctx, argName, token)
+		} else {
+			n, err = p.userIDFromToken(ctx, argName, token)
+		}
 		if err != nil {
 			return err
 		}
@@ -260,6 +266,25 @@ func (p *ArgParser) userIDFromToken(ctx context.Context, argName, token string) 
 		return 0, NewUserError(fmt.Sprintf("%s must be a user ID or Zulip user mention, got %q", argName, token))
 	}
 	return n, nil
+}
+
+func (p *ArgParser) userIDFromMention(ctx context.Context, argName, token string) (int64, error) {
+	if _, id, ok := zulipUserMentionNameAndID(token); ok {
+		return id, nil
+	}
+	if _, ok := zulipUserMentionName(token); ok {
+		id, err := p.resolveMentionID(ctx, token, renderedUserIDPattern)
+		if err != nil {
+			if errors.Is(err, errRenderedIDNotFound) {
+				return 0, NewUserError(
+					fmt.Sprintf("%s must resolve to a valid Zulip user mention, got %q", argName, token),
+				)
+			}
+			return 0, fmt.Errorf("resolve user mention %q: %w", token, err)
+		}
+		return id, nil
+	}
+	return 0, NewUserError(fmt.Sprintf("%s must be a Zulip user mention, got %q", argName, token))
 }
 
 func (p *ArgParser) channelIDFromToken(ctx context.Context, argName, token string) (int64, error) {

@@ -60,6 +60,7 @@ func validCommandName(value string) bool {
 	return true
 }
 
+//nolint:funlen,gocognit // small shell-like scanner; splitting would spread parser state across helpers
 func splitArgs(value string) ([]string, error) {
 	var args []string
 	var current strings.Builder

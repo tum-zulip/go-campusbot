@@ -433,13 +433,6 @@ func nullableString(value string) sql.NullString {
 	return sql.NullString{String: value, Valid: value != ""}
 }
 
-func nullInt64Value(value sql.NullInt64) int64 {
-	if !value.Valid {
-		return 0
-	}
-	return value.Int64
-}
-
 func nullStringValue(value sql.NullString) string {
 	if !value.Valid {
 		return ""

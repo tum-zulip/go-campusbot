@@ -67,8 +67,8 @@ func renderTable(mappings []storage.EmojiGroupMapping) string {
 		return strings.TrimRight(b.String(), "\n")
 	}
 
-	padded := make([]storage.EmojiGroupMapping, len(mappings))
-	copy(padded, mappings)
+	padded := make([]storage.EmojiGroupMapping, 0, len(mappings)+cols-1)
+	padded = append(padded, mappings...)
 	for len(padded)%cols != 0 {
 		padded = append(padded, storage.EmojiGroupMapping{})
 	}
