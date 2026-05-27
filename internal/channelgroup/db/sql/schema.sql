@@ -20,3 +20,10 @@ CREATE TABLE IF NOT EXISTS channel_group_channels (
 
 CREATE INDEX IF NOT EXISTS channel_group_channels_channel_id_idx
   ON channel_group_channels(channel_id);
+
+CREATE TABLE IF NOT EXISTS channel_group_event_queue_state (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  queue_id TEXT NOT NULL,
+  last_event_id INTEGER NOT NULL,
+  updated_at TEXT NOT NULL
+);

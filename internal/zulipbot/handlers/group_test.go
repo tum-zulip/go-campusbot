@@ -424,7 +424,7 @@ func TestGroupCreateAdminCreatesChannelGroupAndMapping(t *testing.T) {
 	env := newGroupTestEnv(t)
 
 	h := env.handler(allowAll{})
-	result, err := h.Handle(ctx, makeGroupRequest(handlers.GroupCreateArgs{ShortName: "PGDP", EmojiName: "books"}))
+	result, err := h.Handle(ctx, makeGroupRequest(handlers.GroupCreateArgs{ShortName: "PGDP", EmojiName: ":books:"}))
 	if err != nil {
 		t.Fatalf("Handle() failed: %v", err)
 	}
@@ -444,6 +444,25 @@ func TestGroupCreateAdminCreatesChannelGroupAndMapping(t *testing.T) {
 	}
 }
 
+func TestGroupCreateRequiresColonWrappedEmojiName(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env := newGroupTestEnv(t)
+
+	h := env.handler(allowAll{})
+	_, err := h.Handle(ctx, makeGroupRequest(handlers.GroupCreateArgs{ShortName: "PGDP", EmojiName: "books"}))
+	var userErr command.UserError
+	if !errors.As(err, &userErr) {
+		t.Fatalf("expected UserError for bare emoji name, got %T: %v", err, err)
+	}
+	if !strings.Contains(userErr.Message, "<:emoji_name:>") {
+		t.Fatalf("expected colon-wrapped emoji guidance, got: %q", userErr.Message)
+	}
+	if _, ok, _ := getGroupMappingByShortName(ctx, env.queries, "PGDP"); ok {
+		t.Fatal("expected no mapping created for bare emoji name")
+	}
+}
+
 func TestGroupCreateDuplicateZulipUserGroupReturnsUserError(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -454,7 +473,7 @@ func TestGroupCreateDuplicateZulipUserGroupReturnsUserError(t *testing.T) {
 	})
 
 	h := env.handler(allowAll{})
-	_, err := h.Handle(ctx, makeGroupRequest(handlers.GroupCreateArgs{ShortName: "pgdp2", EmojiName: "books"}))
+	_, err := h.Handle(ctx, makeGroupRequest(handlers.GroupCreateArgs{ShortName: "pgdp2", EmojiName: ":books:"}))
 	var userErr command.UserError
 	if !errors.As(err, &userErr) {
 		t.Fatalf("expected UserError for duplicate group, got %T: %v", err, err)
@@ -470,7 +489,7 @@ func TestGroupCreateDeniedForNoneUser(t *testing.T) {
 	env := newGroupTestEnv(t)
 
 	h := env.handler(denyAll{})
-	_, err := h.Handle(ctx, makeGroupRequest(handlers.GroupCreateArgs{ShortName: "PGDP", EmojiName: "books"}))
+	_, err := h.Handle(ctx, makeGroupRequest(handlers.GroupCreateArgs{ShortName: "PGDP", EmojiName: ":books:"}))
 	var userErr command.UserError
 	if !errors.As(err, &userErr) {
 		t.Fatalf("expected UserError for denied create, got %T: %v", err, err)
@@ -497,7 +516,7 @@ func TestGroupMappingSetAutoImportsWhenZulipVisibleButNotLocal(t *testing.T) {
 		makeGroupRequest(handlers.GroupMappingSetArgs{
 			ShortName:  "PGDP",
 			ZulipGroup: z.User{UserID: groupID, FullName: "PGDP"},
-			EmojiName:  "math",
+			EmojiName:  ":math:",
 		}),
 	)
 	if err != nil {
@@ -526,7 +545,7 @@ func TestGroupMappingSetParsesUserGroupMention(t *testing.T) {
 	groupID := seedZulipUserGroup(t, env.base, "PGDP", []int64{1})
 	parser := command.NewArgParser(groupArgResolver{Client: env.base})
 
-	parsed, err := parser.Parse(ctx, handlers.GroupArgSpec, []string{"mapping", "set", "PGDP", "@**PGDP**", "math"})
+	parsed, err := parser.Parse(ctx, handlers.GroupArgSpec, []string{"mapping", "set", "PGDP", "@**PGDP**", ":math:"})
 	if err != nil {
 		t.Fatalf("Parse() failed: %v", err)
 	}
@@ -546,13 +565,69 @@ func TestGroupMappingSetRejectsNumericUserGroupID(t *testing.T) {
 	groupID := seedZulipUserGroup(t, env.base, "PGDP", []int64{1})
 	parser := command.NewArgParser(groupArgResolver{Client: env.base})
 
-	_, err := parser.Parse(ctx, handlers.GroupArgSpec, []string{"mapping", "set", "PGDP", itoa(groupID), "math"})
+	_, err := parser.Parse(ctx, handlers.GroupArgSpec, []string{"mapping", "set", "PGDP", itoa(groupID), ":math:"})
 	var userErr command.UserError
 	if !errors.As(err, &userErr) {
 		t.Fatalf("expected UserError, got %T: %v", err, err)
 	}
 	if !strings.Contains(userErr.Message, "Zulip user mention") {
 		t.Fatalf("expected mention-only error, got %q", userErr.Message)
+	}
+}
+
+func TestGroupMappingSetRequiresColonWrappedEmojiName(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env := newGroupTestEnv(t)
+	groupID := seedZulipUserGroup(t, env.base, "PGDP", []int64{1})
+
+	h := env.handler(allowAll{})
+	_, err := h.Handle(
+		ctx,
+		makeGroupRequest(handlers.GroupMappingSetArgs{
+			ShortName:  "PGDP",
+			ZulipGroup: z.User{UserID: groupID, FullName: "PGDP"},
+			EmojiName:  "math",
+		}),
+	)
+	var userErr command.UserError
+	if !errors.As(err, &userErr) {
+		t.Fatalf("expected UserError for bare emoji name, got %T: %v", err, err)
+	}
+	if !strings.Contains(userErr.Message, "<:emoji_name:>") {
+		t.Fatalf("expected colon-wrapped emoji guidance, got: %q", userErr.Message)
+	}
+	if _, ok, err := getGroupMappingByShortName(ctx, env.queries, "PGDP"); err != nil || ok {
+		t.Fatalf("expected no PGDP mapping, ok=%v err=%v", ok, err)
+	}
+}
+
+func TestGroupMappingSetRejectsDuplicateEnabledEmoji(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env := newGroupTestEnv(t)
+	existingGroupID := seedZulipUserGroup(t, env.base, "PGDP", []int64{1})
+	newGroupID := seedZulipUserGroup(t, env.base, "GAD", []int64{1})
+	seedGroupMapping(t, env.queries, "PGDP", "math", existingGroupID)
+
+	h := env.handler(allowAll{})
+	_, err := h.Handle(
+		ctx,
+		makeGroupRequest(handlers.GroupMappingSetArgs{
+			ShortName:  "GAD",
+			ZulipGroup: z.User{UserID: newGroupID, FullName: "GAD"},
+			EmojiName:  ":math:",
+		}),
+	)
+	var userErr command.UserError
+	if !errors.As(err, &userErr) {
+		t.Fatalf("expected UserError for duplicate emoji, got %T: %v", err, err)
+	}
+	if !strings.Contains(userErr.Message, "already mapped to `PGDP`") {
+		t.Fatalf("expected duplicate emoji guidance, got: %q", userErr.Message)
+	}
+	if _, ok, err := getGroupMappingByShortName(ctx, env.queries, "GAD"); err != nil || ok {
+		t.Fatalf("expected no GAD mapping, ok=%v err=%v", ok, err)
 	}
 }
 
@@ -570,7 +645,7 @@ func TestGroupMappingSetSkipsAutoImportWhenAlreadyLocal(t *testing.T) {
 			handlers.GroupMappingSetArgs{
 				ShortName:  "NEWCOURSE",
 				ZulipGroup: z.User{UserID: groupID, FullName: "NEWCOURSE"},
-				EmojiName:  "newemoji",
+				EmojiName:  ":newemoji:",
 			},
 		),
 	)
@@ -601,7 +676,7 @@ func TestGroupMappingSetRejectsWhenZulipDoesNotKnowGroup(t *testing.T) {
 		makeGroupRequest(handlers.GroupMappingSetArgs{
 			ShortName:  "PGDP",
 			ZulipGroup: z.User{UserID: bogusID, FullName: "PGDP"},
-			EmojiName:  "math",
+			EmojiName:  ":math:",
 		}),
 	)
 	var userErr command.UserError
@@ -636,7 +711,7 @@ func TestGroupMappingSetRejectsPlainUser(t *testing.T) {
 		makeGroupRequest(handlers.GroupMappingSetArgs{
 			ShortName:  "PGDP",
 			ZulipGroup: z.User{UserID: 808, FullName: "Plain User"},
-			EmojiName:  "math",
+			EmojiName:  ":math:",
 		}),
 	)
 	var userErr command.UserError
@@ -665,7 +740,7 @@ func TestGroupMappingSetAcceptsExistingChannelGroup(t *testing.T) {
 			handlers.GroupMappingSetArgs{
 				ShortName:  "NEWCOURSE",
 				ZulipGroup: z.User{UserID: groupID, FullName: "NEWCOURSE"},
-				EmojiName:  "newemoji",
+				EmojiName:  ":newemoji:",
 			},
 		),
 	)

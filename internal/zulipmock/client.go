@@ -48,6 +48,7 @@ const (
 	OperationGetIsUserGroupMember   Operation = "GetIsUserGroupMember"
 	OperationGetUserGroupMembers    Operation = "GetUserGroupMembers"
 	OperationGetUserGroups          Operation = "GetUserGroups"
+	OperationRegisterQueue          Operation = "RegisterQueue"
 	OperationSubscribe              Operation = "Subscribe"
 	OperationUnsubscribe            Operation = "Unsubscribe"
 	OperationUpdateChannel          Operation = "UpdateChannel"
@@ -1180,6 +1181,10 @@ func (c Client) GetEvents(ctx context.Context) realtimeevents.GetEventsRequest {
 	return withContext(withAPIService(realtimeevents.GetEventsRequest{}, c), ctx)
 }
 func (Client) GetEventsExecute(r realtimeevents.GetEventsRequest) (*realtimeevents.GetEventsResponse, *http.Response, error) {
+	if dontBlock := requestBoolPtr(r, "dontBlock"); dontBlock == nil || !*dontBlock {
+		<-requestContext(r).Done()
+		return nil, nil, requestContext(r).Err()
+	}
 	return &realtimeevents.GetEventsResponse{Response: successResponse()}, nil, nil
 }
 func (Client) GetFileTemporaryURL(_ context.Context, _arg1 int64, _arg2 string) messages.GetFileTemporaryURLRequest {
@@ -1529,7 +1534,18 @@ func (Client) RegisterPushDeviceExecute(_ mobile.RegisterPushDeviceRequest) (*zu
 func (c Client) RegisterQueue(ctx context.Context) realtimeevents.RegisterQueueRequest {
 	return withContext(withAPIService(realtimeevents.RegisterQueueRequest{}, c), ctx)
 }
-func (Client) RegisterQueueExecute(_ realtimeevents.RegisterQueueRequest) (*realtimeevents.RegisterQueueResponse, *http.Response, error) {
+func (c Client) RegisterQueueExecute(r realtimeevents.RegisterQueueRequest) (*realtimeevents.RegisterQueueResponse, *http.Response, error) {
+	state := c.ensureState()
+	if err := state.waitForTurn(requestContext(r), OperationRegisterQueue, ""); err != nil {
+		return nil, nil, err
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+
+	if err := state.failLocked(OperationRegisterQueue); err != nil {
+		return nil, nil, err
+	}
+
 	queueID := "mock-channelgroup-queue"
 	return &realtimeevents.RegisterQueueResponse{
 		Response:    successResponse(),

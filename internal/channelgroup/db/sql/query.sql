@@ -61,3 +61,20 @@ WHERE other_group_channels.channel_group_id != sqlc.arg(channel_group_id)
     WHERE current_group_channels.channel_group_id = sqlc.arg(channel_group_id)
   )
 ORDER BY channel_id, channel_group_id;
+
+-- name: GetChannelGroupEventQueueState :one
+SELECT queue_id, last_event_id, updated_at
+FROM channel_group_event_queue_state
+WHERE id = 1;
+
+-- name: SaveChannelGroupEventQueueState :exec
+INSERT INTO channel_group_event_queue_state(id, queue_id, last_event_id, updated_at)
+VALUES (1, ?, ?, ?)
+ON CONFLICT(id) DO UPDATE SET
+  queue_id = excluded.queue_id,
+  last_event_id = excluded.last_event_id,
+  updated_at = excluded.updated_at;
+
+-- name: ClearChannelGroupEventQueueState :exec
+DELETE FROM channel_group_event_queue_state
+WHERE id = 1;

@@ -153,8 +153,8 @@ func (h *GroupHandler) Metadata() command.Metadata {
 		Usage:   "group <subscribe|unsubscribe> [-k] <course_short_name>",
 		AdminUsage: "group subscribe <course_short_name>\n" +
 			"group unsubscribe [-k] <course_short_name>\n" +
-			"group create <short_name> <emoji_name>\n" +
-			"group mapping <list|set <short_name> <zulip_user_group> <emoji_name>|disable <short_name>>\n" +
+			"group create <short_name> <:emoji_name:>\n" +
+			"group mapping <list|set <short_name> <zulip_user_group> <:emoji_name:>|disable <short_name>>\n" +
 			"group channel <add|remove|create> <channel_mention_or_name> <short_name>\n" +
 			"group folder <add|remove|assign|unassign> <short_name>\n" +
 			"group announce [set-message <message_id>|inspect]",
@@ -212,9 +212,9 @@ func (h *GroupHandler) handleCreate(
 		return command.Result{}, command.NewUserError("permission denied")
 	}
 	shortName := args.ShortName
-	emojiName := args.EmojiName
-	if strings.TrimSpace(shortName) == "" || strings.TrimSpace(emojiName) == "" {
-		return command.Result{}, command.NewUserError("Usage: `group create <short_name> <emoji_name>`")
+	emojiName, err := parseEmojiName(args.EmojiName)
+	if strings.TrimSpace(shortName) == "" || err != nil {
+		return command.Result{}, command.NewUserError("Usage: `group create <short_name> <:emoji_name:>`")
 	}
 	if err := h.ensureMappingDoesNotExist(ctx, shortName, emojiName); err != nil {
 		return command.Result{}, err
@@ -310,6 +310,22 @@ func (h *GroupHandler) ensureMappingDoesNotExist(ctx context.Context, shortName,
 		}
 	}
 	return nil
+}
+
+func parseEmojiName(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if len(value) < 3 || !strings.HasPrefix(value, ":") || !strings.HasSuffix(value, ":") {
+		return "", errors.New( //nolint:staticcheck // Keep Zulip's :emoji_name: format in the user-facing error.
+			"emoji name must be written as :<name>:", //nolint:revive // Keep Zulip's :emoji_name: format in the user-facing error.
+		)
+	}
+	name := strings.TrimPrefix(strings.TrimSuffix(value, ":"), ":")
+	if name == "" || strings.Contains(name, ":") {
+		return "", errors.New( //nolint:staticcheck // Keep Zulip's :emoji_name: format in the user-facing error.
+			"emoji name must be written as :<name>:", //nolint:revive // Keep Zulip's :emoji_name: format in the user-facing error.
+		)
+	}
+	return name, nil
 }
 
 func isDuplicateZulipUserGroupError(err error) bool {
@@ -500,12 +516,20 @@ func (h *GroupHandler) handleMappingSet(
 	}
 	shortName := args.ShortName
 	channelGroupID := args.ZulipGroup.UserID
-	emojiName := args.EmojiName
+	emojiName, emojiErr := parseEmojiName(args.EmojiName)
 
 	if channelGroupID <= 0 {
 		return command.Result{}, command.NewUserError("zulip_user_group must resolve to a valid Zulip user group")
 	}
+	if emojiErr != nil {
+		return command.Result{}, command.NewUserError(
+			"Usage: `group mapping set <short_name> <zulip_user_group> <:emoji_name:>`",
+		)
+	}
 	if err := h.ensureZulipUserIsVisibleUserGroup(ctx, args.ZulipGroup); err != nil {
+		return command.Result{}, err
+	}
+	if err := h.ensureEnabledEmojiMappingAvailable(ctx, shortName, emojiName); err != nil {
 		return command.Result{}, err
 	}
 
@@ -542,6 +566,24 @@ func (h *GroupHandler) handleMappingSet(
 		Content: fmt.Sprintf("Mapped `%s` → :%s: (group %d).",
 			shortName, emojiName, channelGroupID),
 	}, nil
+}
+
+func (h *GroupHandler) ensureEnabledEmojiMappingAvailable(ctx context.Context, shortName, emojiName string) error {
+	mappings, err := h.queries.ListEnabledEmojiGroupMappings(ctx)
+	if err != nil {
+		return err
+	}
+	for _, mapping := range mappings {
+		if mapping.ShortName == shortName {
+			continue
+		}
+		if mapping.EmojiName == emojiName && mapping.ReactionType == "unicode_emoji" {
+			return command.NewUserError(
+				fmt.Sprintf("Emoji :%s: is already mapped to `%s`.", emojiName, mapping.ShortName),
+			)
+		}
+	}
+	return nil
 }
 
 func (h *GroupHandler) ensureZulipUserIsVisibleUserGroup(ctx context.Context, user zulip.User) error {

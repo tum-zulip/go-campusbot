@@ -20,15 +20,15 @@ type GroupUnsubscribeArgs struct {
 
 type GroupCreateArgs struct {
 	ShortName string `desc:"Short name for the new group"`
-	EmojiName string `desc:"Emoji representing this group"`
+	EmojiName string `desc:"Emoji representing this group, written as :name:" arg:"emoji_name"`
 }
 
 type GroupMappingListArgs struct{}
 
 type GroupMappingSetArgs struct {
 	ShortName  string     `desc:"Group short name"`
-	ZulipGroup zulip.User `desc:"Zulip user group mention"   arg:"zulip_user_group" mention_only:"true"`
-	EmojiName  string     `desc:"Emoji name for the mapping"`
+	ZulipGroup zulip.User `desc:"Zulip user group mention"                      arg:"zulip_user_group" mention_only:"true"`
+	EmojiName  string     `desc:"Emoji name for the mapping, written as :name:" arg:"emoji_name"`
 }
 
 type GroupMappingDisableArgs struct {

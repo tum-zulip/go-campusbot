@@ -74,6 +74,7 @@ type Bot struct {
 	registry        *command.Registry
 	argParser       *command.ArgParser
 	groupSubscriber GroupSubscriber
+	channelGroups   interface{ Close() error }
 
 	accepting atomic.Bool
 	requested atomic.Bool
@@ -150,6 +151,9 @@ func NewBot(
 	channelGroupClient, err := channelgroup.NewClient(ctx, bot.client, db, channelGroupOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("initialize channel group client: %w", err)
+	}
+	if closer, ok := channelGroupClient.(interface{ Close() error }); ok {
+		bot.channelGroups = closer
 	}
 	groupService := channelgroup.NewGroupService(channelGroupClient)
 	bot.groupSubscriber = groupService
@@ -277,6 +281,11 @@ func (bot *Bot) consumeQueue(ctx context.Context, state QueueState) (bool, bool,
 		}
 		return false, false, fmt.Errorf("connect to Zulip event queue: %w", connectErr)
 	}
+	defer func() {
+		if err := queue.Close(); err != nil {
+			bot.logger.WarnContext(ctx, "failed to close Zulip event queue", "error", err)
+		}
+	}()
 
 	for {
 		select {
@@ -318,6 +327,11 @@ func (bot *Bot) Close() error {
 	}
 	if !bot.closed.CompareAndSwap(false, true) {
 		return nil
+	}
+	if bot.channelGroups != nil {
+		if err := bot.channelGroups.Close(); err != nil {
+			return err
+		}
 	}
 	if !bot.requested.Load() {
 		ctx, cancel := context.WithTimeout(context.Background(), closeDeregisterTimeout)

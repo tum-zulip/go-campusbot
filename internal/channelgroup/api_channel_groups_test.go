@@ -115,6 +115,20 @@ func newTestClient(t *testing.T, base zulipmock.Client) channelgroup.Client {
 	return client
 }
 
+func readChannelGroupEventQueueState(t *testing.T, ctx context.Context, database *sql.DB) (string, int64) {
+	t.Helper()
+
+	var queueID string
+	var lastEventID int64
+	if err := database.QueryRowContext(
+		ctx,
+		"SELECT queue_id, last_event_id FROM channel_group_event_queue_state WHERE id = 1",
+	).Scan(&queueID, &lastEventID); err != nil {
+		t.Fatalf("read channel-group event queue state: %v", err)
+	}
+	return queueID, lastEventID
+}
+
 func TestCreateChannelGroupWithMockClient(t *testing.T) {
 	ctx := context.Background()
 	client := newTestClient(t, zulipmock.NewClient())
@@ -164,13 +178,20 @@ func TestCreateChannelGroupRollsBackLocalDBWritesOnChannelInsertFailure(t *testi
 			id INTEGER PRIMARY KEY,
 			channel_folder_id INTEGER
 		);
+		CREATE TABLE channel_group_event_queue_state (
+			id INTEGER PRIMARY KEY CHECK (id = 1),
+			queue_id TEXT NOT NULL,
+			last_event_id INTEGER NOT NULL,
+			updated_at TEXT NOT NULL
+		);
 	`); err != nil {
 		t.Fatalf("seed partial channelgroup schema: %v", err)
 	}
 
+	base := zulipmock.NewClient()
 	client, err := channelgroup.NewClient(
 		ctx,
-		zulipmock.NewClient(),
+		base,
 		database,
 		channelgroup.WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
 	)
@@ -180,6 +201,7 @@ func TestCreateChannelGroupRollsBackLocalDBWritesOnChannelInsertFailure(t *testi
 
 	if _, _, err = client.CreateChannelGroup(ctx).
 		Name("rollback local db write").
+		CreateChannelFolder(true).
 		ChannelIDs([]int64{101}).
 		Execute(); err == nil {
 		t.Fatal("CreateChannelGroup error = nil, want local channel insert failure")
@@ -191,6 +213,104 @@ func TestCreateChannelGroupRollsBackLocalDBWritesOnChannelInsertFailure(t *testi
 	}
 	if groupCount != 0 {
 		t.Fatalf("channel_groups count = %d, want 0 after rollback", groupCount)
+	}
+	assertOnlyChannelFolderArchived(t, ctx, base, true)
+}
+
+func TestNewClientPersistsChannelGroupEventQueue(t *testing.T) {
+	ctx := context.Background()
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	base := zulipmock.NewClient()
+	database := newTestDatabase(t)
+	_, err := channelgroup.NewClient(
+		ctx,
+		base,
+		database,
+		channelgroup.WithRunContext(runCtx),
+		channelgroup.WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
+	)
+	if err != nil {
+		t.Fatalf("NewClient error = %v", err)
+	}
+
+	queueID, lastEventID := readChannelGroupEventQueueState(t, ctx, database)
+	if queueID != "mock-channelgroup-queue" {
+		t.Fatalf("queue ID = %q, want mock-channelgroup-queue", queueID)
+	}
+	if lastEventID != 0 {
+		t.Fatalf("last event ID = %d, want 0", lastEventID)
+	}
+}
+
+func TestNewClientResumesStoredChannelGroupEventQueue(t *testing.T) {
+	ctx := context.Background()
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	base := zulipmock.NewClient()
+	database := newTestDatabase(t)
+	if _, err := database.ExecContext(ctx, `
+		INSERT INTO channel_group_event_queue_state(id, queue_id, last_event_id, updated_at)
+		VALUES (1, 'stored-channelgroup-queue', 42, '2026-05-27T00:00:00Z')
+	`); err != nil {
+		t.Fatalf("seed channel-group event queue state: %v", err)
+	}
+	base.FailNext(zulipmock.OperationRegisterQueue, errors.New("must resume stored queue"))
+
+	_, err := channelgroup.NewClient(
+		ctx,
+		base,
+		database,
+		channelgroup.WithRunContext(runCtx),
+		channelgroup.WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
+	)
+	if err != nil {
+		t.Fatalf("NewClient error = %v", err)
+	}
+
+	queueID, lastEventID := readChannelGroupEventQueueState(t, ctx, database)
+	if queueID != "stored-channelgroup-queue" {
+		t.Fatalf("queue ID = %q, want stored-channelgroup-queue", queueID)
+	}
+	if lastEventID != 42 {
+		t.Fatalf("last event ID = %d, want 42", lastEventID)
+	}
+}
+
+func TestClientCloseWaitsForChannelGroupEventListener(t *testing.T) {
+	ctx := context.Background()
+
+	base := zulipmock.NewClient()
+	database := newTestDatabase(t)
+	client, err := channelgroup.NewClient(
+		ctx,
+		base,
+		database,
+		channelgroup.WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
+	)
+	if err != nil {
+		t.Fatalf("NewClient error = %v", err)
+	}
+
+	closer, ok := client.(interface{ Close() error })
+	if !ok {
+		t.Fatal("channel-group client does not implement Close")
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- closer.Close()
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Close error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Close did not return after canceling the event listener")
 	}
 }
 

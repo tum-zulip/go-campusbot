@@ -24,6 +24,7 @@ import (
 	channelgroupdb "github.com/tum-zulip/go-campusbot/internal/channelgroup/db"
 	"github.com/tum-zulip/go-zulip/zulip"
 	"github.com/tum-zulip/go-zulip/zulip/api/channels"
+	realtimeevents "github.com/tum-zulip/go-zulip/zulip/api/real_time_events"
 	"github.com/tum-zulip/go-zulip/zulip/client"
 	"github.com/tum-zulip/go-zulip/zulip/events"
 )
@@ -115,6 +116,17 @@ func newClientWithService(base client.Client, service APIChannelGroups) Client {
 	}
 }
 
+func (c *channelGroupClient) Close() error {
+	if c == nil || c.APIChannelGroups == nil {
+		return nil
+	}
+	closer, ok := c.APIChannelGroups.(interface{ Close() error })
+	if !ok {
+		return nil
+	}
+	return closer.Close()
+}
+
 type channelGroups struct {
 	base    client.Client
 	db      *sql.DB
@@ -123,6 +135,10 @@ type channelGroups struct {
 	runCtx  context.Context // overrides the ctx passed to startChannelGroupEventListener
 
 	folderOpsMu sync.Mutex
+
+	listenerMu     sync.Mutex
+	listenerCancel context.CancelFunc
+	listenerWG     sync.WaitGroup
 }
 
 func newChannelGroups(base client.Client, database *sql.DB, opts ...ClientOption) *channelGroups {
@@ -243,7 +259,7 @@ func (s *channelGroups) startChannelGroupEventListener(ctx context.Context) erro
 	if ctx == nil {
 		return errors.New("context must not be nil")
 	}
-	queueID, lastEventID, err := s.registerChannelGroupEventQueue(ctx)
+	queueID, lastEventID, err := s.ensureChannelGroupEventQueue(ctx)
 	if err != nil {
 		return err
 	}
@@ -251,8 +267,101 @@ func (s *channelGroups) startChannelGroupEventListener(ctx context.Context) erro
 	if s.runCtx != nil {
 		goroutineCtx = s.runCtx
 	}
-	go s.runChannelGroupEventListener(goroutineCtx, queueID, lastEventID)
+	listenerCtx, cancel := context.WithCancel(goroutineCtx)
+
+	s.listenerMu.Lock()
+	s.listenerCancel = cancel
+	s.listenerWG.Add(1)
+	s.listenerMu.Unlock()
+
+	go func() {
+		defer s.listenerWG.Done()
+		s.runChannelGroupEventListener(listenerCtx, queueID, lastEventID)
+	}()
 	return nil
+}
+
+func (s *channelGroups) Close() error {
+	if s == nil {
+		return nil
+	}
+
+	s.listenerMu.Lock()
+	cancel := s.listenerCancel
+	s.listenerCancel = nil
+	s.listenerMu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+	s.listenerWG.Wait()
+	return nil
+}
+
+type channelGroupEventQueueState struct {
+	QueueID     string
+	LastEventID int64
+}
+
+func (s *channelGroups) channelGroupEventQueueState(
+	ctx context.Context,
+) (channelGroupEventQueueState, bool, error) {
+	row, err := s.queries.GetChannelGroupEventQueueState(ctx)
+	if errors.Is(err, sql.ErrNoRows) {
+		return channelGroupEventQueueState{}, false, nil
+	}
+	if err != nil {
+		return channelGroupEventQueueState{}, false, fmt.Errorf("read channel-group event queue state: %w", err)
+	}
+	return channelGroupEventQueueState{QueueID: row.QueueID, LastEventID: row.LastEventID}, true, nil
+}
+
+func (s *channelGroups) saveChannelGroupEventQueueState(
+	ctx context.Context,
+	state channelGroupEventQueueState,
+) error {
+	if state.QueueID == "" {
+		return errors.New("channel-group event queue ID must not be empty")
+	}
+	if err := s.queries.SaveChannelGroupEventQueueState(ctx, channelgroupdb.SaveChannelGroupEventQueueStateParams{
+		QueueID:     state.QueueID,
+		LastEventID: state.LastEventID,
+		UpdatedAt:   formatChannelGroupEventQueueTime(time.Now()),
+	}); err != nil {
+		return fmt.Errorf("save channel-group event queue state: %w", err)
+	}
+	return nil
+}
+
+func (s *channelGroups) ensureChannelGroupEventQueue(ctx context.Context) (string, int64, error) {
+	stored, ok, err := s.channelGroupEventQueueState(ctx)
+	if err != nil {
+		return "", 0, err
+	}
+	if ok {
+		s.logger.InfoContext(ctx, "resuming channel-group Zulip event queue",
+			"queue_id", stored.QueueID,
+			"last_event_id", stored.LastEventID)
+		return stored.QueueID, stored.LastEventID, nil
+	}
+	return s.registerAndSaveChannelGroupEventQueue(ctx)
+}
+
+func (s *channelGroups) registerAndSaveChannelGroupEventQueue(ctx context.Context) (string, int64, error) {
+	queueID, lastEventID, err := s.registerChannelGroupEventQueue(ctx)
+	if err != nil {
+		return "", 0, err
+	}
+	if err := s.saveChannelGroupEventQueueState(ctx, channelGroupEventQueueState{
+		QueueID:     queueID,
+		LastEventID: lastEventID,
+	}); err != nil {
+		return "", 0, err
+	}
+	s.logger.InfoContext(ctx, "registered channel-group Zulip event queue",
+		"queue_id", queueID,
+		"last_event_id", lastEventID)
+	return queueID, lastEventID, nil
 }
 
 func (s *channelGroups) registerChannelGroupEventQueue(ctx context.Context) (string, int64, error) {
@@ -276,42 +385,174 @@ func (s *channelGroups) registerChannelGroupEventQueue(ctx context.Context) (str
 }
 
 func (s *channelGroups) runChannelGroupEventListener(ctx context.Context, queueID string, lastEventID int64) {
-	defer s.deleteChannelGroupEventQueue(queueID)
+	for {
+		var retry bool
+		var err error
+		retry, lastEventID, err = s.consumeChannelGroupEventQueue(ctx, queueID, lastEventID)
+		if ctx.Err() != nil {
+			return
+		}
+		if err != nil && !retry {
+			s.logger.WarnContext(ctx, "failed to consume channel-group Zulip event queue", "error", err)
+			if !waitChannelGroupEventQueueRetry(ctx) {
+				return
+			}
+			continue
+		}
+		if !retry {
+			return
+		}
+
+		s.logger.WarnContext(
+			ctx,
+			"channel-group Zulip event queue expired; registering a new queue; events may have been missed",
+			"queue_id",
+			queueID,
+			"last_event_id",
+			lastEventID,
+			"error",
+			err,
+		)
+		if clearErr := s.queries.ClearChannelGroupEventQueueState(ctx); clearErr != nil {
+			s.logger.WarnContext(ctx, "failed to clear expired channel-group event queue state", "error", clearErr)
+		}
+		newQueueID, replacementLastEventID, registerErr := s.registerAndSaveChannelGroupEventQueue(ctx)
+		if registerErr != nil {
+			s.logger.WarnContext(
+				ctx,
+				"failed to register replacement channel-group Zulip event queue",
+				"error",
+				registerErr,
+			)
+			if !waitChannelGroupEventQueueRetry(ctx) {
+				return
+			}
+			continue
+		}
+		queueID = newQueueID
+		lastEventID = replacementLastEventID
+	}
+}
+
+func (s *channelGroups) consumeChannelGroupEventQueue(
+	ctx context.Context,
+	queueID string,
+	lastEventID int64,
+) (bool, int64, error) {
+	errs := make(chan error, 1)
+	queue := realtimeevents.NewEventQueue(
+		s.base,
+		realtimeevents.WithLogger(s.logger),
+		realtimeevents.WithEventQueueChannelErrorHandler(s.logger, errs),
+	)
+
+	queueCtx, cancelQueue := context.WithCancel(ctx)
+	defer cancelQueue()
+
+	eventCh, err := queue.Connect(queueCtx, queueID, lastEventID)
+	if err != nil {
+		if isBadChannelGroupEventQueueID(err) {
+			return true, lastEventID, err
+		}
+		return false, lastEventID, fmt.Errorf("connect to channel-group Zulip event queue: %w", err)
+	}
+	defer func() {
+		if closeErr := queue.Close(); closeErr != nil {
+			s.logger.WarnContext(ctx, "failed to close channel-group Zulip event queue", "error", closeErr)
+		}
+	}()
 
 	for {
-		resp, _, err := s.base.GetEvents(ctx).
-			QueueID(queueID).
-			LastEventID(lastEventID).
-			Execute()
-		if err != nil {
-			if ctx.Err() != nil {
-				return
+		select {
+		case <-ctx.Done():
+			return false, lastEventID, nil
+		case event, ok := <-eventCh:
+			if !ok {
+				return consumeClosedChannelGroupEventQueue(ctx, errs, lastEventID)
 			}
-			s.logger.WarnContext(ctx, "failed to poll channel-group Zulip event queue", "error", err)
-			timer := time.NewTimer(time.Second)
-			select {
-			case <-ctx.Done():
-				timer.Stop()
-				return
-			case <-timer.C:
+			lastEventID = s.handlePolledChannelGroupEvent(ctx, queueID, event, lastEventID)
+		case pollErr := <-errs:
+			if isBadChannelGroupEventQueueID(pollErr) {
+				return true, lastEventID, pollErr
 			}
-			continue
-		}
-		if resp == nil {
-			continue
-		}
-
-		for _, event := range resp.Events {
-			if err = s.handleChannelGroupEvent(ctx, event); err != nil {
-				s.logger.WarnContext(ctx, "failed to process channel-group Zulip event",
-					"event_id", event.GetID(),
-					"error", err,
-				)
-				continue
-			}
-			lastEventID = event.GetID()
+			s.logger.WarnContext(ctx, "failed to poll channel-group Zulip event queue", "error", pollErr)
 		}
 	}
+}
+
+func consumeClosedChannelGroupEventQueue(
+	ctx context.Context,
+	errs <-chan error,
+	lastEventID int64,
+) (bool, int64, error) {
+	select {
+	case pollErr := <-errs:
+		if isBadChannelGroupEventQueueID(pollErr) {
+			return true, lastEventID, pollErr
+		}
+		return false, lastEventID, pollErr
+	default:
+		return false, lastEventID, ctx.Err()
+	}
+}
+
+func (s *channelGroups) handlePolledChannelGroupEvent(
+	ctx context.Context,
+	queueID string,
+	event events.Event,
+	lastEventID int64,
+) int64 {
+	if event == nil {
+		s.logger.WarnContext(ctx, "received nil channel-group Zulip event")
+		return lastEventID
+	}
+	if err := s.handleChannelGroupEvent(ctx, event); err != nil {
+		s.logger.WarnContext(ctx, "failed to process channel-group Zulip event",
+			"event_id", event.GetID(),
+			"error", err,
+		)
+		return lastEventID
+	}
+
+	lastEventID = event.GetID()
+	if err := s.saveChannelGroupEventQueueState(ctx, channelGroupEventQueueState{
+		QueueID:     queueID,
+		LastEventID: lastEventID,
+	}); err != nil {
+		s.logger.WarnContext(ctx, "failed to persist channel-group Zulip event queue state",
+			"queue_id", queueID,
+			"last_event_id", lastEventID,
+			"error", err,
+		)
+	}
+	return lastEventID
+}
+
+func waitChannelGroupEventQueueRetry(ctx context.Context) bool {
+	timer := time.NewTimer(time.Second)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+func formatChannelGroupEventQueueTime(value time.Time) string {
+	return value.UTC().Format(time.RFC3339Nano)
+}
+
+func isBadChannelGroupEventQueueID(err error) bool {
+	if err == nil {
+		return false
+	}
+	var badQueue zulip.BadEventQueueIDError
+	if errors.As(err, &badQueue) {
+		return true
+	}
+	var coded zulip.CodedError
+	return errors.As(err, &coded) && coded.Code == "BAD_EVENT_QUEUE_ID"
 }
 
 func (s *channelGroups) deleteChannelGroupEventQueue(queueID string) {
@@ -450,11 +691,20 @@ func (s *channelGroups) CreateChannelGroupExecute(
 	group.ID = userGroupResp.GroupID
 	createdUserGroup := true
 	dbGroupCreated := false
+	createdChannelFolderID := int64(0)
 	rollback := func(cause error) error {
 		var rollbackErrs []error
 		if dbGroupCreated {
 			if err := s.deleteChannelGroup(r.ctx, group.ID); err != nil {
 				rollbackErrs = append(rollbackErrs, fmt.Errorf("delete local channel group %d: %w", group.ID, err))
+			}
+		}
+		if createdChannelFolderID != 0 {
+			if err := s.rollbackCreatedChannelFolder(r.ctx, createdChannelFolderID, group.ChannelIDs); err != nil {
+				rollbackErrs = append(
+					rollbackErrs,
+					fmt.Errorf("archive channel folder %d: %w", createdChannelFolderID, err),
+				)
 			}
 		}
 		if createdUserGroup {
@@ -478,6 +728,7 @@ func (s *channelGroups) CreateChannelGroupExecute(
 			return nil, nil, rollback(err)
 		}
 		channelFolderID = sql.NullInt64{Int64: folderResp.ChannelFolderID, Valid: true}
+		createdChannelFolderID = folderResp.ChannelFolderID
 		group.ChannelFolderID = &channelFolderID.Int64
 	}
 
@@ -530,6 +781,23 @@ func (s *channelGroups) CreateChannelGroupExecute(
 		Response:       successResponse(),
 		ChannelGroupID: dbGroupID,
 	}, nil, nil
+}
+
+func (s *channelGroups) rollbackCreatedChannelFolder(
+	ctx context.Context,
+	channelFolderID int64,
+	channelIDs []int64,
+) error {
+	var rollbackErrs []error
+	if len(channelIDs) > 0 {
+		if err := s.removeChannelsFromFolder(ctx, channelIDs, channelFolderID); err != nil {
+			rollbackErrs = append(rollbackErrs, fmt.Errorf("remove channels from folder: %w", err))
+		}
+	}
+	if err := s.archiveChannelFolder(ctx, channelFolderID); err != nil {
+		rollbackErrs = append(rollbackErrs, err)
+	}
+	return errors.Join(rollbackErrs...)
 }
 
 // ImportZulipUserGroup records an existing Zulip user group as a local channel
