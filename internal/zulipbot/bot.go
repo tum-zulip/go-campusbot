@@ -285,7 +285,7 @@ func (bot *Bot) Run(ctx context.Context) (bool, error) {
 	}
 }
 
-//nolint:gocognit
+//nolint:gocognit,funlen // Event queue handling is kept together to preserve the state-machine flow.
 func (bot *Bot) consumeQueue(ctx context.Context, state QueueState) (bool, bool, error) {
 	errs := make(chan error, 1)
 	queue := realtimeevents.NewEventQueue(
@@ -483,7 +483,7 @@ func permissionDeniedResult(err error) command.Result {
 // registry. The returned bool is the command-chain status: true means later
 // && commands should run, false means later || commands should run.
 //
-//nolint:funlen // dispatch is the central command boundary; splitting would obscure the command flow
+//nolint:gocognit,funlen // dispatch is the central command boundary; splitting would obscure the command flow
 func (bot *Bot) dispatchOne(ctx context.Context, req command.Request) (command.Result, bool) {
 	name := req.Invocation.Name
 	bot.logger.DebugContext(ctx, "dispatching command",

@@ -69,6 +69,7 @@ func init() {
 	}
 }
 
+//nolint:gocognit // Startup and restart wiring is intentionally kept in process order.
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "run" {
 		os.Args = append([]string{os.Args[0]}, os.Args[2:]...)

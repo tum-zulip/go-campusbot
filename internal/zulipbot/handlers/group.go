@@ -301,7 +301,7 @@ func (h *GroupHandler) Handle(ctx context.Context, req command.Request) (command
 	}
 }
 
-//nolint:funlen // Keeps the create flow in one transaction-oriented handler.
+//nolint:gocognit,funlen // Keeps the create flow in one transaction-oriented handler.
 func (h *GroupHandler) handleCreate(
 	ctx context.Context,
 	req command.Request,
@@ -945,7 +945,6 @@ func (h *GroupHandler) validateEnabledMappings(
 	return invalid, nil
 }
 
-//nolint:funlen // validation, import, and persistence form one user-facing command flow.
 func (h *GroupHandler) handleMappingSet(
 	ctx context.Context,
 	req command.Request,
@@ -1128,6 +1127,7 @@ func (h *GroupHandler) handleMappingDisable(
 	}, nil
 }
 
+//nolint:funlen // Announcement validation and target selection are kept together for a single command flow.
 func (h *GroupHandler) runAnnounce(
 	ctx context.Context,
 	req command.Request,
@@ -1649,7 +1649,7 @@ func (h *GroupHandler) triggerAnnouncementUpdate(ctx context.Context) {
 // After a send or edit, the bot's reactions are reconciled with the enabled mappings.
 // Reaction errors are logged but never propagated.
 //
-//nolint:nestif // send-vs-edit branches share state and are clearer than extracting partial flows
+//nolint:gocognit,nestif // send-vs-edit branches share state and are clearer than extracting partial flows
 func (h *GroupHandler) ensureAnnouncement(ctx context.Context, target *announceTarget) error {
 	mappings, err := h.queries.ListEnabledEmojiGroupMappings(ctx)
 	if err != nil {

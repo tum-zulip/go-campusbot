@@ -87,7 +87,7 @@ func openGroupTestStorage(t *testing.T) (*sql.DB, *storagedb.Queries) {
 func seedGroupMapping(
 	t *testing.T,
 	queries *storagedb.Queries,
-	shortName, emojiName string,
+	_, emojiName string,
 	channelGroupID int64,
 ) {
 	t.Helper()
@@ -110,7 +110,7 @@ func seedGroupMapping(
 func getGroupMappingByShortName(
 	ctx context.Context,
 	queries *storagedb.Queries,
-	shortName string,
+	_ string,
 ) (storagedb.EmojiGroupMapping, bool, error) {
 	rows, err := queries.ListAllEmojiGroupMappings(ctx)
 	if err != nil {
