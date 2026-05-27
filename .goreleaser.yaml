@@ -1,0 +1,46 @@
+version: 2
+
+project_name: campusbot
+
+before:
+  hooks:
+    - go generate ./...
+
+builds:
+  - id: campusbot-linux
+    main: ./cmd/campusbot
+    binary: campusbot
+    goos:
+      - linux
+    goarch:
+      - amd64
+    env:
+      - CGO_ENABLED=1
+      - CC=gcc
+    ldflags:
+      - -s -w
+
+archives:
+  - id: campusbot
+    ids:
+      - campusbot-linux
+    formats:
+      - tar.gz
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- .Version }}_
+      {{- .Os }}_
+      {{- .Arch }}
+
+checksum:
+  name_template: checksums.txt
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
