@@ -68,10 +68,18 @@ func newDispatchTestBot(t *testing.T) *zulipbot.Bot {
 	t.Helper()
 
 	client := zulipmock.NewClient()
-	client.SetOwnUser(zulip.User{UserID: 100, Email: "bot@example.com", FullName: "Mock Bot", IsBot: true})
+	botOwnerID := int64(99)
+	client.SetOwnUser(zulip.User{
+		UserID:     100,
+		Email:      "bot@example.com",
+		FullName:   "Mock Bot",
+		IsBot:      true,
+		BotOwnerID: &botOwnerID,
+	})
 	client.AddUser(zulip.User{UserID: 100, IsBot: true})
 	client.AddUser(zulip.User{UserID: 7, Role: zulip.RoleMember})
 	client.AddUser(zulip.User{UserID: 9, Role: zulip.RoleOwner})
+	client.AddUser(zulip.User{UserID: 99, Role: zulip.RoleMember})
 
 	dbPath := filepath.Join(t.TempDir(), "bot.sqlite3")
 	db, queries := openZulipbotTestStorage(t, dbPath)
@@ -104,6 +112,15 @@ func ownerRequest(name string, args ...string) command.Request {
 		Actor:      command.Actor{UserID: 9},
 		MessageID:  42,
 		Target:     command.ReplyTarget{Kind: command.ReplyKindDirect, UserIDs: []int64{9}},
+	}
+}
+
+func botOwnerRequest(name string, args ...string) command.Request {
+	return command.Request{
+		Invocation: command.Invocation{Name: name, Args: args},
+		Actor:      command.Actor{UserID: 99},
+		MessageID:  43,
+		Target:     command.ReplyTarget{Kind: command.ReplyKindDirect, UserIDs: []int64{99}},
 	}
 }
 
@@ -161,6 +178,72 @@ func TestDispatchRestartSchedulesRestart(t *testing.T) {
 	}
 	if !bot.RestartRequested() {
 		t.Fatal("RestartRequested should be true")
+	}
+}
+
+func TestDispatchRestartDeniesNonOwner(t *testing.T) {
+	t.Parallel()
+
+	bot := newDispatchTestBot(t)
+	result := bot.Dispatch(context.Background(), memberRequest("restart"))
+	if !strings.Contains(result.Content, "permission denied") {
+		t.Fatalf("restart reply = %q", result.Content)
+	}
+	if result.AfterResponse != nil {
+		t.Fatal("restart must not schedule for non-owner")
+	}
+}
+
+func TestDispatchUpdateRequiresBotOwner(t *testing.T) {
+	t.Parallel()
+
+	bot := newDispatchTestBot(t)
+	ctx := context.Background()
+	setResult := bot.Dispatch(
+		ctx,
+		ownerRequest("config", "set", zulipbot.KeyUpdateReleaseRepo, "tum-zulip/go-campusbot"),
+	)
+	if !strings.Contains(setResult.Content, "Configuration updated") {
+		t.Fatalf("set reply = %q", setResult.Content)
+	}
+
+	result := bot.Dispatch(ctx, ownerRequest("update"))
+	if !strings.Contains(result.Content, "permission denied") {
+		t.Fatalf("update reply = %q", result.Content)
+	}
+	if result.AfterResponse != nil {
+		t.Fatal("update must not schedule for non-bot-owner")
+	}
+}
+
+func TestDispatchUpdateSchedulesRestartForBotOwner(t *testing.T) {
+	t.Parallel()
+
+	bot := newDispatchTestBot(t)
+	ctx := context.Background()
+	setResult := bot.Dispatch(
+		ctx,
+		ownerRequest("config", "set", zulipbot.KeyUpdateReleaseRepo, "tum-zulip/go-campusbot"),
+	)
+	if !strings.Contains(setResult.Content, "Configuration updated") {
+		t.Fatalf("set reply = %q", setResult.Content)
+	}
+
+	result := bot.Dispatch(ctx, botOwnerRequest("update"))
+	if !strings.Contains(result.Content, "Updating from") {
+		t.Fatalf("update reply = %q", result.Content)
+	}
+	if result.AfterResponse == nil {
+		t.Fatal("update must schedule via AfterResponse")
+	}
+	if err := result.AfterResponse(ctx); err != nil {
+		t.Fatalf("AfterResponse: %v", err)
+	}
+	if !bot.RestartRequested() {
+		t.Fatal("RestartRequested should be true")
+	}
+	if !bot.UpdateRequested() {
+		t.Fatal("UpdateRequested should be true")
 	}
 }
 

@@ -79,6 +79,7 @@ type Bot struct {
 
 	accepting atomic.Bool
 	requested atomic.Bool
+	update    atomic.Bool
 
 	closed atomic.Bool
 }
@@ -193,6 +194,13 @@ func (bot *Bot) RestartRequested() bool {
 		return false
 	}
 	return bot.requested.Load()
+}
+
+func (bot *Bot) UpdateRequested() bool {
+	if bot == nil {
+		return false
+	}
+	return bot.update.Load()
 }
 
 // Run consumes the Zulip event queue via realtimeevents.EventQueue, recovering
@@ -422,6 +430,15 @@ func shouldDispatchChained(operator command.ChainOperator, previousSucceeded boo
 	return true
 }
 
+func permissionDeniedResult(err error) command.Result {
+	if errors.Is(err, command.ErrPermissionUnavailable) {
+		return command.Result{
+			Content: "I cannot verify permissions right now, so I will not run that command.",
+		}
+	}
+	return command.Result{Content: "permission denied"}
+}
+
 // dispatchOne resolves and executes a command request. Static commands (help,
 // status, restart) are handled directly; everything else goes through the
 // registry. The returned bool is the command-chain status: true means later
@@ -443,7 +460,15 @@ func (bot *Bot) dispatchOne(ctx context.Context, req command.Request) (command.R
 	case "status":
 		return bot.handleStatus(ctx, req), true
 	case "restart":
+		if err := bot.Check(ctx, req.Actor, restartMeta.Permission); err != nil {
+			return permissionDeniedResult(err), false
+		}
 		return bot.handleRestart(ctx, req), true
+	case "update":
+		if err := bot.CheckBotOwner(req.Actor); err != nil {
+			return permissionDeniedResult(err), false
+		}
+		return bot.handleUpdate(ctx, req), true
 	case "config":
 		if err := bot.Check(ctx, req.Actor, configMeta.Permission); err != nil {
 			if errors.Is(err, command.ErrPermissionUnavailable) {
@@ -549,6 +574,13 @@ var (
 		Permission: zulip.RoleOwner,
 		Privileged: true,
 	}
+	updateMeta = command.Metadata{
+		Name:       "update",
+		Summary:    "Fetch the latest release binary and restart the bot.",
+		Usage:      "update [--new-queue]",
+		Permission: zulip.RoleOwner,
+		Privileged: true,
+	}
 )
 
 func (bot *Bot) handleHelp(ctx context.Context, req command.Request) command.Result {
@@ -572,7 +604,7 @@ func (bot *Bot) handleHelp(ctx context.Context, req command.Request) command.Res
 }
 
 func (bot *Bot) visibleMetas(role zulip.Role) []command.Metadata {
-	all := []command.Metadata{helpMeta, statusMeta, restartMeta, configMeta}
+	all := []command.Metadata{helpMeta, statusMeta, restartMeta, updateMeta, configMeta}
 	if bot.registry != nil {
 		all = append(all, bot.registry.Metadata()...)
 	}
@@ -662,6 +694,34 @@ func (bot *Bot) handleRestart(_ context.Context, req command.Request) command.Re
 			return err
 		},
 	}
+}
+
+func (bot *Bot) handleUpdate(ctx context.Context, req command.Request) command.Result {
+	repo, err := bot.stringConfig(ctx, KeyUpdateReleaseRepo)
+	if err != nil {
+		return configErrorResult(err, "read")
+	}
+	if repo == "" {
+		return command.Result{Content: fmt.Sprintf(
+			"Update release repository is not configured. Set `%s` to `owner/repo` first.",
+			KeyUpdateReleaseRepo,
+		)}
+	}
+
+	result := bot.handleRestart(ctx, req)
+	if result.AfterResponse == nil {
+		return result
+	}
+	result.Content = fmt.Sprintf(
+		"Updating from `%s`, then restarting now. I will fetch the latest GitHub release binary before the process comes back.",
+		repo,
+	)
+	afterRestart := result.AfterResponse
+	result.AfterResponse = func(ctx context.Context) error {
+		bot.update.Store(true)
+		return afterRestart(ctx)
+	}
+	return result
 }
 
 func parseRestartArgs(args []string) (bool, error) {
@@ -814,6 +874,16 @@ func (bot *Bot) Check(ctx context.Context, actor command.Actor, minRole zulip.Ro
 		return fmt.Errorf("%w: %w", command.ErrPermissionUnavailable, err)
 	}
 	if actorRole <= minRole {
+		return nil
+	}
+	return fmt.Errorf("%w", command.ErrDenied)
+}
+
+func (bot *Bot) CheckBotOwner(actor command.Actor) error {
+	if bot.ownUser.BotOwnerID == nil {
+		return fmt.Errorf("%w", command.ErrDenied)
+	}
+	if actor.UserID == *bot.ownUser.BotOwnerID {
 		return nil
 	}
 	return fmt.Errorf("%w", command.ErrDenied)

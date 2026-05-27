@@ -3,6 +3,7 @@ package handlers
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"slices"
 	"strings"
 )
 
@@ -70,16 +71,24 @@ func renderTable(mappings []AnnouncementMapping) string {
 		return strings.TrimRight(b.String(), "\n")
 	}
 
-	padded := make([]AnnouncementMapping, 0, len(mappings)+cols-1)
-	padded = append(padded, mappings...)
-	for len(padded)%cols != 0 {
-		padded = append(padded, AnnouncementMapping{})
-	}
+	sorted := append([]AnnouncementMapping(nil), mappings...)
+	slices.SortFunc(sorted, func(a, b AnnouncementMapping) int {
+		shortNameCmp := strings.Compare(strings.ToLower(a.ShortName), strings.ToLower(b.ShortName))
+		if shortNameCmp != 0 {
+			return shortNameCmp
+		}
+		return strings.Compare(a.EmojiName, b.EmojiName)
+	})
 
-	for i := 0; i < len(padded); i += cols {
+	rows := (len(sorted) + cols - 1) / cols
+	for row := range rows {
 		b.WriteString("|")
 		for col := range cols {
-			m := padded[i+col]
+			i := col*rows + row
+			var m AnnouncementMapping
+			if i < len(sorted) {
+				m = sorted[i]
+			}
 			var courseName, emojiStr string
 			if m.ShortName != "" {
 				courseName = escapeMarkdown(m.ShortName)

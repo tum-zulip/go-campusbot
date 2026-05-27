@@ -1,9 +1,12 @@
 package main
 
 import (
+	"archive/tar"
+	"compress/gzip"
 	"context"
 	"crypto/tls"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -12,6 +15,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -35,6 +40,9 @@ const (
 	restartMarkTimeout = 5 * time.Second
 
 	zulipClientMaxRetries = 32
+
+	maxHTTPErrorBodyBytes = 4 * 1024
+	maxReleaseBinaryBytes = 128 * 1024 * 1024
 )
 
 type execFunc func(path string, argv []string, env []string) error
@@ -178,6 +186,17 @@ func main() {
 	}
 
 	logger.InfoContext(runCtx, "executing requested restart")
+	if bot.UpdateRequested() {
+		repo, cfgErr := bot.ConfigString(runCtx, zulipbot.KeyUpdateReleaseRepo)
+		if cfgErr != nil {
+			logger.ErrorContext(runCtx, "failed to read update release repo", "error", cfgErr)
+			os.Exit(exitFailure)
+		}
+		if updateErr := updateExecutableFromGitHubRelease(runCtx, repo, http.DefaultClient); updateErr != nil {
+			logger.ErrorContext(runCtx, "failed to update executable", "error", updateErr)
+			os.Exit(exitFailure)
+		}
+	}
 	if restartErr := restartProcess(runCtx, bot, restartExec(dryRunRestart)); restartErr != nil {
 		logger.ErrorContext(runCtx, "failed to restart process", "error", restartErr)
 		os.Exit(exitFailure)
@@ -299,6 +318,203 @@ func execRestart(exec execFunc) error {
 		return fmt.Errorf("resolve executable for restart: %w", err)
 	}
 	return exec(executable, os.Args, os.Environ())
+}
+
+type githubRelease struct {
+	Assets []githubReleaseAsset `json:"assets"`
+}
+
+type githubReleaseAsset struct {
+	Name               string `json:"name"`
+	BrowserDownloadURL string `json:"browser_download_url"`
+}
+
+func updateExecutableFromGitHubRelease(ctx context.Context, repo string, client *http.Client) error {
+	if client == nil {
+		client = http.DefaultClient
+	}
+	release, err := latestGitHubRelease(ctx, client, repo)
+	if err != nil {
+		return err
+	}
+	asset, err := selectReleaseAsset(release.Assets)
+	if err != nil {
+		return err
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("resolve executable for update: %w", err)
+	}
+	info, err := os.Stat(executable)
+	if err != nil {
+		return fmt.Errorf("stat executable for update: %w", err)
+	}
+	download, err := os.CreateTemp(filepath.Dir(executable), "."+filepath.Base(executable)+".download-*")
+	if err != nil {
+		return fmt.Errorf("create temporary download: %w", err)
+	}
+	downloadName := download.Name()
+	defer os.Remove(downloadName)
+	if err := downloadURL(ctx, client, asset.BrowserDownloadURL, download); err != nil {
+		_ = download.Close()
+		return err
+	}
+	if err := download.Close(); err != nil {
+		return fmt.Errorf("close release asset download: %w", err)
+	}
+
+	install, err := os.CreateTemp(filepath.Dir(executable), "."+filepath.Base(executable)+".update-*")
+	if err != nil {
+		return fmt.Errorf("create temporary executable: %w", err)
+	}
+	installName := install.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(installName)
+		}
+	}()
+	if err := writeExecutableAsset(asset.Name, downloadName, filepath.Base(executable), install); err != nil {
+		_ = install.Close()
+		return err
+	}
+	if err := install.Chmod(info.Mode().Perm()); err != nil {
+		_ = install.Close()
+		return fmt.Errorf("chmod updated executable: %w", err)
+	}
+	if err := install.Close(); err != nil {
+		return fmt.Errorf("close updated executable: %w", err)
+	}
+	if err := os.Rename(installName, executable); err != nil {
+		return fmt.Errorf("install updated executable: %w", err)
+	}
+	cleanup = false
+	return nil
+}
+
+func writeExecutableAsset(assetName, path, executableName string, w io.Writer) error {
+	lowerName := strings.ToLower(assetName)
+	if strings.HasSuffix(lowerName, ".tar.gz") || strings.HasSuffix(lowerName, ".tgz") {
+		return extractTarGzExecutable(path, executableName, w)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("open downloaded release asset: %w", err)
+	}
+	defer f.Close()
+	n, err := io.Copy(w, io.LimitReader(f, maxReleaseBinaryBytes+1))
+	if err != nil {
+		return fmt.Errorf("copy downloaded release asset: %w", err)
+	}
+	if n > maxReleaseBinaryBytes {
+		return fmt.Errorf("downloaded release asset exceeds %d bytes", maxReleaseBinaryBytes)
+	}
+	return nil
+}
+
+func extractTarGzExecutable(path, executableName string, w io.Writer) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("open downloaded release archive: %w", err)
+	}
+	defer f.Close()
+	gz, err := gzip.NewReader(f)
+	if err != nil {
+		return fmt.Errorf("read downloaded release archive: %w", err)
+	}
+	defer gz.Close()
+	tr := tar.NewReader(gz)
+	for {
+		header, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("read downloaded release archive entry: %w", err)
+		}
+		if header.Typeflag != tar.TypeReg || filepath.Base(header.Name) != executableName {
+			continue
+		}
+		n, err := io.Copy(w, io.LimitReader(tr, maxReleaseBinaryBytes+1))
+		if err != nil {
+			return fmt.Errorf("extract executable from release archive: %w", err)
+		}
+		if n > maxReleaseBinaryBytes {
+			return fmt.Errorf("extracted executable exceeds %d bytes", maxReleaseBinaryBytes)
+		}
+		return nil
+	}
+	return fmt.Errorf("release archive does not contain executable %q", executableName)
+}
+
+func latestGitHubRelease(ctx context.Context, client *http.Client, repo string) (githubRelease, error) {
+	url := "https://api.github.com/repos/" + strings.Trim(repo, "/") + "/releases/latest"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return githubRelease{}, err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	if token := os.Getenv("GITHUB_TOKEN"); token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return githubRelease{}, fmt.Errorf("fetch latest GitHub release: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxHTTPErrorBodyBytes))
+		return githubRelease{}, fmt.Errorf(
+			"fetch latest GitHub release: %s: %s",
+			resp.Status,
+			strings.TrimSpace(string(body)),
+		)
+	}
+	var release githubRelease
+	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
+		return githubRelease{}, fmt.Errorf("decode latest GitHub release: %w", err)
+	}
+	return release, nil
+}
+
+func selectReleaseAsset(assets []githubReleaseAsset) (githubReleaseAsset, error) {
+	var fallback *githubReleaseAsset
+	for i := range assets {
+		name := strings.ToLower(assets[i].Name)
+		if strings.Contains(name, runtime.GOOS) && strings.Contains(name, runtime.GOARCH) {
+			return assets[i], nil
+		}
+		if fallback == nil && !strings.HasSuffix(name, ".sha256") && !strings.HasSuffix(name, ".sig") {
+			fallback = &assets[i]
+		}
+	}
+	if fallback != nil {
+		return *fallback, nil
+	}
+	return githubReleaseAsset{}, errors.New("latest GitHub release has no downloadable binary asset")
+}
+
+func downloadURL(ctx context.Context, client *http.Client, url string, w io.Writer) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return err
+	}
+	if token := os.Getenv("GITHUB_TOKEN"); token != "" && strings.Contains(url, "github.com/") {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("download release asset: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxHTTPErrorBodyBytes))
+		return fmt.Errorf("download release asset: %s: %s", resp.Status, strings.TrimSpace(string(body)))
+	}
+	if _, err := io.Copy(w, resp.Body); err != nil {
+		return fmt.Errorf("write release asset: %w", err)
+	}
+	return nil
 }
 
 type logConfig struct {

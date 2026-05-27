@@ -19,6 +19,7 @@ import (
 
 const (
 	KeyRestartStartupNotification = "restart_startup_notification"
+	KeyUpdateReleaseRepo          = "update_release_repo"
 )
 
 var errUnknownConfigKey = errors.New("unknown config key")
@@ -48,6 +49,14 @@ var configDefs = map[string]configDef{
 		ReadPermission:  zulip.RoleAdmin,
 		WritePermission: zulip.RoleAdmin,
 		Validate:        validateConfigBool,
+	},
+	KeyUpdateReleaseRepo: {
+		Key:             KeyUpdateReleaseRepo,
+		Summary:         "GitHub repository for release binaries used by the update command, in owner/repo form.",
+		Default:         "",
+		ReadPermission:  zulip.RoleOwner,
+		WritePermission: zulip.RoleOwner,
+		Validate:        validateGitHubRepo,
 	},
 	handlers.KeyAnnouncementChannelID: {
 		Key:             handlers.KeyAnnouncementChannelID,
@@ -119,6 +128,18 @@ func (bot *Bot) boolConfig(ctx context.Context, key string) (bool, error) {
 		return false, fmt.Errorf("stored config %q is not a bool: %w", key, err)
 	}
 	return parsed, nil
+}
+
+func (bot *Bot) stringConfig(ctx context.Context, key string) (string, error) {
+	v, err := bot.getConfig(ctx, key)
+	if err != nil {
+		return "", err
+	}
+	return v.Value, nil
+}
+
+func (bot *Bot) ConfigString(ctx context.Context, key string) (string, error) {
+	return bot.stringConfig(ctx, key)
 }
 
 func (bot *Bot) setConfig(
@@ -294,6 +315,15 @@ func validateConfigNonEmptyString(value string) (string, error) {
 	v := strings.TrimSpace(value)
 	if v == "" {
 		return "", errors.New("value must not be empty")
+	}
+	return v, nil
+}
+
+func validateGitHubRepo(value string) (string, error) {
+	v := strings.Trim(strings.TrimSpace(value), "/")
+	parts := strings.Split(v, "/")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", errors.New("expected GitHub repository in owner/repo form")
 	}
 	return v, nil
 }

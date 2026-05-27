@@ -46,9 +46,9 @@ func TestRenderSingleMapping(t *testing.T) {
 func TestRenderThreeMappings(t *testing.T) {
 	t.Parallel()
 	mappings := []handlers.AnnouncementMapping{
+		rendererMapping("C", "gamma", 3),
 		rendererMapping("A", "alpha", 1),
 		rendererMapping("B", "beta", 2),
-		rendererMapping("C", "gamma", 3),
 	}
 	content := handlers.RenderAnnouncement(mappings)
 	lines := strings.Split(content, "\n")
@@ -61,6 +61,33 @@ func TestRenderThreeMappings(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("expected all three mappings in one row; lines:\n%s", strings.Join(lines, "\n"))
+	}
+}
+
+func TestRenderMappingsSortsDownColumns(t *testing.T) {
+	t.Parallel()
+	mappings := []handlers.AnnouncementMapping{
+		rendererMapping("G", "golf", 7),
+		rendererMapping("C", "charlie", 3),
+		rendererMapping("A", "alpha", 1),
+		rendererMapping("I", "india", 9),
+		rendererMapping("E", "echo", 5),
+		rendererMapping("B", "bravo", 2),
+		rendererMapping("H", "hotel", 8),
+		rendererMapping("D", "delta", 4),
+		rendererMapping("F", "foxtrot", 6),
+	}
+	content := handlers.RenderAnnouncement(mappings)
+
+	expectedRows := []string{
+		"| A | :alpha: |   | D | :delta: |   | G | :golf: |",
+		"| B | :bravo: |   | E | :echo: |   | H | :hotel: |",
+		"| C | :charlie: |   | F | :foxtrot: |   | I | :india: |",
+	}
+	for _, row := range expectedRows {
+		if !strings.Contains(content, row) {
+			t.Errorf("expected row %q in rendered content:\n%s", row, content)
+		}
 	}
 }
 
