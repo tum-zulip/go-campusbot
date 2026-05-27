@@ -2,17 +2,19 @@ package zulipbot
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/tum-zulip/go-zulip/zulip"
 
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/command"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/handlers"
-	"github.com/tum-zulip/go-campusbot/internal/zulipbot/storage"
+	storagedb "github.com/tum-zulip/go-campusbot/internal/zulipbot/storage/db"
 )
 
 const (
@@ -93,12 +95,12 @@ func (bot *Bot) getConfig(ctx context.Context, key string) (configValue, error) 
 	if !ok {
 		return configValue{}, fmt.Errorf("%w: %s", errUnknownConfigKey, key)
 	}
-	stored, ok, err := bot.repo.ConfigValue(ctx, key)
+	stored, err := bot.queries.GetConfigValue(ctx, key)
+	if errors.Is(err, sql.ErrNoRows) {
+		return configValue{Def: def, Value: def.Default, IsDefault: true}, nil
+	}
 	if err != nil {
 		return configValue{}, err
-	}
-	if !ok {
-		return configValue{Def: def, Value: def.Default, IsDefault: true}, nil
 	}
 	normalized, err := def.Validate(stored)
 	if err != nil {
@@ -138,16 +140,15 @@ func (bot *Bot) setConfig(
 		return configValue{}, configValue{}, command.NewUserError(fmt.Sprintf("Invalid value for `%s`: %v", key, err))
 	}
 	newValue := configValue{Def: def, Value: normalized}
-	if err := bot.repo.SetConfigValue(ctx, storage.ConfigChange{
-		Key:              key,
-		Value:            normalized,
-		ActorUserID:      actor.UserID,
-		MessageID:        messageID,
-		OldValueRedacted: redactConfig(oldValue),
-		NewValueRedacted: redactConfig(newValue),
+	if err := bot.queries.SetConfigValue(ctx, storagedb.SetConfigValueParams{
+		Key:             key,
+		Value:           normalized,
+		UpdatedByUserID: nullableInt64(actor.UserID),
+		UpdatedAt:       formatTime(time.Now()),
 	}); err != nil {
 		return configValue{}, configValue{}, err
 	}
+	_ = messageID
 	return oldValue, newValue, nil
 }
 

@@ -14,7 +14,7 @@ const (
 	schemaBaselineName   = "channelgroup baseline"
 )
 
-//go:embed db/schema.sql
+//go:embed db/sql/schema.sql
 var schemaSQL string
 
 // Migrate applies and validates the channelgroup-owned SQLite schema.

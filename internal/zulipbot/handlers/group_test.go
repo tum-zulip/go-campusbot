@@ -17,7 +17,7 @@ import (
 	"github.com/tum-zulip/go-campusbot/internal/channelgroup"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/command"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/handlers"
-	"github.com/tum-zulip/go-campusbot/internal/zulipbot/storage"
+	storagedb "github.com/tum-zulip/go-campusbot/internal/zulipbot/storage/db"
 	"github.com/tum-zulip/go-campusbot/internal/zulipmock"
 )
 
@@ -26,20 +26,22 @@ import (
 // setAnnouncementConfig persists the announcement channel/topic config so the
 // handler's storage-backed lookups return them. Pass channelID<=0 or topic=""
 // to leave that key unset.
-func setAnnouncementConfig(t *testing.T, repo *storage.Repository, channelID int64, topic string) {
+func setAnnouncementConfig(t *testing.T, queries *storagedb.Queries, channelID int64, topic string) {
 	t.Helper()
 	if channelID > 0 {
-		if err := repo.SetConfigValue(context.Background(), storage.ConfigChange{
-			Key:   handlers.KeyAnnouncementChannelID,
-			Value: strconv.FormatInt(channelID, 10),
+		if err := queries.SetConfigValue(context.Background(), storagedb.SetConfigValueParams{
+			Key:       handlers.KeyAnnouncementChannelID,
+			Value:     strconv.FormatInt(channelID, 10),
+			UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano),
 		}); err != nil {
 			t.Fatalf("SetConfigValue(channel_id): %v", err)
 		}
 	}
 	if topic != "" {
-		if err := repo.SetConfigValue(context.Background(), storage.ConfigChange{
-			Key:   handlers.KeyAnnouncementTopic,
-			Value: topic,
+		if err := queries.SetConfigValue(context.Background(), storagedb.SetConfigValueParams{
+			Key:       handlers.KeyAnnouncementTopic,
+			Value:     topic,
+			UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano),
 		}); err != nil {
 			t.Fatalf("SetConfigValue(topic): %v", err)
 		}
@@ -58,30 +60,63 @@ func (denyAll) Check(_ context.Context, _ command.Actor, _ z.Role) error {
 
 // --- Common test helpers ---
 
-func openGroupTestRepo(t *testing.T) *storage.Repository {
+func openGroupTestStorage(t *testing.T) (*sql.DB, *storagedb.Queries) {
 	t.Helper()
-	repo, err := storage.Open(context.Background(), filepath.Join(t.TempDir(), "test.sqlite3"))
+	db, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "test.sqlite3"))
 	if err != nil {
-		t.Fatalf("storage.Open() failed: %v", err)
+		t.Fatalf("sql.Open() failed: %v", err)
 	}
-	t.Cleanup(func() { _ = repo.Close() })
-	return repo
+	db.SetMaxOpenConns(1)
+	if err := storagedb.ConfigureSQLite(context.Background(), db); err != nil {
+		_ = db.Close()
+		t.Fatalf("ConfigureSQLite() failed: %v", err)
+	}
+	if err := storagedb.InitSchema(context.Background(), db); err != nil {
+		_ = db.Close()
+		t.Fatalf("InitSchema() failed: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	return db, storagedb.New(db)
 }
 
-func seedGroupMapping(t *testing.T, repo *storage.Repository, shortName, emojiName string, channelGroupID int64) {
+func seedGroupMapping(t *testing.T, queries *storagedb.Queries, shortName, emojiName string, channelGroupID int64) {
 	t.Helper()
-	err := repo.UpsertEmojiGroupMapping(context.Background(), storage.EmojiGroupMapping{
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	err := queries.UpsertEmojiGroupMapping(context.Background(), storagedb.UpsertEmojiGroupMappingParams{
 		ShortName:      shortName,
 		ChannelGroupID: channelGroupID,
 		EmojiName:      emojiName,
 		ReactionType:   "unicode_emoji",
-		Enabled:        true,
-		CreatedAt:      time.Now(),
-		UpdatedAt:      time.Now(),
+		Enabled:        1,
+		CreatedAt:      now,
+		UpdatedAt:      now,
 	})
 	if err != nil {
 		t.Fatalf("UpsertEmojiGroupMapping() failed: %v", err)
 	}
+}
+
+func getGroupMappingByShortName(
+	ctx context.Context,
+	queries *storagedb.Queries,
+	shortName string,
+) (storagedb.EmojiGroupMapping, bool, error) {
+	row, err := queries.GetEmojiGroupMappingByShortName(ctx, shortName)
+	if errors.Is(err, sql.ErrNoRows) {
+		return storagedb.EmojiGroupMapping{}, false, nil
+	}
+	return row, err == nil, err
+}
+
+func saveAnnouncementState(ctx context.Context, queries *storagedb.Queries, messageID *int64) error {
+	var id sql.NullInt64
+	if messageID != nil {
+		id = sql.NullInt64{Int64: *messageID, Valid: true}
+	}
+	return queries.SaveAnnouncementState(ctx, storagedb.SaveAnnouncementStateParams{
+		MessageID: id,
+		UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano),
+	})
 }
 
 func makeGroupRequest(parsedArgs any) command.Request {
@@ -156,9 +191,10 @@ func seedZulipUserGroup(t *testing.T, base zulipmock.Client, name, description s
 }
 
 type groupTestEnv struct {
-	repo   *storage.Repository
-	client channelgroup.Client
-	base   zulipmock.Client
+	db      *sql.DB
+	queries *storagedb.Queries
+	client  channelgroup.Client
+	base    zulipmock.Client
 }
 
 type groupArgResolver struct {
@@ -192,29 +228,31 @@ func (r groupArgResolver) GetChannelByID(ctx context.Context, id int64) (z.Chann
 func newGroupTestEnv(t *testing.T) *groupTestEnv {
 	t.Helper()
 	client, base := newChannelGroupClient(t)
+	db, queries := openGroupTestStorage(t)
 	return &groupTestEnv{
-		repo:   openGroupTestRepo(t),
-		client: client,
-		base:   base,
+		db:      db,
+		queries: queries,
+		client:  client,
+		base:    base,
 	}
 }
 
 func (e *groupTestEnv) handler(auth command.Authorizer) *handlers.GroupHandler {
-	return handlers.NewGroupHandler(e.client, e.repo, auth, nil)
+	return handlers.NewGroupHandler(e.client, e.queries, auth, nil)
 }
 
 // announcementHash returns the rendered-content hash currently stored, or "" if
 // no announcement state exists yet. Tests use this as a proxy for "did the
 // handler run an announcement send/edit?": the hash is only saved by
 // ensureAnnouncement after a successful SendMessage/UpdateMessage call.
-func announcementHash(t *testing.T, repo *storage.Repository) string {
+func announcementHash(t *testing.T, queries *storagedb.Queries) string {
 	t.Helper()
-	state, ok, err := repo.GetAnnouncementState(context.Background())
+	state, err := queries.GetAnnouncementState(context.Background())
+	if errors.Is(err, sql.ErrNoRows) {
+		return ""
+	}
 	if err != nil {
 		t.Fatalf("GetAnnouncementState: %v", err)
-	}
-	if !ok {
-		return ""
 	}
 	return state.ContentHash
 }
@@ -226,7 +264,7 @@ func TestGroupSubscribe(t *testing.T) {
 	ctx := context.Background()
 	env := newGroupTestEnv(t)
 	groupID := seedChannelGroup(t, env.client, env.base, "WI")
-	seedGroupMapping(t, env.repo, "WI", "wi", groupID)
+	seedGroupMapping(t, env.queries, "WI", "wi", groupID)
 
 	h := env.handler(allowAll{})
 	result, err := h.Handle(ctx, makeGroupRequest(handlers.GroupSubscribeArgs{ShortName: "WI"}))
@@ -250,7 +288,7 @@ func TestGroupUnsubscribe(t *testing.T) {
 	ctx := context.Background()
 	env := newGroupTestEnv(t)
 	groupID := seedChannelGroup(t, env.client, env.base, "WI")
-	seedGroupMapping(t, env.repo, "WI", "wi", groupID)
+	seedGroupMapping(t, env.queries, "WI", "wi", groupID)
 	// Pre-subscribe the actor so unsubscribe has something to do.
 	if _, _, err := env.client.SubscribeToChannelGroup(ctx, groupID).
 		Principals(z.Principals{UserIDs: &[]int64{123}}).Execute(); err != nil {
@@ -279,7 +317,7 @@ func TestGroupUnsubscribeKeepChannels(t *testing.T) {
 	ctx := context.Background()
 	env := newGroupTestEnv(t)
 	groupID := seedChannelGroup(t, env.client, env.base, "WI")
-	seedGroupMapping(t, env.repo, "WI", "wi", groupID)
+	seedGroupMapping(t, env.queries, "WI", "wi", groupID)
 	if _, _, err := env.client.SubscribeToChannelGroup(ctx, groupID).
 		Principals(z.Principals{UserIDs: &[]int64{123}}).Execute(); err != nil {
 		t.Fatalf("pre-subscribe: %v", err)
@@ -390,7 +428,7 @@ func TestGroupCreateAdminCreatesChannelGroupAndMapping(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Handle() failed: %v", err)
 	}
-	mapping, ok, err := env.repo.GetEmojiGroupMappingByShortName(ctx, "PGDP")
+	mapping, ok, err := getGroupMappingByShortName(ctx, env.queries, "PGDP")
 	if err != nil || !ok {
 		t.Fatalf("expected created mapping, ok=%v err=%v", ok, err)
 	}
@@ -437,7 +475,7 @@ func TestGroupCreateDeniedForNoneUser(t *testing.T) {
 	if !errors.As(err, &userErr) {
 		t.Fatalf("expected UserError for denied create, got %T: %v", err, err)
 	}
-	if _, ok, _ := env.repo.GetEmojiGroupMappingByShortName(ctx, "PGDP"); ok {
+	if _, ok, _ := getGroupMappingByShortName(ctx, env.queries, "PGDP"); ok {
 		t.Fatal("expected no mapping created when permission denied")
 	}
 }
@@ -448,10 +486,10 @@ func TestGroupMappingSetAutoImportsWhenZulipVisibleButNotLocal(t *testing.T) {
 	env := newGroupTestEnv(t)
 	groupID := seedZulipUserGroup(t, env.base, "PGDP", "", []int64{1})
 	msgID := int64(555)
-	if err := env.repo.SaveAnnouncementState(ctx, storage.AnnouncementState{MessageID: &msgID}); err != nil {
+	if err := saveAnnouncementState(ctx, env.queries, &msgID); err != nil {
 		t.Fatalf("SaveAnnouncementState: %v", err)
 	}
-	setAnnouncementConfig(t, env.repo, 1, "t")
+	setAnnouncementConfig(t, env.queries, 1, "t")
 
 	h := env.handler(allowAll{})
 	result, err := h.Handle(
@@ -472,11 +510,11 @@ func TestGroupMappingSetAutoImportsWhenZulipVisibleButNotLocal(t *testing.T) {
 	if _, _, err := env.client.GetChannelGroup(ctx, groupID).Execute(); err != nil {
 		t.Errorf("expected channel group %d to exist locally after auto-import, got %v", groupID, err)
 	}
-	m, ok, err := env.repo.GetEmojiGroupMappingByShortName(ctx, "PGDP")
+	m, ok, err := getGroupMappingByShortName(ctx, env.queries, "PGDP")
 	if err != nil || !ok || m.ChannelGroupID != groupID {
 		t.Fatalf("expected mapping stored with channel group %d, got m=%+v ok=%v err=%v", groupID, m, ok, err)
 	}
-	if announcementHash(t, env.repo) == "" {
+	if announcementHash(t, env.queries) == "" {
 		t.Error("expected announcement message to be updated after successful mapping set")
 	}
 }
@@ -523,7 +561,7 @@ func TestGroupMappingSetSkipsAutoImportWhenAlreadyLocal(t *testing.T) {
 	ctx := context.Background()
 	env := newGroupTestEnv(t)
 	groupID := seedChannelGroup(t, env.client, env.base, "NEWCOURSE")
-	setAnnouncementConfig(t, env.repo, 1, "t")
+	setAnnouncementConfig(t, env.queries, 1, "t")
 
 	h := env.handler(allowAll{})
 	result, err := h.Handle(
@@ -542,7 +580,7 @@ func TestGroupMappingSetSkipsAutoImportWhenAlreadyLocal(t *testing.T) {
 	if strings.Contains(strings.ToLower(result.Content), "imported") {
 		t.Errorf("success message must not mention import when no import happened, got: %q", result.Content)
 	}
-	m, ok, err := env.repo.GetEmojiGroupMappingByShortName(ctx, "NEWCOURSE")
+	m, ok, err := getGroupMappingByShortName(ctx, env.queries, "NEWCOURSE")
 	if err != nil || !ok || m.ChannelGroupID != groupID {
 		t.Fatalf("expected mapping stored with channel group %d, got m=%+v ok=%v err=%v", groupID, m, ok, err)
 	}
@@ -553,7 +591,7 @@ func TestGroupMappingSetRejectsWhenZulipDoesNotKnowGroup(t *testing.T) {
 	ctx := context.Background()
 	env := newGroupTestEnv(t)
 	seedZulipUserGroup(t, env.base, "OtherGroup", "", []int64{1})
-	setAnnouncementConfig(t, env.repo, 1, "t")
+	setAnnouncementConfig(t, env.queries, 1, "t")
 
 	h := env.handler(allowAll{})
 	// Use an ID that does not match any seeded group.
@@ -576,7 +614,7 @@ func TestGroupMappingSetRejectsWhenZulipDoesNotKnowGroup(t *testing.T) {
 	if strings.Contains(userErr.Message, "group available") {
 		t.Errorf("error should not hint admins to run removed `group available`, got: %q", userErr.Message)
 	}
-	if _, ok, err := env.repo.GetEmojiGroupMappingByShortName(ctx, "PGDP"); err != nil || ok {
+	if _, ok, err := getGroupMappingByShortName(ctx, env.queries, "PGDP"); err != nil || ok {
 		t.Errorf("expected mapping not to be stored, got err=%v, ok=%v", err, ok)
 	}
 	if env.base.LastSentMessage() != nil {
@@ -590,7 +628,7 @@ func TestGroupMappingSetRejectsPlainUser(t *testing.T) {
 	env := newGroupTestEnv(t)
 	env.base.AddUser(z.User{UserID: 808, FullName: "Plain User", Email: "plain@example.com"})
 	seedZulipUserGroup(t, env.base, "OtherGroup", "", []int64{1})
-	setAnnouncementConfig(t, env.repo, 1, "t")
+	setAnnouncementConfig(t, env.queries, 1, "t")
 
 	h := env.handler(allowAll{})
 	_, err := h.Handle(
@@ -608,7 +646,7 @@ func TestGroupMappingSetRejectsPlainUser(t *testing.T) {
 	if !strings.Contains(userErr.Message, "not a visible Zulip user group") {
 		t.Errorf("error should reject non-group user, got: %q", userErr.Message)
 	}
-	if _, ok, err := env.repo.GetEmojiGroupMappingByShortName(ctx, "PGDP"); err != nil || ok {
+	if _, ok, err := getGroupMappingByShortName(ctx, env.queries, "PGDP"); err != nil || ok {
 		t.Errorf("expected mapping not to be stored, got err=%v, ok=%v", err, ok)
 	}
 }
@@ -618,7 +656,7 @@ func TestGroupMappingSetAcceptsExistingChannelGroup(t *testing.T) {
 	ctx := context.Background()
 	env := newGroupTestEnv(t)
 	groupID := seedChannelGroup(t, env.client, env.base, "NEWCOURSE")
-	setAnnouncementConfig(t, env.repo, 1, "t")
+	setAnnouncementConfig(t, env.queries, 1, "t")
 
 	h := env.handler(allowAll{})
 	_, err := h.Handle(
@@ -634,7 +672,7 @@ func TestGroupMappingSetAcceptsExistingChannelGroup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Handle() failed: %v", err)
 	}
-	m, ok, err := env.repo.GetEmojiGroupMappingByShortName(ctx, "NEWCOURSE")
+	m, ok, err := getGroupMappingByShortName(ctx, env.queries, "NEWCOURSE")
 	if err != nil || !ok || m.ChannelGroupID != groupID {
 		t.Fatalf("expected mapping stored with channel group %d, got m=%+v ok=%v err=%v", groupID, m, ok, err)
 	}
@@ -645,7 +683,7 @@ func TestGroupMappingListAdmin(t *testing.T) {
 	ctx := context.Background()
 	env := newGroupTestEnv(t)
 	groupID := seedChannelGroup(t, env.client, env.base, "WI")
-	seedGroupMapping(t, env.repo, "WI", "wi", groupID)
+	seedGroupMapping(t, env.queries, "WI", "wi", groupID)
 
 	h := env.handler(allowAll{})
 	result, err := h.Handle(ctx, makeGroupRequest(handlers.GroupMappingListArgs{}))
@@ -689,14 +727,14 @@ func TestGroupAnnounceRejectsInvalidEnabledMapping(t *testing.T) {
 	env := newGroupTestEnv(t)
 	// PGDP references a missing channel group 9999; WI references the imported group.
 	wiID := seedChannelGroup(t, env.client, env.base, "WI")
-	seedGroupMapping(t, env.repo, "PGDP", "pgdp", 9999)
-	seedGroupMapping(t, env.repo, "WI", "wi", wiID)
+	seedGroupMapping(t, env.queries, "PGDP", "pgdp", 9999)
+	seedGroupMapping(t, env.queries, "WI", "wi", wiID)
 
 	msgID := int64(555)
-	if err := env.repo.SaveAnnouncementState(ctx, storage.AnnouncementState{MessageID: &msgID}); err != nil {
+	if err := saveAnnouncementState(ctx, env.queries, &msgID); err != nil {
 		t.Fatalf("SaveAnnouncementState: %v", err)
 	}
-	setAnnouncementConfig(t, env.repo, 1, "t")
+	setAnnouncementConfig(t, env.queries, 1, "t")
 
 	h := env.handler(allowAll{})
 	_, err := h.Handle(ctx, makeGroupRequest(handlers.GroupAnnounceArgs{}))
@@ -707,7 +745,7 @@ func TestGroupAnnounceRejectsInvalidEnabledMapping(t *testing.T) {
 	if !strings.Contains(userErr.Message, "PGDP") || !strings.Contains(userErr.Message, "9999") {
 		t.Errorf("error should list invalid mapping PGDP/9999, got: %q", userErr.Message)
 	}
-	if got := announcementHash(t, env.repo); got != "" {
+	if got := announcementHash(t, env.queries); got != "" {
 		t.Errorf("expected no announcement update when validation fails, got hash %q", got)
 	}
 }
@@ -717,22 +755,26 @@ func TestGroupAnnounceIgnoresDisabledInvalidMapping(t *testing.T) {
 	ctx := context.Background()
 	env := newGroupTestEnv(t)
 	wiID := seedChannelGroup(t, env.client, env.base, "WI")
-	seedGroupMapping(t, env.repo, "PGDP", "pgdp", 9999)
-	if err := env.repo.SetEmojiGroupMappingEnabled(ctx, "PGDP", false); err != nil {
+	seedGroupMapping(t, env.queries, "PGDP", "pgdp", 9999)
+	if err := env.queries.SetEmojiGroupMappingEnabled(ctx, storagedb.SetEmojiGroupMappingEnabledParams{
+		Enabled:   0,
+		UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		ShortName: "PGDP",
+	}); err != nil {
 		t.Fatalf("disable mapping: %v", err)
 	}
-	seedGroupMapping(t, env.repo, "WI", "wi", wiID)
+	seedGroupMapping(t, env.queries, "WI", "wi", wiID)
 	msgID := int64(555)
-	if err := env.repo.SaveAnnouncementState(ctx, storage.AnnouncementState{MessageID: &msgID}); err != nil {
+	if err := saveAnnouncementState(ctx, env.queries, &msgID); err != nil {
 		t.Fatalf("SaveAnnouncementState: %v", err)
 	}
-	setAnnouncementConfig(t, env.repo, 1, "t")
+	setAnnouncementConfig(t, env.queries, 1, "t")
 
 	h := env.handler(allowAll{})
 	if _, err := h.Handle(ctx, makeGroupRequest(handlers.GroupAnnounceArgs{})); err != nil {
 		t.Fatalf("Handle() failed: %v", err)
 	}
-	if announcementHash(t, env.repo) == "" {
+	if announcementHash(t, env.queries) == "" {
 		t.Error("expected announcement message to be updated when only disabled mapping is invalid")
 	}
 }
@@ -742,18 +784,18 @@ func TestGroupAnnounceAllValidMappings(t *testing.T) {
 	ctx := context.Background()
 	env := newGroupTestEnv(t)
 	groupID := seedChannelGroup(t, env.client, env.base, "WI")
-	seedGroupMapping(t, env.repo, "WI", "wi", groupID)
+	seedGroupMapping(t, env.queries, "WI", "wi", groupID)
 	msgID := int64(555)
-	if err := env.repo.SaveAnnouncementState(ctx, storage.AnnouncementState{MessageID: &msgID}); err != nil {
+	if err := saveAnnouncementState(ctx, env.queries, &msgID); err != nil {
 		t.Fatalf("SaveAnnouncementState: %v", err)
 	}
-	setAnnouncementConfig(t, env.repo, 1, "t")
+	setAnnouncementConfig(t, env.queries, 1, "t")
 
 	h := env.handler(allowAll{})
 	if _, err := h.Handle(ctx, makeGroupRequest(handlers.GroupAnnounceArgs{})); err != nil {
 		t.Fatalf("Handle() failed: %v", err)
 	}
-	if announcementHash(t, env.repo) == "" {
+	if announcementHash(t, env.queries) == "" {
 		t.Error("expected announcement message to be updated for valid mappings")
 	}
 }
@@ -763,8 +805,8 @@ func TestGroupMappingListAnnotatesMissingChannelGroups(t *testing.T) {
 	ctx := context.Background()
 	env := newGroupTestEnv(t)
 	wiID := seedChannelGroup(t, env.client, env.base, "WI")
-	seedGroupMapping(t, env.repo, "PGDP", "pgdp", 9999)
-	seedGroupMapping(t, env.repo, "WI", "wi", wiID)
+	seedGroupMapping(t, env.queries, "PGDP", "pgdp", 9999)
+	seedGroupMapping(t, env.queries, "WI", "wi", wiID)
 
 	h := env.handler(allowAll{})
 	result, err := h.Handle(ctx, makeGroupRequest(handlers.GroupMappingListArgs{}))
@@ -795,7 +837,7 @@ func TestGroupAnnounceExistingMessageID(t *testing.T) {
 	ctx := context.Background()
 	env := newGroupTestEnv(t)
 	msgID := int64(555)
-	if err := env.repo.SaveAnnouncementState(ctx, storage.AnnouncementState{MessageID: &msgID}); err != nil {
+	if err := saveAnnouncementState(ctx, env.queries, &msgID); err != nil {
 		t.Fatalf("SaveAnnouncementState: %v", err)
 	}
 
@@ -807,7 +849,7 @@ func TestGroupAnnounceExistingMessageID(t *testing.T) {
 	if result.Content == "" {
 		t.Error("expected non-empty result")
 	}
-	if announcementHash(t, env.repo) == "" {
+	if announcementHash(t, env.queries) == "" {
 		t.Error("expected announcement message to be updated")
 	}
 }
@@ -838,9 +880,9 @@ func TestGroupAnnounceSetMessageValid(t *testing.T) {
 	if result.Content == "" {
 		t.Error("expected non-empty result")
 	}
-	state, ok, err := env.repo.GetAnnouncementState(ctx)
-	if err != nil || !ok || state.MessageID == nil || *state.MessageID != 12345 {
-		t.Errorf("expected message_id 12345, got state=%+v ok=%v err=%v", state, ok, err)
+	state, err := env.queries.GetAnnouncementState(ctx)
+	if err != nil || !state.MessageID.Valid || state.MessageID.Int64 != 12345 {
+		t.Errorf("expected message_id 12345, got state=%+v err=%v", state, err)
 	}
 }
 
@@ -872,7 +914,7 @@ func TestGroupMetadataAdminUsageIsSet(t *testing.T) {
 	t.Parallel()
 	env := newGroupTestEnv(t)
 	groupID := seedChannelGroup(t, env.client, env.base, "WI")
-	seedGroupMapping(t, env.repo, "WI", "wi", groupID)
+	seedGroupMapping(t, env.queries, "WI", "wi", groupID)
 	gh := env.handler(allowAll{})
 	meta := gh.Metadata()
 	if meta.AdminUsage == "" {
@@ -922,7 +964,7 @@ func TestGroupSubscribeStillWorksForNoneUser(t *testing.T) {
 	ctx := context.Background()
 	env := newGroupTestEnv(t)
 	groupID := seedChannelGroup(t, env.client, env.base, "WI")
-	seedGroupMapping(t, env.repo, "WI", "wi", groupID)
+	seedGroupMapping(t, env.queries, "WI", "wi", groupID)
 
 	h := env.handler(allowAll{})
 	result, err := h.Handle(ctx, makeGroupRequest(handlers.GroupSubscribeArgs{ShortName: "WI"}))
@@ -939,10 +981,10 @@ func TestGroupAnnounceInspect(t *testing.T) {
 	ctx := context.Background()
 	env := newGroupTestEnv(t)
 	msgID := int64(999)
-	if err := env.repo.SaveAnnouncementState(ctx, storage.AnnouncementState{MessageID: &msgID}); err != nil {
+	if err := saveAnnouncementState(ctx, env.queries, &msgID); err != nil {
 		t.Fatalf("SaveAnnouncementState: %v", err)
 	}
-	setAnnouncementConfig(t, env.repo, 42, "mytopic")
+	setAnnouncementConfig(t, env.queries, 42, "mytopic")
 
 	h := env.handler(allowAll{})
 	result, err := h.Handle(ctx, makeGroupRequest(handlers.GroupAnnounceInspectArgs{}))
@@ -963,7 +1005,7 @@ func newCourseTestEnv(t *testing.T) (*groupTestEnv, int64) {
 	t.Helper()
 	env := newGroupTestEnv(t)
 	groupID := seedChannelGroup(t, env.client, env.base, "WI")
-	seedGroupMapping(t, env.repo, "WI", "wi", groupID)
+	seedGroupMapping(t, env.queries, "WI", "wi", groupID)
 	return env, groupID
 }
 

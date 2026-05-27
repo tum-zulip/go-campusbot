@@ -16,6 +16,7 @@ package integration_test
 
 import (
 	"context"
+	"database/sql"
 	"os"
 	"testing"
 	"time"
@@ -24,7 +25,7 @@ import (
 	zulipclient "github.com/tum-zulip/go-zulip/zulip/client"
 
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot"
-	"github.com/tum-zulip/go-campusbot/internal/zulipbot/storage"
+	storagedb "github.com/tum-zulip/go-campusbot/internal/zulipbot/storage/db"
 )
 
 func requireZulipRC(t *testing.T) string {
@@ -46,23 +47,35 @@ func TestIntegration_QueueRegistrationAndCleanup(t *testing.T) {
 
 	dbPath := t.TempDir() + "/integration.sqlite3"
 	client := newIntegrationClient(t, rcPath)
-	repo, err := storage.Open(ctx, dbPath)
+	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
-		t.Fatalf("storage.Open failed: %v", err)
+		t.Fatalf("sql.Open failed: %v", err)
 	}
+	if err := storagedb.ConfigureSQLite(ctx, db); err != nil {
+		_ = db.Close()
+		t.Fatalf("ConfigureSQLite failed: %v", err)
+	}
+	if err := storagedb.InitSchema(ctx, db); err != nil {
+		_ = db.Close()
+		t.Fatalf("InitSchema failed: %v", err)
+	}
+	queries := storagedb.New(db)
 
-	app, err := zulipbot.NewApp(ctx, zulipbot.RuntimeConfig{}, client, repo)
+	bot, err := zulipbot.NewBot(ctx, zulipbot.RuntimeConfig{}, client, db, queries)
 	if err != nil {
-		_ = repo.Close()
-		t.Fatalf("NewApp failed: %v", err)
+		_ = db.Close()
+		t.Fatalf("NewBot failed: %v", err)
 	}
 	defer func() {
-		if err := app.Close(); err != nil {
-			t.Logf("app.Close: %v", err)
+		if err := bot.Close(); err != nil {
+			t.Logf("bot.Close: %v", err)
+		}
+		if err := db.Close(); err != nil {
+			t.Logf("db.Close: %v", err)
 		}
 	}()
 
-	ownUser := app.Bot().OwnUser()
+	ownUser := bot.OwnUser()
 	if ownUser.UserID == 0 {
 		t.Fatal("expected non-zero bot user ID")
 	}

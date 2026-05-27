@@ -9,7 +9,6 @@ import (
 
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/command"
-	"github.com/tum-zulip/go-campusbot/internal/zulipbot/storage"
 	"github.com/tum-zulip/go-campusbot/internal/zulipmock"
 	"github.com/tum-zulip/go-zulip/zulip"
 )
@@ -102,19 +101,16 @@ func openRestartTestBot(t *testing.T, dbPath string) (*zulipbot.Bot, zulipmock.C
 	client.SetOwnUser(zulip.User{UserID: 100, Email: "bot@example.com", FullName: "Mock Bot", IsBot: true})
 	botOwnerID := int64(99)
 	client.AddUser(zulip.User{UserID: 100, IsBot: true, BotOwnerID: &botOwnerID})
-	repo, err := storage.Open(context.Background(), dbPath)
-	if err != nil {
-		t.Fatalf("storage.Open() failed: %v", err)
-	}
+	db, queries := openZulipbotTestStorage(t, dbPath)
 
 	bot, err := zulipbot.NewBot(
 		context.Background(),
 		zulipbot.RuntimeConfig{Logger: slog.Default()},
 		client,
-		repo,
+		db,
+		queries,
 	)
 	if err != nil {
-		_ = repo.Close()
 		t.Fatalf("NewBot() failed: %v", err)
 	}
 	t.Cleanup(func() { _ = bot.Close() })

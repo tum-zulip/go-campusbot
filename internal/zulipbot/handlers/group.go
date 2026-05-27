@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -14,7 +15,7 @@ import (
 
 	"github.com/tum-zulip/go-campusbot/internal/channelgroup"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/command"
-	"github.com/tum-zulip/go-campusbot/internal/zulipbot/storage"
+	storagedb "github.com/tum-zulip/go-campusbot/internal/zulipbot/storage/db"
 )
 
 // Config keys for the channel-group announcement message. Kept here (rather
@@ -35,10 +36,10 @@ type announceTarget struct {
 
 // GroupHandler handles the "group" command.
 type GroupHandler struct {
-	client channelgroup.Client
-	repo   *storage.Repository
-	auth   command.Authorizer
-	logger *slog.Logger
+	client  channelgroup.Client
+	queries *storagedb.Queries
+	auth    command.Authorizer
+	logger  *slog.Logger
 }
 
 // NewGroupHandler creates a new GroupHandler. It uses the channelgroup.Client
@@ -46,7 +47,7 @@ type GroupHandler struct {
 // Repository for emoji-mapping, announcement-state, and config persistence.
 func NewGroupHandler(
 	client channelgroup.Client,
-	repo *storage.Repository,
+	queries *storagedb.Queries,
 	auth command.Authorizer,
 	logger *slog.Logger,
 ) *GroupHandler {
@@ -54,21 +55,72 @@ func NewGroupHandler(
 		logger = slog.Default()
 	}
 	return &GroupHandler{
-		client: client,
-		repo:   repo,
-		auth:   auth,
-		logger: logger,
+		client:  client,
+		queries: queries,
+		auth:    auth,
+		logger:  logger,
 	}
+}
+
+func formatTime(value time.Time) string {
+	return value.UTC().Format(time.RFC3339Nano)
+}
+
+func (h *GroupHandler) emojiGroupMappingByShortName(
+	ctx context.Context,
+	shortName string,
+) (storagedb.EmojiGroupMapping, bool, error) {
+	row, err := h.queries.GetEmojiGroupMappingByShortName(ctx, shortName)
+	if errors.Is(err, sql.ErrNoRows) {
+		return storagedb.EmojiGroupMapping{}, false, nil
+	}
+	if err != nil {
+		return storagedb.EmojiGroupMapping{}, false, fmt.Errorf(
+			"get emoji group mapping by short name %q: %w",
+			shortName,
+			err,
+		)
+	}
+	return row, true, nil
+}
+
+func (h *GroupHandler) announcementState(ctx context.Context) (storagedb.AnnouncementState, bool, error) {
+	row, err := h.queries.GetAnnouncementState(ctx)
+	if errors.Is(err, sql.ErrNoRows) {
+		return storagedb.AnnouncementState{}, false, nil
+	}
+	if err != nil {
+		return storagedb.AnnouncementState{}, false, fmt.Errorf("get announcement state: %w", err)
+	}
+	return row, true, nil
+}
+
+func (h *GroupHandler) saveAnnouncementState(
+	ctx context.Context,
+	messageID sql.NullInt64,
+	contentHash string,
+) error {
+	if err := h.queries.SaveAnnouncementState(ctx, storagedb.SaveAnnouncementStateParams{
+		MessageID:   messageID,
+		ContentHash: contentHash,
+		UpdatedAt:   formatTime(time.Now()),
+	}); err != nil {
+		return fmt.Errorf("save announcement state: %w", err)
+	}
+	return nil
 }
 
 // announcementChannelID returns the configured announcement channel ID. Returns
 // (0, false, nil) when unset or empty.
 func (h *GroupHandler) announcementChannelID(ctx context.Context) (int64, bool, error) {
-	raw, ok, err := h.repo.ConfigValue(ctx, KeyAnnouncementChannelID)
+	raw, err := h.queries.GetConfigValue(ctx, KeyAnnouncementChannelID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
 	if err != nil {
 		return 0, false, err
 	}
-	if !ok || raw == "" {
+	if raw == "" {
 		return 0, false, nil
 	}
 	id, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
@@ -81,11 +133,14 @@ func (h *GroupHandler) announcementChannelID(ctx context.Context) (int64, bool, 
 // announcementTopic returns the configured announcement topic. Returns
 // ("", false, nil) when unset or empty.
 func (h *GroupHandler) announcementTopic(ctx context.Context) (string, bool, error) {
-	raw, ok, err := h.repo.ConfigValue(ctx, KeyAnnouncementTopic)
+	raw, err := h.queries.GetConfigValue(ctx, KeyAnnouncementTopic)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
 	if err != nil {
 		return "", false, err
 	}
-	if !ok || raw == "" {
+	if raw == "" {
 		return "", false, nil
 	}
 	return raw, true, nil
@@ -181,7 +236,7 @@ func (h *GroupHandler) handleCreate(
 	rollback := func(cause error) error {
 		var rollbackErrs []error
 		if createdMapping {
-			if err := h.repo.DeleteEmojiGroupMappingByShortName(ctx, shortName); err != nil {
+			if err := h.queries.DeleteEmojiGroupMappingByShortName(ctx, shortName); err != nil {
 				rollbackErrs = append(rollbackErrs, err)
 			}
 		}
@@ -194,14 +249,14 @@ func (h *GroupHandler) handleCreate(
 		return fmt.Errorf("%w (rollback failed: %w)", cause, errors.Join(rollbackErrs...))
 	}
 
-	now := time.Now().UTC()
-	if err := h.repo.UpsertEmojiGroupMapping(ctx, storage.EmojiGroupMapping{
+	now := formatTime(time.Now())
+	if err := h.queries.UpsertEmojiGroupMapping(ctx, storagedb.UpsertEmojiGroupMappingParams{
 		ShortName:      shortName,
 		ChannelGroupID: channelGroupID,
 		EmojiName:      emojiName,
 		EmojiCode:      "",
 		ReactionType:   "unicode_emoji",
-		Enabled:        true,
+		Enabled:        1,
 		SortOrder:      0,
 		CreatedAt:      now,
 		UpdatedAt:      now,
@@ -240,7 +295,7 @@ func (h *GroupHandler) createChannelGroup(ctx context.Context, name string, crea
 }
 
 func (h *GroupHandler) ensureMappingDoesNotExist(ctx context.Context, shortName, emojiName string) error {
-	mappings, err := h.repo.ListAllEmojiGroupMappings(ctx)
+	mappings, err := h.queries.ListAllEmojiGroupMappings(ctx)
 	if err != nil {
 		return err
 	}
@@ -248,7 +303,7 @@ func (h *GroupHandler) ensureMappingDoesNotExist(ctx context.Context, shortName,
 		if mapping.ShortName == shortName {
 			return command.NewUserError(fmt.Sprintf("Mapping `%s` already exists.", shortName))
 		}
-		if mapping.Enabled && mapping.EmojiName == emojiName && mapping.ReactionType == "unicode_emoji" {
+		if mapping.Enabled != 0 && mapping.EmojiName == emojiName && mapping.ReactionType == "unicode_emoji" {
 			return command.NewUserError(
 				fmt.Sprintf("Emoji :%s: is already mapped to `%s`.", emojiName, mapping.ShortName),
 			)
@@ -278,7 +333,7 @@ func (h *GroupHandler) handleSubscribe(
 ) (command.Result, error) {
 	shortName := args.ShortName
 
-	mapping, found, err := h.repo.GetEmojiGroupMappingByShortName(ctx, shortName)
+	mapping, found, err := h.emojiGroupMappingByShortName(ctx, shortName)
 	if err != nil {
 		return command.Result{}, err
 	}
@@ -305,7 +360,7 @@ func (h *GroupHandler) handleUnsubscribe(
 	keepChannels := args.KeepChannels
 	shortName := args.ShortName
 
-	mapping, found, err := h.repo.GetEmojiGroupMappingByShortName(ctx, shortName)
+	mapping, found, err := h.emojiGroupMappingByShortName(ctx, shortName)
 	if err != nil {
 		return command.Result{}, err
 	}
@@ -387,7 +442,7 @@ func (h *GroupHandler) handleMappingList(ctx context.Context, req command.Reques
 	if err := h.auth.Check(ctx, req.Actor, command.PermAdmin); err != nil {
 		return command.Result{}, command.NewUserError("permission denied")
 	}
-	mappings, err := h.repo.ListAllEmojiGroupMappings(ctx)
+	mappings, err := h.queries.ListAllEmojiGroupMappings(ctx)
 	if err != nil {
 		return command.Result{}, err
 	}
@@ -399,7 +454,7 @@ func (h *GroupHandler) handleMappingList(ctx context.Context, req command.Reques
 	b.WriteString("Emoji→group mappings:\n")
 	for _, m := range mappings {
 		status := "enabled"
-		if !m.Enabled {
+		if m.Enabled == 0 {
 			status = "disabled"
 		}
 		annotation := ""
@@ -417,12 +472,12 @@ func (h *GroupHandler) handleMappingList(ctx context.Context, req command.Reques
 
 // validateEnabledMappings returns the list of enabled mappings that reference a
 // missing channel group.
-func (h *GroupHandler) validateEnabledMappings(ctx context.Context) ([]storage.EmojiGroupMapping, error) {
-	mappings, err := h.repo.ListEnabledEmojiGroupMappings(ctx)
+func (h *GroupHandler) validateEnabledMappings(ctx context.Context) ([]storagedb.EmojiGroupMapping, error) {
+	mappings, err := h.queries.ListEnabledEmojiGroupMappings(ctx)
 	if err != nil {
 		return nil, err
 	}
-	var invalid []storage.EmojiGroupMapping
+	var invalid []storagedb.EmojiGroupMapping
 	for _, m := range mappings {
 		exists, err := h.channelGroupExists(ctx, m.ChannelGroupID)
 		if err != nil {
@@ -459,18 +514,19 @@ func (h *GroupHandler) handleMappingSet(
 		return command.Result{}, err
 	}
 
-	mapping := storage.EmojiGroupMapping{
+	now := formatTime(time.Now())
+	mapping := storagedb.UpsertEmojiGroupMappingParams{
 		ShortName:      shortName,
 		ChannelGroupID: channelGroupID,
 		EmojiName:      emojiName,
 		EmojiCode:      "",
 		ReactionType:   "unicode_emoji",
-		Enabled:        true,
+		Enabled:        1,
 		SortOrder:      0,
-		CreatedAt:      time.Now().UTC(),
-		UpdatedAt:      time.Now().UTC(),
+		CreatedAt:      now,
+		UpdatedAt:      now,
 	}
-	if err := h.repo.UpsertEmojiGroupMapping(ctx, mapping); err != nil {
+	if err := h.queries.UpsertEmojiGroupMapping(ctx, mapping); err != nil {
 		return command.Result{}, fmt.Errorf("upsert emoji group mapping: %w", err)
 	}
 
@@ -557,7 +613,11 @@ func (h *GroupHandler) handleMappingDisable(
 	}
 	shortName := args.ShortName
 
-	if err := h.repo.SetEmojiGroupMappingEnabled(ctx, shortName, false); err != nil {
+	if err := h.queries.SetEmojiGroupMappingEnabled(ctx, storagedb.SetEmojiGroupMappingEnabledParams{
+		Enabled:   0,
+		UpdatedAt: formatTime(time.Now()),
+		ShortName: shortName,
+	}); err != nil {
 		return command.Result{}, fmt.Errorf("disable emoji group mapping: %w", err)
 	}
 
@@ -588,13 +648,13 @@ func (h *GroupHandler) runAnnounce(ctx context.Context, req command.Request) (co
 		))
 	}
 
-	state, ok, err := h.repo.GetAnnouncementState(ctx)
+	state, ok, err := h.announcementState(ctx)
 	if err != nil {
 		return command.Result{}, fmt.Errorf("read announcement state: %w", err)
 	}
 
 	var target *announceTarget
-	if !ok || state.MessageID == nil {
+	if !ok || !state.MessageID.Valid {
 		channelID, channelOK, err := h.announcementChannelID(ctx)
 		if err != nil {
 			return command.Result{}, fmt.Errorf("read announcement channel ID: %w", err)
@@ -638,10 +698,7 @@ func (h *GroupHandler) handleAnnounceSetMessage(
 		return command.Result{}, command.NewUserError("message_id must be a positive integer")
 	}
 
-	if err := h.repo.SaveAnnouncementState(ctx, storage.AnnouncementState{
-		MessageID:   &msgID,
-		ContentHash: "",
-	}); err != nil {
+	if err := h.saveAnnouncementState(ctx, sql.NullInt64{Int64: msgID, Valid: true}, ""); err != nil {
 		return command.Result{}, fmt.Errorf("save announcement state: %w", err)
 	}
 
@@ -657,7 +714,7 @@ func (h *GroupHandler) handleAnnounceInspect(ctx context.Context, req command.Re
 	if err := h.auth.Check(ctx, req.Actor, command.PermAdmin); err != nil {
 		return command.Result{}, command.NewUserError("permission denied")
 	}
-	state, ok, err := h.repo.GetAnnouncementState(ctx)
+	state, ok, err := h.announcementState(ctx)
 	if err != nil {
 		return command.Result{}, fmt.Errorf("read announcement state: %w", err)
 	}
@@ -668,11 +725,11 @@ func (h *GroupHandler) handleAnnounceInspect(ctx context.Context, req command.Re
 	var b strings.Builder
 	b.WriteString("**Announcement configuration:**\n")
 
-	if ok && state.MessageID != nil {
-		b.WriteString(fmt.Sprintf("- message_id: %d ✓\n", *state.MessageID))
+	if ok && state.MessageID.Valid {
+		b.WriteString(fmt.Sprintf("- message_id: %d ✓\n", state.MessageID.Int64))
 		b.WriteString("- mode: **edit existing message** (channel_id and topic not required)\n")
-		if !state.UpdatedAt.IsZero() {
-			b.WriteString(fmt.Sprintf("- last updated: %s\n", state.UpdatedAt.Format(time.RFC3339)))
+		if state.UpdatedAt != "" {
+			b.WriteString(fmt.Sprintf("- last updated: %s\n", state.UpdatedAt))
 		}
 	} else {
 		b.WriteString("- message_id: not set\n")
@@ -705,7 +762,7 @@ func (h *GroupHandler) handleChannelModify(
 		return command.Result{}, command.NewUserError("channel_id must be a positive integer")
 	}
 
-	mapping, found, err := h.repo.GetEmojiGroupMappingByShortName(ctx, shortName)
+	mapping, found, err := h.emojiGroupMappingByShortName(ctx, shortName)
 	if err != nil {
 		return command.Result{}, err
 	}
@@ -750,7 +807,7 @@ func (h *GroupHandler) handleFolderModify(
 		return command.Result{}, command.NewUserError("permission denied")
 	}
 
-	mapping, found, err := h.repo.GetEmojiGroupMappingByShortName(ctx, shortName)
+	mapping, found, err := h.emojiGroupMappingByShortName(ctx, shortName)
 	if err != nil {
 		return command.Result{}, err
 	}
@@ -831,7 +888,7 @@ func (h *GroupHandler) handleChannelCreate(
 	channelName := args.ChannelName
 	shortName := args.ShortName
 
-	mapping, found, err := h.repo.GetEmojiGroupMappingByShortName(ctx, shortName)
+	mapping, found, err := h.emojiGroupMappingByShortName(ctx, shortName)
 	if err != nil {
 		return command.Result{}, err
 	}
@@ -881,13 +938,13 @@ func (h *GroupHandler) createChannelAndAddToGroup(
 }
 
 func (h *GroupHandler) triggerAnnouncementUpdate(ctx context.Context) {
-	state, ok, err := h.repo.GetAnnouncementState(ctx)
+	state, ok, err := h.announcementState(ctx)
 	if err != nil {
 		return
 	}
 
 	var target *announceTarget
-	if !ok || state.MessageID == nil {
+	if !ok || !state.MessageID.Valid {
 		channelID, channelOK, err := h.announcementChannelID(ctx)
 		if err != nil || !channelOK {
 			return
@@ -916,7 +973,7 @@ func (h *GroupHandler) triggerAnnouncementUpdate(ctx context.Context) {
 //
 //nolint:nestif // send-vs-edit branches share state and are clearer than extracting partial flows
 func (h *GroupHandler) ensureAnnouncement(ctx context.Context, target *announceTarget) error {
-	mappings, err := h.repo.ListEnabledEmojiGroupMappings(ctx)
+	mappings, err := h.queries.ListEnabledEmojiGroupMappings(ctx)
 	if err != nil {
 		return fmt.Errorf("list emoji group mappings: %w", err)
 	}
@@ -924,13 +981,13 @@ func (h *GroupHandler) ensureAnnouncement(ctx context.Context, target *announceT
 	content := RenderAnnouncement(mappings)
 	hash := AnnouncementContentHash(mappings)
 
-	state, ok, err := h.repo.GetAnnouncementState(ctx)
+	state, ok, err := h.announcementState(ctx)
 	if err != nil {
 		return fmt.Errorf("get announcement state: %w", err)
 	}
 
 	var messageID int64
-	if !ok || state.MessageID == nil {
+	if !ok || !state.MessageID.Valid {
 		if target == nil || target.channelID <= 0 || target.topic == "" {
 			return errors.New("no announcement message_id stored and no channel/topic provided: " +
 				"run `group announce set-message <id>` to migrate from an existing message, " +
@@ -949,23 +1006,17 @@ func (h *GroupHandler) ensureAnnouncement(ctx context.Context, target *announceT
 			return errors.New("send announcement message: empty response")
 		}
 		messageID = resp.ID
-		if err := h.repo.SaveAnnouncementState(ctx, storage.AnnouncementState{
-			MessageID:   &messageID,
-			ContentHash: hash,
-		}); err != nil {
+		if err := h.saveAnnouncementState(ctx, sql.NullInt64{Int64: messageID, Valid: true}, hash); err != nil {
 			return fmt.Errorf("save announcement state: %w", err)
 		}
 		h.logger.InfoContext(ctx, "sent new announcement message", "message_id", messageID)
 	} else {
-		messageID = *state.MessageID
+		messageID = state.MessageID.Int64
 		if state.ContentHash != hash {
 			if _, _, err := h.client.UpdateMessage(ctx, messageID).Content(content).Execute(); err != nil {
 				return fmt.Errorf("edit announcement message %d: %w", messageID, err)
 			}
-			if err := h.repo.SaveAnnouncementState(ctx, storage.AnnouncementState{
-				MessageID:   &messageID,
-				ContentHash: hash,
-			}); err != nil {
+			if err := h.saveAnnouncementState(ctx, sql.NullInt64{Int64: messageID, Valid: true}, hash); err != nil {
 				return fmt.Errorf("save announcement state: %w", err)
 			}
 			h.logger.InfoContext(ctx, "updated announcement message", "message_id", messageID)
@@ -981,7 +1032,7 @@ func (h *GroupHandler) ensureAnnouncement(ctx context.Context, target *announceT
 func (h *GroupHandler) addAnnouncementReactions(
 	ctx context.Context,
 	messageID int64,
-	mappings []storage.EmojiGroupMapping,
+	mappings []storagedb.EmojiGroupMapping,
 ) {
 	for _, mapping := range mappings {
 		req := h.client.AddReaction(ctx, messageID).EmojiName(mapping.EmojiName)

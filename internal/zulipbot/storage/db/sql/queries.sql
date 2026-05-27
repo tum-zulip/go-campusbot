@@ -1,12 +1,3 @@
--- name: SchemaVersion :one
-SELECT CAST(COALESCE(MAX(version), 0) AS INTEGER) AS version
-FROM schema_migrations;
-
--- name: SchemaMigrationName :one
-SELECT name
-FROM schema_migrations
-WHERE version = ?;
-
 -- name: GetConfigValue :one
 SELECT value
 FROM bot_config
@@ -97,7 +88,7 @@ LIMIT 1;
 
 -- name: MarkRestartInProgress :execrows
 UPDATE restart_requests
-SET status = ?, completed_at = NULL, completion_message_id = NULL, failure = NULL
+SET status = 'in_progress', completed_at = NULL, completion_message_id = NULL, failure = NULL
 WHERE id = ? AND status IN ('requested', 'in_progress');
 
 -- name: GetLatestActiveRestartRequestID :one
@@ -125,6 +116,10 @@ ON CONFLICT(short_name) DO UPDATE SET
   enabled = excluded.enabled,
   sort_order = excluded.sort_order,
   updated_at = excluded.updated_at;
+
+-- name: DeleteEmojiGroupMappingByShortName :exec
+DELETE FROM emoji_group_mappings
+WHERE short_name = ?;
 
 -- name: ListEnabledEmojiGroupMappings :many
 SELECT id, short_name, channel_group_id, emoji_name, emoji_code, reaction_type, enabled, sort_order, created_at, updated_at

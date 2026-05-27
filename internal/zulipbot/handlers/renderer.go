@@ -5,7 +5,7 @@ import (
 	"encoding/hex"
 	"strings"
 
-	"github.com/tum-zulip/go-campusbot/internal/zulipbot/storage"
+	storagedb "github.com/tum-zulip/go-campusbot/internal/zulipbot/storage/db"
 )
 
 const preamble = `Hi! :bothappy:
@@ -29,7 +29,7 @@ Have a nice day! :bothappypad:
 
 // RenderAnnouncement generates the announcement message markdown from enabled emoji→group mappings.
 // The table uses a 3-column group layout (Course | Emoji pairs, 3 pairs per row).
-func RenderAnnouncement(mappings []storage.EmojiGroupMapping) string {
+func RenderAnnouncement(mappings []storagedb.EmojiGroupMapping) string {
 	var b strings.Builder
 
 	b.WriteString(preamble)
@@ -42,7 +42,7 @@ func RenderAnnouncement(mappings []storage.EmojiGroupMapping) string {
 }
 
 // AnnouncementContentHash returns a SHA256 hex digest of the rendered content (for change detection).
-func AnnouncementContentHash(mappings []storage.EmojiGroupMapping) string {
+func AnnouncementContentHash(mappings []storagedb.EmojiGroupMapping) string {
 	content := RenderAnnouncement(mappings)
 	sum := sha256.Sum256([]byte(content))
 	return hex.EncodeToString(sum[:])
@@ -55,7 +55,7 @@ func escapeMarkdown(s string) string {
 	return s
 }
 
-func renderTable(mappings []storage.EmojiGroupMapping) string {
+func renderTable(mappings []storagedb.EmojiGroupMapping) string {
 	const cols = 3
 
 	var b strings.Builder
@@ -67,10 +67,10 @@ func renderTable(mappings []storage.EmojiGroupMapping) string {
 		return strings.TrimRight(b.String(), "\n")
 	}
 
-	padded := make([]storage.EmojiGroupMapping, 0, len(mappings)+cols-1)
+	padded := make([]storagedb.EmojiGroupMapping, 0, len(mappings)+cols-1)
 	padded = append(padded, mappings...)
 	for len(padded)%cols != 0 {
-		padded = append(padded, storage.EmojiGroupMapping{})
+		padded = append(padded, storagedb.EmojiGroupMapping{})
 	}
 
 	for i := 0; i < len(padded); i += cols {

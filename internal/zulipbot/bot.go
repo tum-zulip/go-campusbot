@@ -3,6 +3,7 @@ package zulipbot
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,7 +22,7 @@ import (
 	"github.com/tum-zulip/go-campusbot/internal/channelgroup"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/command"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/handlers"
-	"github.com/tum-zulip/go-campusbot/internal/zulipbot/storage"
+	storagedb "github.com/tum-zulip/go-campusbot/internal/zulipbot/storage/db"
 )
 
 const (
@@ -65,7 +66,8 @@ type Bot struct {
 	client  zulipclient.Client
 	ownUser zulip.User
 
-	repo      *storage.Repository
+	db        *sql.DB
+	queries   *storagedb.Queries
 	logger    *slog.Logger
 	startedAt time.Time
 
@@ -106,20 +108,24 @@ func New(ctx context.Context, client zulipclient.Client) (*Bot, error) {
 	return bot, nil
 }
 
-// NewBot wires the full bot: client, repository, configuration service,
+// NewBot wires the full bot: client, storage queries, configuration service,
 // announcement manager, channel-group client, command registry, and the
 // long-poll loop. Replaces the former App.
 func NewBot(
 	ctx context.Context,
 	cfg RuntimeConfig,
 	client zulipclient.Client,
-	repo *storage.Repository,
+	db *sql.DB,
+	queries *storagedb.Queries,
 ) (*Bot, error) {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
-	if repo == nil {
-		return nil, errors.New("storage repository must not be nil")
+	if db == nil {
+		return nil, errors.New("storage database must not be nil")
+	}
+	if queries == nil {
+		return nil, errors.New("storage queries must not be nil")
 	}
 
 	bot, err := New(ctx, client)
@@ -127,20 +133,21 @@ func NewBot(
 		return nil, err
 	}
 
-	bot.repo = repo
+	bot.db = db
+	bot.queries = queries
 	bot.logger = cfg.Logger
 	bot.startedAt = time.Now().UTC()
 
 	bot.argParser = command.NewArgParser(bot)
 
-	if err := channelgroup.Migrate(ctx, repo.DB()); err != nil {
+	if err := channelgroup.Migrate(ctx, db); err != nil {
 		return nil, err
 	}
 	var channelGroupOpts []channelgroup.ClientOption
 	if cfg.RunContext != nil {
 		channelGroupOpts = append(channelGroupOpts, channelgroup.WithRunContext(cfg.RunContext))
 	}
-	channelGroupClient, err := channelgroup.NewClient(ctx, bot.client, repo.DB(), channelGroupOpts...)
+	channelGroupClient, err := channelgroup.NewClient(ctx, bot.client, db, channelGroupOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("initialize channel group client: %w", err)
 	}
@@ -150,7 +157,7 @@ func NewBot(
 	bot.registry = command.NewRegistry()
 	if err := bot.registry.Register(handlers.NewGroupHandler(
 		channelGroupClient,
-		repo,
+		queries,
 		bot,
 		cfg.Logger,
 	)); err != nil {
@@ -188,8 +195,8 @@ func (bot *Bot) RestartRequested() bool {
 //
 //nolint:funlen,gocognit // event-loop branching is clearer kept with the queue lifecycle it controls
 func (bot *Bot) Run(ctx context.Context) (bool, error) {
-	if bot.repo == nil {
-		return false, errors.New("Bot.Run requires a repository (use NewBot)")
+	if bot.queries == nil {
+		return false, errors.New("Bot.Run requires storage queries (use NewBot)")
 	}
 
 	notify, err := bot.boolConfig(ctx, KeyRestartStartupNotification)
@@ -204,7 +211,7 @@ func (bot *Bot) Run(ctx context.Context) (bool, error) {
 		bot.logger.WarnContext(ctx, "failed to mark restart complete", "error", markErr)
 	}
 
-	if deleted, err := bot.repo.CleanupProcessedMessages(ctx, processedMessageRetention, processedMessageMaxRows); err != nil {
+	if deleted, err := bot.cleanupProcessedMessages(ctx, processedMessageRetention, processedMessageMaxRows); err != nil {
 		bot.logger.WarnContext(ctx, "failed to clean processed message cache", "error", err)
 	} else if deleted > 0 {
 		bot.logger.DebugContext(ctx, "cleaned processed message cache", "deleted", deleted)
@@ -245,7 +252,7 @@ func (bot *Bot) Run(ctx context.Context) (bool, error) {
 			"queue_id", state.QueueID,
 			"last_event_id", state.LastEventID,
 		)
-		if err := bot.repo.ClearEventQueueState(ctx); err != nil {
+		if err := bot.queries.ClearEventQueueState(ctx); err != nil {
 			return false, err
 		}
 	}
@@ -289,10 +296,7 @@ func (bot *Bot) consumeQueue(ctx context.Context, state QueueState) (bool, bool,
 					"event_type", event.GetType(),
 					"error", err)
 			}
-			if err := bot.repo.SaveEventQueueState(ctx, storage.EventQueueState{
-				QueueID:     state.QueueID,
-				LastEventID: state.LastEventID,
-			}); err != nil {
+			if err := bot.saveEventQueueState(ctx, state); err != nil {
 				return false, false, err
 			}
 			if bot.requested.Load() {
@@ -307,10 +311,9 @@ func (bot *Bot) consumeQueue(ctx context.Context, state QueueState) (bool, bool,
 	}
 }
 
-// Close deregisters the Zulip queue (unless a restart is pending) and closes
-// the repository.
+// Close deregisters the Zulip queue unless a restart is pending.
 func (bot *Bot) Close() error {
-	if bot == nil || bot.repo == nil {
+	if bot == nil || bot.queries == nil {
 		return nil
 	}
 	if !bot.closed.CompareAndSwap(false, true) {
@@ -323,7 +326,7 @@ func (bot *Bot) Close() error {
 			bot.logger.WarnContext(ctx, "failed to deregister Zulip event queue", "error", err)
 		}
 	}
-	return bot.repo.Close()
+	return nil
 }
 
 // dispatch resolves and executes a command request. Static commands (help,
@@ -501,7 +504,7 @@ func (bot *Bot) handleStatus(ctx context.Context, req command.Request) command.R
 }
 
 func (bot *Bot) writeQueueStatus(ctx context.Context, sb *strings.Builder) {
-	state, ok, err := bot.repo.EventQueueState(ctx)
+	state, ok, err := bot.eventQueueState(ctx)
 	switch {
 	case err != nil:
 		fmt.Fprintf(sb, "\nqueue_status: error (%v)", err)
@@ -513,7 +516,7 @@ func (bot *Bot) writeQueueStatus(ctx context.Context, sb *strings.Builder) {
 }
 
 func (bot *Bot) writeDBStatus(ctx context.Context, sb *strings.Builder) {
-	if err := bot.repo.Ping(ctx); err != nil {
+	if err := bot.db.PingContext(ctx); err != nil {
 		fmt.Fprintf(sb, "\ndb_reachable: no (%v)", err)
 		return
 	}
@@ -521,7 +524,7 @@ func (bot *Bot) writeDBStatus(ctx context.Context, sb *strings.Builder) {
 }
 
 func (bot *Bot) writeRestartStatus(ctx context.Context, sb *strings.Builder) {
-	_, pending, err := bot.repo.PendingRestartRequest(ctx)
+	_, pending, err := bot.pendingRestartRequest(ctx)
 	if err != nil {
 		fmt.Fprintf(sb, "\nrestart_pending: error (%v)", err)
 		return
@@ -724,11 +727,7 @@ func (bot *Bot) ScheduleRestart(
 	messageID int64,
 	target command.ReplyTarget,
 ) (int64, bool, error) {
-	id, err := bot.repo.CreateRestartRequest(ctx, storage.RestartRequest{
-		RequestedByUserID: actor.UserID,
-		RequestMessageID:  messageID,
-		Target:            target,
-	})
+	id, err := bot.createRestartRequest(ctx, actor.UserID, messageID, target)
 	if err != nil {
 		return 0, false, err
 	}
@@ -740,18 +739,18 @@ func (bot *Bot) ScheduleRestart(
 }
 
 func (bot *Bot) MarkRestartInProgress(ctx context.Context) error {
-	id, ok, err := bot.repo.LatestActiveRestartRequestID(ctx)
+	id, ok, err := bot.latestActiveRestartRequestID(ctx)
 	if err != nil {
 		return err
 	}
 	if !ok {
 		return errors.New("no active restart request")
 	}
-	return bot.repo.MarkRestartInProgress(ctx, id)
+	return bot.markRestartInProgress(ctx, id)
 }
 
 func (bot *Bot) NotifyRestartComplete(ctx context.Context) error {
-	request, ok, err := bot.repo.PendingRestartRequest(ctx)
+	request, ok, err := bot.pendingRestartRequest(ctx)
 	if err != nil {
 		return err
 	}
@@ -765,36 +764,275 @@ func (bot *Bot) NotifyRestartComplete(ctx context.Context) error {
 		"Restart complete. Event processing is back online.",
 	)
 	if sendErr != nil {
-		if completeErr := bot.repo.CompleteRestartRequest(ctx, request.ID, 0, sendErr.Error()); completeErr != nil {
+		if completeErr := bot.completeRestartRequest(ctx, request.ID, 0, sendErr.Error()); completeErr != nil {
 			bot.logger.WarnContext(ctx, "failed to mark restart notification failure",
 				"restart_request_id", request.ID, "error", completeErr)
 		}
 		return fmt.Errorf("send restart completion notification: %w", sendErr)
 	}
-	return bot.repo.CompleteRestartRequest(ctx, request.ID, messageID, "")
+	return bot.completeRestartRequest(ctx, request.ID, messageID, "")
 }
 
 func (bot *Bot) MarkRestartComplete(ctx context.Context) error {
-	request, ok, err := bot.repo.PendingRestartRequest(ctx)
+	request, ok, err := bot.pendingRestartRequest(ctx)
 	if err != nil {
 		return err
 	}
 	if !ok {
 		return nil
 	}
-	return bot.repo.CompleteRestartRequest(ctx, request.ID, 0, "")
+	return bot.completeRestartRequest(ctx, request.ID, 0, "")
 }
 
 // RestartPending reports whether a restart request is currently pending.
 func (bot *Bot) RestartPending(ctx context.Context) (bool, error) {
-	_, ok, err := bot.repo.PendingRestartRequest(ctx)
+	_, ok, err := bot.pendingRestartRequest(ctx)
 	return ok, err
+}
+
+type restartRequest struct {
+	ID     int64
+	Target command.ReplyTarget
+}
+
+func (bot *Bot) eventQueueState(ctx context.Context) (QueueState, bool, error) {
+	row, err := bot.queries.GetEventQueueState(ctx)
+	if errors.Is(err, sql.ErrNoRows) {
+		return QueueState{}, false, nil
+	}
+	if err != nil {
+		return QueueState{}, false, fmt.Errorf("read event queue state: %w", err)
+	}
+	return QueueState{QueueID: row.QueueID, LastEventID: row.LastEventID}, true, nil
+}
+
+func (bot *Bot) saveEventQueueState(ctx context.Context, state QueueState) error {
+	if state.QueueID == "" {
+		return errors.New("queue ID must not be empty")
+	}
+	if err := bot.queries.SaveEventQueueState(ctx, storagedb.SaveEventQueueStateParams{
+		QueueID:     state.QueueID,
+		LastEventID: state.LastEventID,
+		UpdatedAt:   formatTime(time.Now()),
+	}); err != nil {
+		return fmt.Errorf("save event queue state: %w", err)
+	}
+	return nil
+}
+
+func (bot *Bot) cleanupProcessedMessages(ctx context.Context, retention time.Duration, maxRows int) (int64, error) {
+	var deleted int64
+	if retention > 0 {
+		count, err := bot.queries.DeleteExpiredProcessedMessages(ctx, formatTime(time.Now().Add(-retention)))
+		if err != nil {
+			return 0, fmt.Errorf("delete expired processed messages: %w", err)
+		}
+		deleted += count
+	}
+	if maxRows > 0 {
+		count, err := bot.queries.TrimProcessedMessages(ctx, int64(maxRows))
+		if err != nil {
+			return 0, fmt.Errorf("trim processed message cache: %w", err)
+		}
+		deleted += count
+	}
+	return deleted, nil
+}
+
+func (bot *Bot) createRestartRequest(
+	ctx context.Context,
+	requestedByUserID int64,
+	requestMessageID int64,
+	target command.ReplyTarget,
+) (int64, error) {
+	if requestedByUserID <= 0 {
+		return 0, errors.New("restart requester user ID must be positive")
+	}
+	if requestMessageID <= 0 {
+		return 0, errors.New("restart request message ID must be positive")
+	}
+	if err := target.Validate(); err != nil {
+		return 0, err
+	}
+	targetUsers, err := json.Marshal(target.UserIDs)
+	if err != nil {
+		return 0, fmt.Errorf("encode restart target user IDs: %w", err)
+	}
+	if err := bot.queries.CreateRestartRequest(ctx, storagedb.CreateRestartRequestParams{
+		RequestedByUserID: requestedByUserID,
+		RequestMessageID:  requestMessageID,
+		ResponseKind:      string(target.Kind),
+		ChannelID:         nullableInt64(target.ChannelID),
+		Topic:             nullableString(target.Topic),
+		RecipientUserIds:  string(targetUsers),
+		RequestedAt:       formatTime(time.Now()),
+	}); err != nil {
+		return 0, fmt.Errorf("create restart request: %w", err)
+	}
+	id, err := bot.queries.GetRestartRequestIDByMessageID(ctx, requestMessageID)
+	if err != nil {
+		return 0, fmt.Errorf("read restart request ID: %w", err)
+	}
+	return id, nil
+}
+
+func (bot *Bot) pendingRestartRequest(ctx context.Context) (restartRequest, bool, error) {
+	row, err := bot.queries.GetPendingRestartRequest(ctx)
+	if errors.Is(err, sql.ErrNoRows) {
+		return restartRequest{}, false, nil
+	}
+	if err != nil {
+		return restartRequest{}, false, fmt.Errorf("read pending restart request: %w", err)
+	}
+	var userIDs []int64
+	if err := json.Unmarshal([]byte(row.RecipientUserIds), &userIDs); err != nil {
+		return restartRequest{}, false, fmt.Errorf("decode restart target user IDs: %w", err)
+	}
+	target := command.ReplyTarget{
+		Kind:    command.ReplyKind(row.ResponseKind),
+		Topic:   nullStringValue(row.Topic),
+		UserIDs: userIDs,
+	}
+	if row.ChannelID.Valid {
+		target.ChannelID = row.ChannelID.Int64
+	}
+	return restartRequest{ID: row.ID, Target: target}, true, nil
+}
+
+func (bot *Bot) latestActiveRestartRequestID(ctx context.Context) (int64, bool, error) {
+	id, err := bot.queries.GetLatestActiveRestartRequestID(ctx)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("read active restart request ID: %w", err)
+	}
+	return id, true, nil
+}
+
+func (bot *Bot) markRestartInProgress(ctx context.Context, id int64) error {
+	if id <= 0 {
+		return errors.New("restart request ID must be positive")
+	}
+	affected, err := bot.queries.MarkRestartInProgress(ctx, id)
+	if err != nil {
+		return fmt.Errorf("mark restart request %d in progress: %w", id, err)
+	}
+	if affected == 0 {
+		return fmt.Errorf("restart request %d is not pending", id)
+	}
+	return nil
+}
+
+func (bot *Bot) completeRestartRequest(ctx context.Context, id int64, completionMessageID int64, failure string) error {
+	if id <= 0 {
+		return errors.New("restart request ID must be positive")
+	}
+	status := "completed"
+	if failure != "" {
+		status = "failed"
+	}
+	if err := bot.queries.CompleteRestartRequest(ctx, storagedb.CompleteRestartRequestParams{
+		Status:              status,
+		CompletedAt:         nullableString(formatTime(time.Now())),
+		CompletionMessageID: nullableInt64(completionMessageID),
+		Failure:             nullableString(failure),
+		ID:                  id,
+	}); err != nil {
+		return fmt.Errorf("complete restart request %d: %w", id, err)
+	}
+	return nil
+}
+
+func (bot *Bot) messageProcessed(ctx context.Context, messageID int64) (bool, error) {
+	_, err := bot.queries.GetProcessedMessage(ctx, messageID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read processed message %d: %w", messageID, err)
+	}
+	return true, nil
+}
+
+func (bot *Bot) markMessageProcessed(ctx context.Context, messageID int64) error {
+	if messageID <= 0 {
+		return nil
+	}
+	if err := bot.queries.MarkMessageProcessed(ctx, storagedb.MarkMessageProcessedParams{
+		MessageID:   messageID,
+		ProcessedAt: formatTime(time.Now()),
+	}); err != nil {
+		return fmt.Errorf("mark processed message %d: %w", messageID, err)
+	}
+	return nil
+}
+
+func (bot *Bot) announcementState(ctx context.Context) (storagedb.AnnouncementState, bool, error) {
+	row, err := bot.queries.GetAnnouncementState(ctx)
+	if errors.Is(err, sql.ErrNoRows) {
+		return storagedb.AnnouncementState{}, false, nil
+	}
+	if err != nil {
+		return storagedb.AnnouncementState{}, false, fmt.Errorf("get announcement state: %w", err)
+	}
+	return row, true, nil
+}
+
+func (bot *Bot) reactionProcessed(ctx context.Context, messageID, userID int64, emojiName, op string) (bool, error) {
+	_, err := bot.queries.IsReactionProcessed(ctx, storagedb.IsReactionProcessedParams{
+		MessageID: messageID,
+		UserID:    userID,
+		EmojiName: emojiName,
+		Op:        op,
+	})
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("check processed reaction: %w", err)
+	}
+	return true, nil
+}
+
+func (bot *Bot) markReactionProcessed(ctx context.Context, messageID, userID int64, emojiName, op string) error {
+	if err := bot.queries.MarkReactionProcessed(ctx, storagedb.MarkReactionProcessedParams{
+		MessageID:   messageID,
+		UserID:      userID,
+		EmojiName:   emojiName,
+		Op:          op,
+		ProcessedAt: formatTime(time.Now()),
+	}); err != nil {
+		return fmt.Errorf("mark reaction processed: %w", err)
+	}
+	return nil
+}
+
+func (bot *Bot) emojiGroupMappingByEmoji(
+	ctx context.Context,
+	emojiName, reactionType string,
+) (storagedb.EmojiGroupMapping, bool, error) {
+	row, err := bot.queries.GetEmojiGroupMappingByEmoji(ctx, storagedb.GetEmojiGroupMappingByEmojiParams{
+		EmojiName:    emojiName,
+		ReactionType: reactionType,
+	})
+	if errors.Is(err, sql.ErrNoRows) {
+		return storagedb.EmojiGroupMapping{}, false, nil
+	}
+	if err != nil {
+		return storagedb.EmojiGroupMapping{}, false, fmt.Errorf(
+			"get emoji group mapping by emoji %q: %w",
+			emojiName,
+			err,
+		)
+	}
+	return row, true, nil
 }
 
 // --- Event loop / queue / dispatch ----------------------------------------
 
 func (bot *Bot) ensureQueue(ctx context.Context) (QueueState, error) {
-	stored, ok, err := bot.repo.EventQueueState(ctx)
+	stored, ok, err := bot.eventQueueState(ctx)
 	if err != nil {
 		return QueueState{}, err
 	}
@@ -813,10 +1051,7 @@ func (bot *Bot) registerAndSaveQueue(ctx context.Context) (QueueState, error) {
 	if err != nil {
 		return QueueState{}, err
 	}
-	if err := bot.repo.SaveEventQueueState(ctx, storage.EventQueueState{
-		QueueID:     state.QueueID,
-		LastEventID: state.LastEventID,
-	}); err != nil {
+	if err := bot.saveEventQueueState(ctx, state); err != nil {
 		return QueueState{}, err
 	}
 	bot.logger.InfoContext(
@@ -831,7 +1066,7 @@ func (bot *Bot) registerAndSaveQueue(ctx context.Context) (QueueState, error) {
 }
 
 func (bot *Bot) deregisterStoredQueue(ctx context.Context) error {
-	stored, ok, err := bot.repo.EventQueueState(ctx)
+	stored, ok, err := bot.eventQueueState(ctx)
 	if err != nil {
 		return err
 	}
@@ -841,7 +1076,7 @@ func (bot *Bot) deregisterStoredQueue(ctx context.Context) error {
 	if err := bot.deleteQueue(ctx, stored.QueueID); err != nil {
 		return err
 	}
-	return bot.repo.ClearEventQueueState(ctx)
+	return bot.queries.ClearEventQueueState(ctx)
 }
 
 // registerQueue registers a broad Zulip event queue subscribed to all public channels.
@@ -921,7 +1156,7 @@ func (bot *Bot) handleMessage(ctx context.Context, event events.MessageEvent) er
 		return nil
 	}
 
-	alreadyProcessed, err := bot.repo.MessageProcessed(ctx, msg.ID)
+	alreadyProcessed, err := bot.messageProcessed(ctx, msg.ID)
 	if err != nil {
 		return err
 	}
@@ -948,7 +1183,7 @@ func (bot *Bot) handleMessage(ctx context.Context, event events.MessageEvent) er
 		if sendErr := bot.send(ctx, target, "Malformed command. Use `help` to see supported commands."); sendErr != nil {
 			return sendErr
 		}
-		return bot.repo.MarkMessageProcessed(ctx, msg.ID)
+		return bot.markMessageProcessed(ctx, msg.ID)
 	}
 
 	result := bot.dispatch(ctx, command.Request{
@@ -966,7 +1201,7 @@ func (bot *Bot) handleMessage(ctx context.Context, event events.MessageEvent) er
 			return err
 		}
 	}
-	if err := bot.repo.MarkMessageProcessed(ctx, msg.ID); err != nil {
+	if err := bot.markMessageProcessed(ctx, msg.ID); err != nil {
 		return err
 	}
 	if result.AfterResponse != nil {
@@ -981,14 +1216,14 @@ func (bot *Bot) handleReaction(ctx context.Context, event events.ReactionEvent) 
 		return nil
 	}
 
-	announcementState, ok, err := bot.repo.GetAnnouncementState(ctx)
+	announcementState, ok, err := bot.announcementState(ctx)
 	if err != nil {
 		return err
 	}
-	if !ok || announcementState.MessageID == nil {
+	if !ok || !announcementState.MessageID.Valid {
 		return nil
 	}
-	if event.MessageID != *announcementState.MessageID {
+	if event.MessageID != announcementState.MessageID.Int64 {
 		return nil
 	}
 	if event.UserID == bot.ownUser.UserID {
@@ -1001,7 +1236,7 @@ func (bot *Bot) handleReaction(ctx context.Context, event events.ReactionEvent) 
 	}
 	opStr := string(op)
 
-	processed, err := bot.repo.IsReactionProcessed(ctx, event.MessageID, event.UserID, event.EmojiName, opStr)
+	processed, err := bot.reactionProcessed(ctx, event.MessageID, event.UserID, event.EmojiName, opStr)
 	if err != nil {
 		return err
 	}
@@ -1009,12 +1244,12 @@ func (bot *Bot) handleReaction(ctx context.Context, event events.ReactionEvent) 
 		return nil
 	}
 
-	mapping, found, err := bot.repo.GetEmojiGroupMappingByEmoji(ctx, event.EmojiName, string(event.ReactionType))
+	mapping, found, err := bot.emojiGroupMappingByEmoji(ctx, event.EmojiName, string(event.ReactionType))
 	if err != nil {
 		return err
 	}
 	if !found {
-		return bot.repo.MarkReactionProcessed(ctx, event.MessageID, event.UserID, event.EmojiName, opStr)
+		return bot.markReactionProcessed(ctx, event.MessageID, event.UserID, event.EmojiName, opStr)
 	}
 
 	var opErr error
@@ -1025,7 +1260,7 @@ func (bot *Bot) handleReaction(ctx context.Context, event events.ReactionEvent) 
 	case events.EventOpRemove:
 		opErr = bot.groupSubscriber.UnsubscribeUser(ctx, event.UserID, mapping.ChannelGroupID)
 	default:
-		return bot.repo.MarkReactionProcessed(ctx, event.MessageID, event.UserID, event.EmojiName, opStr)
+		return bot.markReactionProcessed(ctx, event.MessageID, event.UserID, event.EmojiName, opStr)
 	}
 
 	if opErr != nil {
@@ -1040,7 +1275,7 @@ func (bot *Bot) handleReaction(ctx context.Context, event events.ReactionEvent) 
 				"message_id", event.MessageID,
 				"error", opErr,
 			)
-			if markErr := bot.repo.MarkReactionProcessed(ctx, event.MessageID, event.UserID, event.EmojiName, opStr); markErr != nil {
+			if markErr := bot.markReactionProcessed(ctx, event.MessageID, event.UserID, event.EmojiName, opStr); markErr != nil {
 				return markErr
 			}
 			return nil
@@ -1061,7 +1296,7 @@ func (bot *Bot) handleReaction(ctx context.Context, event events.ReactionEvent) 
 		"op", opStr,
 		"message_id", event.MessageID)
 
-	return bot.repo.MarkReactionProcessed(ctx, event.MessageID, event.UserID, event.EmojiName, opStr)
+	return bot.markReactionProcessed(ctx, event.MessageID, event.UserID, event.EmojiName, opStr)
 }
 
 func (bot *Bot) send(ctx context.Context, target command.ReplyTarget, content string) error {
@@ -1126,6 +1361,25 @@ func directReplyUserIDs(msg zulip.Message, ownUserID int64) []int64 {
 		userIDs = append(userIDs, msg.SenderID)
 	}
 	return userIDs
+}
+
+func nullableInt64(value int64) sql.NullInt64 {
+	return sql.NullInt64{Int64: value, Valid: value != 0}
+}
+
+func nullableString(value string) sql.NullString {
+	return sql.NullString{String: value, Valid: value != ""}
+}
+
+func nullStringValue(value sql.NullString) string {
+	if !value.Valid {
+		return ""
+	}
+	return value.String
+}
+
+func formatTime(value time.Time) string {
+	return value.UTC().Format(time.RFC3339Nano)
 }
 
 // --- Queue register-response decoding (moved from source.go) --------------

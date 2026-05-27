@@ -18,7 +18,7 @@ import (
 	zulipclient "github.com/tum-zulip/go-zulip/zulip/client"
 
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot"
-	"github.com/tum-zulip/go-campusbot/internal/zulipbot/storage"
+	storagedb "github.com/tum-zulip/go-campusbot/internal/zulipbot/storage/db"
 )
 
 const (
@@ -83,13 +83,19 @@ func main() {
 		logger.ErrorContext(runCtx, "failed to open database", "error", err)
 		os.Exit(exitFailure)
 	}
-	repo, err := storage.New(startupCtx, db)
-	if err != nil {
+	if err := storagedb.ConfigureSQLite(startupCtx, db); err != nil {
 		cancelStartup()
 		_ = db.Close()
-		logger.ErrorContext(runCtx, "failed to open database", "error", err)
+		logger.ErrorContext(runCtx, "failed to configure database", "error", err)
 		os.Exit(exitFailure)
 	}
+	if err := storagedb.InitSchema(startupCtx, db); err != nil {
+		cancelStartup()
+		_ = db.Close()
+		logger.ErrorContext(runCtx, "failed to initialize database schema", "error", err)
+		os.Exit(exitFailure)
+	}
+	queries := storagedb.New(db)
 	bot, err := zulipbot.NewBot(
 		startupCtx,
 		zulipbot.RuntimeConfig{
@@ -97,17 +103,21 @@ func main() {
 			RunContext: runCtx,
 		},
 		client,
-		repo,
+		db,
+		queries,
 	)
 	cancelStartup()
 	if err != nil {
-		_ = repo.Close()
+		_ = db.Close()
 		logger.ErrorContext(runCtx, "failed to initialize Zulip bot", "error", err)
 		os.Exit(exitFailure)
 	}
 	defer func() {
 		if err := bot.Close(); err != nil {
 			logger.Warn("failed to close bot", "error", err)
+		}
+		if err := db.Close(); err != nil {
+			logger.Warn("failed to close database", "error", err)
 		}
 	}()
 

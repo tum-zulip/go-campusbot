@@ -12,7 +12,6 @@ import (
 
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot"
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/command"
-	"github.com/tum-zulip/go-campusbot/internal/zulipbot/storage"
 	"github.com/tum-zulip/go-campusbot/internal/zulipmock"
 )
 
@@ -26,13 +25,15 @@ func newDispatchTestBot(t *testing.T) *zulipbot.Bot {
 	client.AddUser(zulip.User{UserID: 9, Role: zulip.RoleOwner})
 
 	dbPath := filepath.Join(t.TempDir(), "bot.sqlite3")
-	repo, err := storage.Open(context.Background(), dbPath)
-	if err != nil {
-		t.Fatalf("storage.Open: %v", err)
-	}
-	t.Cleanup(func() { _ = repo.Close() })
+	db, queries := openZulipbotTestStorage(t, dbPath)
 
-	bot, err := zulipbot.NewBot(context.Background(), zulipbot.RuntimeConfig{Logger: slog.Default()}, client, repo)
+	bot, err := zulipbot.NewBot(
+		context.Background(),
+		zulipbot.RuntimeConfig{Logger: slog.Default()},
+		client,
+		db,
+		queries,
+	)
 	if err != nil {
 		t.Fatalf("NewBot: %v", err)
 	}

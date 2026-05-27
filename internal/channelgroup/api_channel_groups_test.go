@@ -34,7 +34,7 @@ func newTestDatabase(t *testing.T) *sql.DB {
 		}
 	})
 
-	schema, err := os.ReadFile("db/schema.sql")
+	schema, err := os.ReadFile("db/sql/schema.sql")
 	if err != nil {
 		t.Fatalf("read channelgroup schema: %v", err)
 	}

@@ -3,10 +3,10 @@ CMD := ./cmd/campusbot
 GENERATE_PKG := ./internal
 
 SQL_FILES := \
-	internal/zulipbot/storage/sql/schema.sql \
-	internal/zulipbot/storage/sql/queries.sql \
-	internal/channelgroup/db/schema.sql \
-	internal/channelgroup/db/query.sql
+	internal/zulipbot/storage/db/sql/schema.sql \
+	internal/zulipbot/storage/db/sql/queries.sql \
+	internal/channelgroup/db/sql/schema.sql \
+	internal/channelgroup/db/sql/query.sql
 
 SQLC_CONFIG := sqlc.yaml
 

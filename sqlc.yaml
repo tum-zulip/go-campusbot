@@ -1,8 +1,8 @@
 version: "2"
 sql:
   - engine: "sqlite"
-    schema: "internal/zulipbot/storage/sql/schema.sql"
-    queries: "internal/zulipbot/storage/sql/queries.sql"
+    schema: "internal/zulipbot/storage/db/sql/schema.sql"
+    queries: "internal/zulipbot/storage/db/sql/queries.sql"
     gen:
       go:
         package: "db"
@@ -10,8 +10,8 @@ sql:
         emit_json_tags: false
         emit_empty_slices: true
   - engine: "sqlite"
-    schema: "internal/channelgroup/db/schema.sql"
-    queries: "internal/channelgroup/db/query.sql"
+    schema: "internal/channelgroup/db/sql/schema.sql"
+    queries: "internal/channelgroup/db/sql/query.sql"
     gen:
       go:
         package: "db"

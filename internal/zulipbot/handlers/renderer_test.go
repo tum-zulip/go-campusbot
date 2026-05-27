@@ -3,24 +3,23 @@ package handlers_test
 import (
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/handlers"
-	"github.com/tum-zulip/go-campusbot/internal/zulipbot/storage"
+	storagedb "github.com/tum-zulip/go-campusbot/internal/zulipbot/storage/db"
 )
 
-func rendererMapping(shortName, emojiName string, channelGroupID int64) storage.EmojiGroupMapping {
-	return storage.EmojiGroupMapping{
+func rendererMapping(shortName, emojiName string, channelGroupID int64) storagedb.EmojiGroupMapping {
+	return storagedb.EmojiGroupMapping{
 		ID:             1,
 		ShortName:      shortName,
 		ChannelGroupID: channelGroupID,
 		EmojiName:      emojiName,
 		EmojiCode:      "",
 		ReactionType:   "unicode_emoji",
-		Enabled:        true,
+		Enabled:        1,
 		SortOrder:      0,
-		CreatedAt:      time.Now(),
-		UpdatedAt:      time.Now(),
+		CreatedAt:      "2026-05-27T00:00:00Z",
+		UpdatedAt:      "2026-05-27T00:00:00Z",
 	}
 }
 
@@ -40,7 +39,7 @@ func TestRenderEmpty(t *testing.T) {
 
 func TestRenderSingleMapping(t *testing.T) {
 	t.Parallel()
-	mappings := []storage.EmojiGroupMapping{
+	mappings := []storagedb.EmojiGroupMapping{
 		rendererMapping("WI", "wi", 42),
 	}
 	content := handlers.RenderAnnouncement(mappings)
@@ -54,7 +53,7 @@ func TestRenderSingleMapping(t *testing.T) {
 
 func TestRenderThreeMappings(t *testing.T) {
 	t.Parallel()
-	mappings := []storage.EmojiGroupMapping{
+	mappings := []storagedb.EmojiGroupMapping{
 		rendererMapping("A", "alpha", 1),
 		rendererMapping("B", "beta", 2),
 		rendererMapping("C", "gamma", 3),
@@ -75,7 +74,7 @@ func TestRenderThreeMappings(t *testing.T) {
 
 func TestRenderFourMappingsPadsToSix(t *testing.T) {
 	t.Parallel()
-	mappings := []storage.EmojiGroupMapping{
+	mappings := []storagedb.EmojiGroupMapping{
 		rendererMapping("A", "alpha", 1),
 		rendererMapping("B", "beta", 2),
 		rendererMapping("C", "gamma", 3),
@@ -99,7 +98,7 @@ func TestRenderFourMappingsPadsToSix(t *testing.T) {
 
 func TestRenderMarkdownEscaping(t *testing.T) {
 	t.Parallel()
-	mappings := []storage.EmojiGroupMapping{
+	mappings := []storagedb.EmojiGroupMapping{
 		rendererMapping("Course|With|Pipes", "emoji", 1),
 	}
 	content := handlers.RenderAnnouncement(mappings)
@@ -113,7 +112,7 @@ func TestRenderMarkdownEscaping(t *testing.T) {
 
 func TestContentHashDeterministic(t *testing.T) {
 	t.Parallel()
-	mappings := []storage.EmojiGroupMapping{
+	mappings := []storagedb.EmojiGroupMapping{
 		rendererMapping("WI", "wi", 42),
 	}
 	hash1 := handlers.AnnouncementContentHash(mappings)
@@ -129,7 +128,7 @@ func TestContentHashDeterministic(t *testing.T) {
 func TestContentHashChangesWithMappings(t *testing.T) {
 	t.Parallel()
 	empty := handlers.AnnouncementContentHash(nil)
-	one := handlers.AnnouncementContentHash([]storage.EmojiGroupMapping{rendererMapping("WI", "wi", 42)})
+	one := handlers.AnnouncementContentHash([]storagedb.EmojiGroupMapping{rendererMapping("WI", "wi", 42)})
 	if empty == one {
 		t.Error("expected different hashes for empty and non-empty mappings")
 	}
