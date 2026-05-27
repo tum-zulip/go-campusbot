@@ -239,6 +239,10 @@ func (h *GroupHandler) Metadata() command.Metadata {
 }
 
 func (h *GroupHandler) Handle(ctx context.Context, req command.Request) (command.Result, error) {
+	h.logger.DebugContext(ctx, "handling group command",
+		"parsed_args_type", fmt.Sprintf("%T", req.ParsedArgs),
+		"actor_user_id", req.Actor.UserID,
+		"message_id", req.MessageID)
 	switch args := req.ParsedArgs.(type) {
 	case GroupSubscribeArgs:
 		return h.handleSubscribe(ctx, req, args)

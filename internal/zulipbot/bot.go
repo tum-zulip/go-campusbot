@@ -212,6 +212,7 @@ func (bot *Bot) Run(ctx context.Context) (bool, error) {
 		return false, errors.New("Bot.Run requires storage queries (use NewBot)")
 	}
 
+	bot.logger.DebugContext(ctx, "starting Zulip bot run loop")
 	notify, err := bot.boolConfig(ctx, KeyRestartStartupNotification)
 	if err != nil {
 		return false, fmt.Errorf("load restart notification config: %w", err)
@@ -242,11 +243,13 @@ func (bot *Bot) Run(ctx context.Context) (bool, error) {
 	for {
 		if err := ctx.Err(); err != nil {
 			if errors.Is(err, context.Canceled) {
+				bot.logger.DebugContext(ctx, "stopping Zulip bot run loop after context cancellation")
 				return false, nil
 			}
 			return false, err
 		}
 
+		bot.logger.DebugContext(ctx, "ensuring Zulip event queue")
 		state, err := bot.ensureQueue(ctx)
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
@@ -263,9 +266,11 @@ func (bot *Bot) Run(ctx context.Context) (bool, error) {
 			return false, err
 		}
 		if restart {
+			bot.logger.DebugContext(ctx, "stopping Zulip bot run loop for requested restart")
 			return true, nil
 		}
 		if !badQueue {
+			bot.logger.DebugContext(ctx, "Zulip event queue consumer exited without restart or queue reset")
 			return false, nil
 		}
 		bot.logger.WarnContext(
@@ -292,13 +297,22 @@ func (bot *Bot) consumeQueue(ctx context.Context, state QueueState) (bool, bool,
 	queueCtx, cancelQueue := context.WithCancel(ctx)
 	defer cancelQueue()
 
+	bot.logger.DebugContext(ctx, "connecting to Zulip event queue",
+		"queue_id", state.QueueID,
+		"last_event_id", state.LastEventID)
 	eventCh, connectErr := queue.Connect(queueCtx, state.QueueID, state.LastEventID)
 	if connectErr != nil {
 		if isRecoverableEventQueueError(connectErr) {
+			bot.logger.DebugContext(ctx, "Zulip event queue connect failed with recoverable error",
+				"queue_id", state.QueueID,
+				"error", connectErr)
 			return false, true, nil
 		}
 		return false, false, fmt.Errorf("connect to Zulip event queue: %w", connectErr)
 	}
+	bot.logger.DebugContext(ctx, "connected to Zulip event queue",
+		"queue_id", state.QueueID,
+		"last_event_id", state.LastEventID)
 	defer func() {
 		if err := queue.Close(); err != nil {
 			bot.logger.WarnContext(ctx, "failed to close Zulip event queue", "error", err)
@@ -335,10 +349,16 @@ func (bot *Bot) consumeQueue(ctx context.Context, state QueueState) (bool, bool,
 				return false, false, err
 			}
 			if bot.requested.Load() {
+				bot.logger.DebugContext(ctx, "restart requested after Zulip event handling",
+					"event_id", event.GetID(),
+					"event_type", event.GetType())
 				return true, false, nil
 			}
 		case pollErr := <-errs:
 			if isRecoverableEventQueueError(pollErr) {
+				bot.logger.DebugContext(ctx, "Zulip event poll failed with recoverable error",
+					"queue_id", state.QueueID,
+					"error", pollErr)
 				return false, true, nil
 			}
 			bot.logger.WarnContext(ctx, "Zulip event poll failed", "error", pollErr)
@@ -385,13 +405,32 @@ func (bot *Bot) dispatchChain(
 
 	for _, segment := range chain.Segments {
 		if !shouldDispatchChained(segment.Operator, previousSucceeded) {
+			bot.logger.DebugContext(ctx, "skipping command chain segment",
+				"command", segment.Invocation.Name,
+				"operator", segment.Operator,
+				"previous_succeeded", previousSucceeded,
+				"actor_user_id", req.Actor.UserID,
+				"message_id", req.MessageID)
 			continue
 		}
 
 		req.Invocation = segment.Invocation
 		req.ParsedArgs = nil
+		bot.logger.DebugContext(ctx, "dispatching command chain segment",
+			"command", segment.Invocation.Name,
+			"operator", segment.Operator,
+			"previous_succeeded", previousSucceeded,
+			"actor_user_id", req.Actor.UserID,
+			"message_id", req.MessageID)
 		result, succeeded := bot.dispatchOne(ctx, req)
 		previousSucceeded = succeeded
+		bot.logger.DebugContext(ctx, "finished command chain segment",
+			"command", segment.Invocation.Name,
+			"succeeded", succeeded,
+			"has_content", result.Content != "",
+			"has_after_response", result.AfterResponse != nil,
+			"actor_user_id", req.Actor.UserID,
+			"message_id", req.MessageID)
 		if result.Content != "" {
 			contents = append(contents, result.Content)
 		}
@@ -447,8 +486,17 @@ func permissionDeniedResult(err error) command.Result {
 //nolint:funlen // dispatch is the central command boundary; splitting would obscure the command flow
 func (bot *Bot) dispatchOne(ctx context.Context, req command.Request) (command.Result, bool) {
 	name := req.Invocation.Name
+	bot.logger.DebugContext(ctx, "dispatching command",
+		"command", name,
+		"arg_count", len(req.Invocation.Args),
+		"actor_user_id", req.Actor.UserID,
+		"message_id", req.MessageID)
 
 	if !bot.accepting.Load() {
+		bot.logger.DebugContext(ctx, "rejecting command while bot is not accepting commands",
+			"command", name,
+			"actor_user_id", req.Actor.UserID,
+			"message_id", req.MessageID)
 		return command.Result{
 			Content: "The bot is restarting and is not accepting new commands right now.",
 		}, false
@@ -483,6 +531,10 @@ func (bot *Bot) dispatchOne(ctx context.Context, req command.Request) (command.R
 
 	handler, ok := bot.registry.Lookup(name)
 	if !ok {
+		bot.logger.DebugContext(ctx, "unknown command",
+			"command", name,
+			"actor_user_id", req.Actor.UserID,
+			"message_id", req.MessageID)
 		return command.Result{
 			Content: fmt.Sprintf("Unknown command %q. Use `help` to see supported commands.", name),
 		}, false
@@ -509,10 +561,20 @@ func (bot *Bot) dispatchOne(ctx context.Context, req command.Request) (command.R
 	}
 
 	if meta.ArgSpec != nil && bot.argParser != nil {
+		bot.logger.DebugContext(ctx, "parsing command arguments",
+			"command", meta.Name,
+			"arg_count", len(req.Invocation.Args),
+			"actor_user_id", req.Actor.UserID,
+			"message_id", req.MessageID)
 		parsed, parseErr := bot.argParser.Parse(ctx, meta.ArgSpec, req.Invocation.Args)
 		if parseErr != nil {
 			var userErr command.UserError
 			if errors.As(parseErr, &userErr) {
+				bot.logger.DebugContext(ctx, "command argument parsing returned user error",
+					"command", meta.Name,
+					"actor_user_id", req.Actor.UserID,
+					"message_id", req.MessageID,
+					"error", parseErr)
 				return command.Result{Content: userErr.Message}, false
 			}
 			bot.logger.ErrorContext(
@@ -528,13 +590,28 @@ func (bot *Bot) dispatchOne(ctx context.Context, req command.Request) (command.R
 		req.ParsedArgs = parsed
 	}
 
+	bot.logger.DebugContext(ctx, "calling command handler",
+		"command", meta.Name,
+		"actor_user_id", req.Actor.UserID,
+		"message_id", req.MessageID)
 	result, err := handler.Handle(ctx, req)
 	if err == nil {
+		bot.logger.DebugContext(ctx, "command handler completed",
+			"command", meta.Name,
+			"has_content", result.Content != "",
+			"has_after_response", result.AfterResponse != nil,
+			"actor_user_id", req.Actor.UserID,
+			"message_id", req.MessageID)
 		return result, true
 	}
 
 	var userErr command.UserError
 	if errors.As(err, &userErr) {
+		bot.logger.DebugContext(ctx, "command handler returned user error",
+			"command", meta.Name,
+			"actor_user_id", req.Actor.UserID,
+			"message_id", req.MessageID,
+			"error", err)
 		return command.Result{Content: userErr.Message}, false
 	}
 
@@ -1244,6 +1321,7 @@ func (bot *Bot) ensureQueue(ctx context.Context) (QueueState, error) {
 			"last_event_id", state.LastEventID)
 		return state, nil
 	}
+	bot.logger.DebugContext(ctx, "no stored Zulip event queue found; registering a new queue")
 	return bot.registerAndSaveQueue(ctx)
 }
 
@@ -1383,9 +1461,16 @@ func (bot *Bot) handleMessage(
 ) error {
 	msg := event.Message
 	if msg.SenderID == bot.ownUser.UserID {
+		bot.logger.DebugContext(ctx, "skipping own Zulip message",
+			"message_id", msg.ID,
+			"sender_id", msg.SenderID)
 		return nil
 	}
 	if !msg.Type.IsDirectMessage() {
+		bot.logger.DebugContext(ctx, "skipping non-direct Zulip message",
+			"message_id", msg.ID,
+			"sender_id", msg.SenderID,
+			"message_type", msg.Type)
 		return nil
 	}
 
@@ -1405,6 +1490,9 @@ func (bot *Bot) handleMessage(
 
 	chain, err := command.ParseChain(msg.Content)
 	if errors.Is(err, command.ErrNotCommand) {
+		bot.logger.DebugContext(ctx, "skipping non-command Zulip message",
+			"message_id", msg.ID,
+			"sender_id", msg.SenderID)
 		return nil
 	}
 
@@ -1420,6 +1508,10 @@ func (bot *Bot) handleMessage(
 	}
 
 	if err != nil {
+		bot.logger.DebugContext(ctx, "malformed command message",
+			"message_id", msg.ID,
+			"sender_id", msg.SenderID,
+			"error", err)
 		if sendErr := bot.send(
 			ctx,
 			target,
@@ -1432,14 +1524,24 @@ func (bot *Bot) handleMessage(
 
 	result := bot.dispatchChain(ctx, commandRequestFromMessage(msg, target), chain)
 	if result.Content != "" {
+		bot.logger.DebugContext(ctx, "sending command response",
+			"message_id", msg.ID,
+			"target_kind", target.Kind)
 		if err := bot.send(ctx, target, result.Content); err != nil {
 			return err
 		}
+	} else {
+		bot.logger.DebugContext(ctx, "command produced no response content",
+			"message_id", msg.ID,
+			"sender_id", msg.SenderID)
 	}
 	if err := bot.markMessageProcessed(ctx, msg.ID); err != nil {
 		return err
 	}
 	if result.AfterResponse != nil {
+		bot.logger.DebugContext(ctx, "running command after-response callback",
+			"message_id", msg.ID,
+			"sender_id", msg.SenderID)
 		return result.AfterResponse(ctx)
 	}
 	return nil
@@ -1522,6 +1624,10 @@ func (bot *Bot) logCommandReceived(
 //nolint:funlen // reaction handling is a single transactional flow with distinct early exits
 func (bot *Bot) handleReaction(ctx context.Context, event events.ReactionEvent) error {
 	if bot.groupSubscriber == nil {
+		bot.logger.DebugContext(ctx, "skipping reaction event without group subscriber",
+			"message_id", event.MessageID,
+			"user_id", event.UserID,
+			"emoji_name", event.EmojiName)
 		return nil
 	}
 
@@ -1530,17 +1636,34 @@ func (bot *Bot) handleReaction(ctx context.Context, event events.ReactionEvent) 
 		return err
 	}
 	if !ok || !announcementState.MessageID.Valid {
+		bot.logger.DebugContext(ctx, "skipping reaction event without announcement message",
+			"message_id", event.MessageID,
+			"user_id", event.UserID,
+			"emoji_name", event.EmojiName)
 		return nil
 	}
 	if event.MessageID != announcementState.MessageID.Int64 {
+		bot.logger.DebugContext(ctx, "skipping reaction event for non-announcement message",
+			"message_id", event.MessageID,
+			"announcement_message_id", announcementState.MessageID.Int64,
+			"user_id", event.UserID,
+			"emoji_name", event.EmojiName)
 		return nil
 	}
 	if event.UserID == bot.ownUser.UserID {
+		bot.logger.DebugContext(ctx, "skipping own reaction event",
+			"message_id", event.MessageID,
+			"user_id", event.UserID,
+			"emoji_name", event.EmojiName)
 		return nil
 	}
 
 	op, hasOp := event.GetOp()
 	if !hasOp {
+		bot.logger.DebugContext(ctx, "skipping reaction event without operation",
+			"message_id", event.MessageID,
+			"user_id", event.UserID,
+			"emoji_name", event.EmojiName)
 		return nil
 	}
 	opStr := string(op)
@@ -1553,6 +1676,11 @@ func (bot *Bot) handleReaction(ctx context.Context, event events.ReactionEvent) 
 		return err
 	}
 	if !found {
+		bot.logger.DebugContext(ctx, "skipping reaction event without emoji mapping",
+			"message_id", event.MessageID,
+			"user_id", event.UserID,
+			"emoji_name", event.EmojiName,
+			"op", opStr)
 		return nil
 	}
 
@@ -1560,10 +1688,25 @@ func (bot *Bot) handleReaction(ctx context.Context, event events.ReactionEvent) 
 	//nolint:exhaustive // only add/remove reaction events change channel group membership
 	switch op {
 	case events.EventOpAdd:
+		bot.logger.DebugContext(ctx, "subscribing user from reaction",
+			"user_id", event.UserID,
+			"channel_group_id", mapping.ChannelGroupID,
+			"emoji_name", event.EmojiName,
+			"message_id", event.MessageID)
 		opErr = bot.groupSubscriber.SubscribeUser(ctx, event.UserID, mapping.ChannelGroupID)
 	case events.EventOpRemove:
+		bot.logger.DebugContext(ctx, "unsubscribing user from reaction",
+			"user_id", event.UserID,
+			"channel_group_id", mapping.ChannelGroupID,
+			"emoji_name", event.EmojiName,
+			"message_id", event.MessageID)
 		opErr = bot.groupSubscriber.UnsubscribeUser(ctx, event.UserID, mapping.ChannelGroupID)
 	default:
+		bot.logger.DebugContext(ctx, "skipping unsupported reaction operation",
+			"message_id", event.MessageID,
+			"user_id", event.UserID,
+			"emoji_name", event.EmojiName,
+			"op", opStr)
 		return nil
 	}
 
