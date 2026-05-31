@@ -15,13 +15,19 @@ import (
 
 	"github.com/tum-zulip/go-zulip/zulip"
 	"github.com/tum-zulip/go-zulip/zulip/api/channels"
+	realtimeevents "github.com/tum-zulip/go-zulip/zulip/api/real_time_events"
 	zulipclient "github.com/tum-zulip/go-zulip/zulip/client"
 	"github.com/tum-zulip/go-zulip/zulip/client/statistics"
+	"github.com/tum-zulip/go-zulip/zulip/events"
 )
 
 var errNoClients = errors.New("zulip round-robin client requires a base client")
 
-const permissionCheckTimeout = 10 * time.Second
+const (
+	permissionCheckTimeout               = 10 * time.Second
+	workerSubscriptionQueueRetryInterval = 5 * time.Second
+	workerSubscriptionQueueDeleteTimeout = 5 * time.Second
+)
 
 var _ zulipclient.Client = (*Client)(nil)
 
@@ -301,11 +307,161 @@ func SyncPublicChannelSubscriptions(
 	return result, nil
 }
 
+// StartWorkerSubscriptionSyncQueue starts a dedicated Zulip subscription event
+// queue for the base client. Whenever the base client is subscribed to new
+// channels, all workers are subscribed to those channels in one bulk request.
+func (c *Client) StartWorkerSubscriptionSyncQueue(ctx context.Context, logger *slog.Logger) error {
+	if c == nil || c.client == nil {
+		return errNoClients
+	}
+	if ctx == nil {
+		return errors.New("context must not be nil")
+	}
+	if len(c.workers) == 0 {
+		return nil
+	}
+	if logger == nil {
+		logger = slog.Default()
+	}
+	go c.runWorkerSubscriptionSyncQueue(ctx, logger)
+	return nil
+}
+
+func (c *Client) runWorkerSubscriptionSyncQueue(ctx context.Context, logger *slog.Logger) {
+	for {
+		if err := ctx.Err(); err != nil {
+			return
+		}
+		if err := c.consumeWorkerSubscriptionSyncQueue(ctx, logger); err != nil && ctx.Err() == nil {
+			logger.WarnContext(ctx, "Zulip worker subscription sync event queue failed", "error", err)
+			if !waitWorkerSubscriptionQueueRetry(ctx) {
+				return
+			}
+		}
+	}
+}
+
+//nolint:funlen // this function is long but clear and well-structured, and splitting it up would not improve readability
+func (c *Client) consumeWorkerSubscriptionSyncQueue(ctx context.Context, logger *slog.Logger) error {
+	resp, _, err := c.client.RegisterQueue(ctx).
+		ApplyMarkdown(false).
+		EventTypes([]events.EventType{events.EventTypeSubscription}).
+		ClientCapabilities(map[string]interface{}{
+			"archived_channels":          true,
+			"notification_settings_null": true,
+		}).
+		Execute()
+	if err != nil {
+		return fmt.Errorf("register Zulip worker subscription sync event queue: %w", err)
+	}
+	if resp == nil || resp.QueueID == nil || *resp.QueueID == "" {
+		return errors.New("register Zulip worker subscription sync event queue: empty queue ID")
+	}
+
+	queueID := *resp.QueueID
+	errs := make(chan error, 1)
+	queue := realtimeevents.NewEventQueue(
+		c.client,
+		realtimeevents.WithLogger(logger),
+		realtimeevents.WithEventQueueChannelErrorHandler(logger, errs),
+	)
+
+	queueCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	connected := false
+	defer func() {
+		if connected {
+			if err := queue.Close(); err != nil {
+				logger.WarnContext(ctx, "failed to close Zulip worker subscription sync event queue", "error", err)
+			}
+		}
+		deleteCtx, cancelDelete := context.WithTimeout(context.Background(), workerSubscriptionQueueDeleteTimeout)
+		defer cancelDelete()
+		if _, _, err := c.client.DeleteQueue(deleteCtx).QueueID(queueID).Execute(); err != nil {
+			logger.WarnContext(ctx, "failed to delete Zulip worker subscription sync event queue", "error", err)
+		}
+	}()
+
+	eventCh, err := queue.Connect(queueCtx, queueID, resp.LastEventID)
+	if err != nil {
+		return fmt.Errorf("connect Zulip worker subscription sync event queue: %w", err)
+	}
+	connected = true
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case err := <-errs:
+			return fmt.Errorf("poll Zulip worker subscription sync event queue: %w", err)
+		case event, ok := <-eventCh:
+			if !ok {
+				return errors.New("zulip worker subscription sync event queue closed")
+			}
+			if event == nil {
+				logger.WarnContext(ctx, "received nil Zulip worker subscription sync event")
+				continue
+			}
+			c.handleWorkerSubscriptionSyncEvent(ctx, logger, event)
+		}
+	}
+}
+
+func (c *Client) handleWorkerSubscriptionSyncEvent(
+	ctx context.Context,
+	logger *slog.Logger,
+	event events.Event,
+) {
+	if op, ok := event.GetOp(); ok && op != events.EventOpAdd {
+		return
+	}
+	add, ok := event.(events.SubscriptionAddEvent)
+	if !ok {
+		return
+	}
+	result, err := c.SyncWorkerSubscriptionsToChannels(ctx, add.Subscriptions)
+	if err != nil {
+		logger.ErrorContext(ctx, "failed to sync Zulip workers after main client subscription event",
+			"event_id", event.GetID(),
+			"subscribed_channels", result.SubscribedChannelNames,
+			"error", err,
+		)
+		return
+	}
+	if result.MainSubscribedChannels == 0 {
+		return
+	}
+	logger.InfoContext(ctx, "synced Zulip workers after main client subscription event",
+		"event_id", event.GetID(),
+		"workers", result.WorkerCount,
+		"main_subscribed_channels", result.MainSubscribedChannels,
+		"subscribed_worker_channels", result.SubscribedWorkerChannels,
+		"already_subscribed_worker_channels", result.AlreadySubscribedWorkerChannels,
+	)
+}
+
 // SyncWorkerSubscriptions subscribes every worker client to all active channels
 // that the base client is subscribed to, including private channels.
-//
-//nolint:funlen // SyncWorkerSubscriptions is necessarily long due to the number of steps and error checks involved in the process.
 func (c *Client) SyncWorkerSubscriptions(ctx context.Context) (WorkerSubscriptionSyncResult, error) {
+	if c == nil || c.client == nil {
+		return WorkerSubscriptionSyncResult{}, errNoClients
+	}
+
+	subscriptionsResp, _, err := c.client.GetSubscriptions(ctx).Execute()
+	if err != nil {
+		return WorkerSubscriptionSyncResult{}, fmt.Errorf("get main Zulip client subscriptions: %w", err)
+	}
+	return c.SyncWorkerSubscriptionsToChannels(ctx, subscriptionsResp.Subscriptions)
+}
+
+// SyncWorkerSubscriptionsToChannels subscribes every worker client to the
+// provided main-client subscriptions.
+//
+//nolint:funlen // this function is long but clear and well-structured, and splitting it up would not improve readability
+func (c *Client) SyncWorkerSubscriptionsToChannels(
+	ctx context.Context,
+	mainSubscriptions []zulip.Subscription,
+) (WorkerSubscriptionSyncResult, error) {
 	if c == nil || c.client == nil {
 		return WorkerSubscriptionSyncResult{}, errNoClients
 	}
@@ -313,27 +469,21 @@ func (c *Client) SyncWorkerSubscriptions(ctx context.Context) (WorkerSubscriptio
 		return WorkerSubscriptionSyncResult{}, nil
 	}
 
-	workerIDs := make([]int64, 0, len(c.workers))
-	for i, worker := range c.workers {
-		ownUser, _, err := worker.GetOwnUser(ctx).Execute()
-		if err != nil {
-			return WorkerSubscriptionSyncResult{}, fmt.Errorf("get Zulip worker %d own user: %w", i+1, err)
-		}
-		if ownUser == nil || ownUser.UserID == 0 {
-			return WorkerSubscriptionSyncResult{}, fmt.Errorf("get Zulip worker %d own user: missing user ID", i+1)
-		}
-		workerIDs = append(workerIDs, ownUser.UserID)
+	workerIDs, err := c.workerUserIDs(ctx)
+	if err != nil {
+		return WorkerSubscriptionSyncResult{}, err
 	}
 
-	subscriptionsResp, _, err := c.client.GetSubscriptions(ctx).Execute()
-	if err != nil {
-		return WorkerSubscriptionSyncResult{}, fmt.Errorf("get main Zulip client subscriptions: %w", err)
-	}
-	subscriptions := make([]channels.SubscriptionRequest, 0, len(subscriptionsResp.Subscriptions))
-	for _, subscription := range subscriptionsResp.Subscriptions {
+	seen := make(map[string]struct{}, len(mainSubscriptions))
+	subscriptions := make([]channels.SubscriptionRequest, 0, len(mainSubscriptions))
+	for _, subscription := range mainSubscriptions {
 		if subscription.IsArchived || subscription.Name == "" {
 			continue
 		}
+		if _, ok := seen[subscription.Name]; ok {
+			continue
+		}
+		seen[subscription.Name] = struct{}{}
 		subscriptions = append(subscriptions, channels.SubscriptionRequest{Name: subscription.Name})
 	}
 	sort.Slice(subscriptions, func(i, j int) bool { return subscriptions[i].Name < subscriptions[j].Name })
@@ -371,6 +521,32 @@ func (c *Client) SyncWorkerSubscriptions(ctx context.Context) (WorkerSubscriptio
 		)
 	}
 	return result, nil
+}
+
+func (c *Client) workerUserIDs(ctx context.Context) ([]int64, error) {
+	workerIDs := make([]int64, 0, len(c.workers))
+	for i, worker := range c.workers {
+		ownUser, _, err := worker.GetOwnUser(ctx).Execute()
+		if err != nil {
+			return nil, fmt.Errorf("get Zulip worker %d own user: %w", i+1, err)
+		}
+		if ownUser == nil || ownUser.UserID == 0 {
+			return nil, fmt.Errorf("get Zulip worker %d own user: missing user ID", i+1)
+		}
+		workerIDs = append(workerIDs, ownUser.UserID)
+	}
+	return workerIDs, nil
+}
+
+func waitWorkerSubscriptionQueueRetry(ctx context.Context) bool {
+	timer := time.NewTimer(workerSubscriptionQueueRetryInterval)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
 }
 
 func subscribedChannelSet(subscriptions []zulip.Subscription) map[string]struct{} {

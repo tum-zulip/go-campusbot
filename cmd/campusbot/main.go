@@ -147,6 +147,7 @@ func main() {
 	)
 	if syncer, ok := botClient.(interface {
 		SyncWorkerSubscriptions(context.Context) (zuliproundrobin.WorkerSubscriptionSyncResult, error)
+		StartWorkerSubscriptionSyncQueue(context.Context, *slog.Logger) error
 	}); ok {
 		workerSync, syncErr := syncer.SyncWorkerSubscriptions(startupCtx)
 		if syncErr != nil {
@@ -163,6 +164,13 @@ func main() {
 			"already_subscribed_worker_channels", workerSync.AlreadySubscribedWorkerChannels,
 			"unauthorized_channels", len(workerSync.UnauthorizedChannelNames),
 		)
+		if startErr := syncer.StartWorkerSubscriptionSyncQueue(runCtx, logger); startErr != nil {
+			cancelStartup()
+			_ = streamsCache.Close()
+			_ = userGroupsCache.Close()
+			logger.ErrorContext(runCtx, "failed to start Zulip worker subscription sync event queue", "error", startErr)
+			os.Exit(exitFailure)
+		}
 	}
 	db, err := openDatabase(dbPath)
 	if err != nil {

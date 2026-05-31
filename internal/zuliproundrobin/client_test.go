@@ -406,6 +406,39 @@ func TestSyncWorkerSubscriptionsSubscribesWorkersToMainChannels(t *testing.T) {
 	}
 }
 
+func TestSyncWorkerSubscriptionsToChannelsBatchesEventChannels(t *testing.T) {
+	ctx := context.Background()
+	base := zulipmock.NewClient()
+	if _, _, err := base.Subscribe(ctx).
+		Subscriptions([]channels.SubscriptionRequest{{Name: "event-private"}}).
+		InviteOnly(true).
+		Execute(); err != nil {
+		t.Fatalf("Subscribe(event-private) error = %v", err)
+	}
+
+	worker := zulipmock.NewClient()
+	worker.SetOwnUser(zulip.User{UserID: 20, Email: "worker@example.com", FullName: "Worker Bot", IsBot: true})
+
+	client, err := zuliproundrobin.NewClients(base, worker)
+	if err != nil {
+		t.Fatalf("NewClients() error = %v", err)
+	}
+
+	result, err := client.SyncWorkerSubscriptionsToChannels(ctx, []zulip.Subscription{
+		{Channel: zulip.Channel{Name: "event-private", InviteOnly: true}},
+		{Channel: zulip.Channel{Name: "event-private", InviteOnly: true}},
+		{Channel: zulip.Channel{Name: "archived", IsArchived: true}},
+	})
+	if err != nil {
+		t.Fatalf("SyncWorkerSubscriptionsToChannels() error = %v", err)
+	}
+	if result.MainSubscribedChannels != 1 || result.SubscribedWorkerChannels != 1 {
+		t.Fatalf("sync result = %+v, want one deduplicated event channel", result)
+	}
+
+	assertSubscribers(t, ctx, base, "event-private", []int64{0, 20})
+}
+
 func subscriptionNames(subscriptions []zulip.Subscription) []string {
 	names := make([]string, 0, len(subscriptions))
 	for _, subscription := range subscriptions {
