@@ -17,6 +17,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -27,6 +28,7 @@ import (
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot"
 	storagedb "github.com/tum-zulip/go-campusbot/internal/zulipbot/storage/db"
 	"github.com/tum-zulip/go-campusbot/internal/zulipcache"
+	"github.com/tum-zulip/go-campusbot/internal/zuliproundrobin"
 )
 
 const (
@@ -49,6 +51,7 @@ type execFunc func(path string, argv []string, env []string) error
 
 var (
 	zuliprc       = envOrDefault("ZULIPRC", defaultRCPath)
+	workerRCDir   = envOrDefault("CAMPUSBOT_WORKER_RC_DIR", "")
 	dbPath        = envOrDefault("CAMPUSBOT_DB_PATH", defaultDBPath)
 	dryRunRestart bool
 	logLevel      = envOrDefault("CAMPUSBOT_LOG_LEVEL", "info")
@@ -57,6 +60,12 @@ var (
 
 func init() {
 	flag.StringVar(&zuliprc, "zuliprc", zuliprc, "path to zuliprc")
+	flag.StringVar(
+		&workerRCDir,
+		"worker-rc-dir",
+		workerRCDir,
+		"directory containing worker zuliprcs for background Zulip requests",
+	)
 	flag.StringVar(&dbPath, "db", dbPath, "path to SQLite database")
 	flag.BoolVar(&dryRunRestart, "dry-run-restart", false, "log restart exec arguments without exec-ing")
 	flag.StringVar(&logLevel, "log-level", logLevel, "log level: verbose, debug, info, warn, error")
@@ -95,22 +104,73 @@ func main() {
 	startupCtx, cancelStartup := context.WithTimeout(runCtx, startupTimeout)
 	userGroupsCache := zulipcache.NewUserGroups(zulipcache.DefaultUserGroupsTTL)
 	streamsCache := zulipcache.NewStreams(zulipcache.DefaultStreamsTTL)
-	client, err := newZulipClient(zuliprc, zulipLogger, userGroupsCache, streamsCache)
+	baseClient, err := newZulipClient(
+		zuliprc,
+		zulipLogger.With("zulip_client_role", "base", "zulip_client_id", "base", "zuliprc", zuliprc),
+		userGroupsCache,
+		streamsCache,
+	)
 	if err != nil {
 		cancelStartup()
 		logger.ErrorContext(runCtx, "failed to create Zulip client", "error", err)
 		os.Exit(exitFailure)
 	}
-	if err := userGroupsCache.Start(runCtx, client, logger); err != nil {
+	botClient, err := newClientWithWorkers(baseClient, workerRCDir, logger, zulipLogger)
+	if err != nil {
+		cancelStartup()
+		logger.ErrorContext(runCtx, "failed to create Zulip worker client", "error", err)
+		os.Exit(exitFailure)
+	}
+	if err := userGroupsCache.Start(runCtx, baseClient, logger); err != nil {
 		cancelStartup()
 		logger.ErrorContext(runCtx, "failed to start user-groups cache", "error", err)
 		os.Exit(exitFailure)
 	}
-	if err := streamsCache.Start(runCtx, client, logger); err != nil {
+	if err := streamsCache.Start(runCtx, baseClient, logger); err != nil {
 		cancelStartup()
 		_ = userGroupsCache.Close()
 		logger.ErrorContext(runCtx, "failed to start streams cache", "error", err)
 		os.Exit(exitFailure)
+	}
+	publicSync, err := zuliproundrobin.SyncPublicChannelSubscriptions(startupCtx, baseClient)
+	if err != nil {
+		cancelStartup()
+		_ = streamsCache.Close()
+		_ = userGroupsCache.Close()
+		logger.ErrorContext(runCtx, "failed to sync public Zulip channel subscriptions", "error", err)
+		os.Exit(exitFailure)
+	}
+	logger.InfoContext(runCtx, "synced main Zulip client public channel subscriptions",
+		"checked_channels", publicSync.CheckedChannels,
+		"existing_channels", publicSync.ExistingChannels,
+		"subscribed_channels", publicSync.SubscribedChannels,
+	)
+	if syncer, ok := botClient.(interface {
+		SyncWorkerSubscriptions(context.Context) (zuliproundrobin.WorkerSubscriptionSyncResult, error)
+		StartWorkerSubscriptionSyncQueue(context.Context, *slog.Logger) error
+	}); ok {
+		workerSync, syncErr := syncer.SyncWorkerSubscriptions(startupCtx)
+		if syncErr != nil {
+			cancelStartup()
+			_ = streamsCache.Close()
+			_ = userGroupsCache.Close()
+			logger.ErrorContext(runCtx, "failed to sync Zulip worker subscriptions", "error", syncErr)
+			os.Exit(exitFailure)
+		}
+		logger.InfoContext(runCtx, "synced Zulip worker subscriptions",
+			"workers", workerSync.WorkerCount,
+			"main_subscribed_channels", workerSync.MainSubscribedChannels,
+			"subscribed_worker_channels", workerSync.SubscribedWorkerChannels,
+			"already_subscribed_worker_channels", workerSync.AlreadySubscribedWorkerChannels,
+			"unauthorized_channels", len(workerSync.UnauthorizedChannelNames),
+		)
+		if startErr := syncer.StartWorkerSubscriptionSyncQueue(runCtx, logger); startErr != nil {
+			cancelStartup()
+			_ = streamsCache.Close()
+			_ = userGroupsCache.Close()
+			logger.ErrorContext(runCtx, "failed to start Zulip worker subscription sync event queue", "error", startErr)
+			os.Exit(exitFailure)
+		}
 	}
 	db, err := openDatabase(dbPath)
 	if err != nil {
@@ -143,7 +203,7 @@ func main() {
 			Logger:     logger,
 			RunContext: runCtx,
 		},
-		client,
+		botClient,
 		db,
 		queries,
 	)
@@ -226,6 +286,61 @@ func newZulipClient(
 		return nil, fmt.Errorf("create Zulip client: %w", err)
 	}
 	return client, nil
+}
+
+func newClientWithWorkers(
+	client zulipclient.Client,
+	dir string,
+	logger *slog.Logger,
+	zulipLogger *slog.Logger,
+) (zulipclient.Client, error) {
+	paths, err := workerZulipRCPaths(dir, logger)
+	if err != nil {
+		return nil, err
+	}
+	if len(paths) == 0 {
+		return client, nil
+	}
+	return zuliproundrobin.NewWithWorkerFilesLogger(client, zulipLogger, paths...)
+}
+
+func workerZulipRCPaths(dir string, logger *slog.Logger) ([]string, error) {
+	if strings.TrimSpace(dir) == "" {
+		return nil, nil
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			logger.Warn(
+				"Zulip worker rc directory not found; using main Zulip client for background requests",
+				"worker_rc_dir", dir,
+			)
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read Zulip worker rc directory %q: %w", dir, err)
+	}
+
+	paths := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.Type().IsRegular() || !isZulipRCFileName(entry.Name()) {
+			continue
+		}
+		paths = append(paths, filepath.Join(dir, entry.Name()))
+	}
+	sort.Strings(paths)
+
+	if len(paths) == 0 {
+		logger.Warn(
+			"no Zulip worker zuliprcs found; using main Zulip client for background requests",
+			"worker_rc_dir", dir,
+		)
+	}
+	return paths, nil
+}
+
+func isZulipRCFileName(name string) bool {
+	return name == "zuliprc" || strings.HasSuffix(name, ".zuliprc")
 }
 
 func newRetryableHTTPClient(
