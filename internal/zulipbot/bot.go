@@ -47,13 +47,6 @@ type QueueState struct {
 	LastEventID int64
 }
 
-// GroupSubscriber handles subscribe/unsubscribe for reaction events.
-type GroupSubscriber interface {
-	SubscribeUser(ctx context.Context, userID int64, channelGroupID int64) error
-	UnsubscribeUser(ctx context.Context, userID int64, channelGroupID int64) error
-	ChannelGroupName(ctx context.Context, channelGroupID int64) (string, error)
-}
-
 type RuntimeConfig struct {
 	Logger *slog.Logger
 	// RunContext is the context used for background goroutines (e.g. the
@@ -72,10 +65,10 @@ type Bot struct {
 	logger    *slog.Logger
 	startedAt time.Time
 
-	registry        *command.Registry
-	argParser       *command.ArgParser
-	groupSubscriber GroupSubscriber
-	channelGroups   interface{ Close() error }
+	registry           *command.Registry
+	argParser          *command.ArgParser
+	channelGroupClient channelgroup.Client
+	channelGroups      interface{ Close() error }
 
 	accepting atomic.Bool
 	requested atomic.Bool
@@ -157,8 +150,7 @@ func NewBot(
 	if closer, ok := channelGroupClient.(interface{ Close() error }); ok {
 		bot.channelGroups = closer
 	}
-	groupService := channelgroup.NewGroupService(channelGroupClient)
-	bot.groupSubscriber = groupService
+	bot.channelGroupClient = channelGroupClient
 
 	bot.registry = command.NewRegistry()
 	if err := bot.registry.Register(handlers.NewGroupHandler(
@@ -1650,8 +1642,8 @@ func (bot *Bot) logCommandReceived(
 
 //nolint:funlen // reaction handling is a single transactional flow with distinct early exits
 func (bot *Bot) handleReaction(ctx context.Context, event events.ReactionEvent) error {
-	if bot.groupSubscriber == nil {
-		bot.logger.DebugContext(ctx, "skipping reaction event without group subscriber",
+	if bot.channelGroupClient == nil {
+		bot.logger.DebugContext(ctx, "skipping reaction event without channel group client",
 			"message_id", event.MessageID,
 			"user_id", event.UserID,
 			"emoji_name", event.EmojiName)
@@ -1720,14 +1712,34 @@ func (bot *Bot) handleReaction(ctx context.Context, event events.ReactionEvent) 
 			"channel_group_id", mapping.ChannelGroupID,
 			"emoji_name", event.EmojiName,
 			"message_id", event.MessageID)
-		opErr = bot.groupSubscriber.SubscribeUser(ctx, event.UserID, mapping.ChannelGroupID)
+		_, _, opErr = bot.channelGroupClient.SubscribeToChannelGroup(ctx, mapping.ChannelGroupID).
+			Principals(zulip.Principals{UserIDs: &[]int64{event.UserID}}).
+			Execute()
+		if opErr != nil {
+			opErr = fmt.Errorf(
+				"subscribe user %d to channel group %d: %w",
+				event.UserID,
+				mapping.ChannelGroupID,
+				opErr,
+			)
+		}
 	case events.EventOpRemove:
 		bot.logger.DebugContext(ctx, "unsubscribing user from reaction",
 			"user_id", event.UserID,
 			"channel_group_id", mapping.ChannelGroupID,
 			"emoji_name", event.EmojiName,
 			"message_id", event.MessageID)
-		opErr = bot.groupSubscriber.UnsubscribeUser(ctx, event.UserID, mapping.ChannelGroupID)
+		_, _, opErr = bot.channelGroupClient.UnsubscribeFromChannelGroup(ctx, mapping.ChannelGroupID).
+			Principals(zulip.Principals{UserIDs: &[]int64{event.UserID}}).
+			Execute()
+		if opErr != nil {
+			opErr = fmt.Errorf(
+				"unsubscribe user %d from channel group %d: %w",
+				event.UserID,
+				mapping.ChannelGroupID,
+				opErr,
+			)
+		}
 	default:
 		bot.logger.DebugContext(ctx, "skipping unsupported reaction operation",
 			"message_id", event.MessageID,
@@ -1737,12 +1749,14 @@ func (bot *Bot) handleReaction(ctx context.Context, event events.ReactionEvent) 
 		return nil
 	}
 
-	groupShortName, nameErr := bot.groupSubscriber.ChannelGroupName(ctx, mapping.ChannelGroupID)
+	groupShortName := fmt.Sprintf("channel_group_id:%d", mapping.ChannelGroupID)
+	groupResp, _, nameErr := bot.channelGroupClient.GetChannelGroup(ctx, mapping.ChannelGroupID).Execute()
 	if nameErr != nil {
-		groupShortName = fmt.Sprintf("channel_group_id:%d", mapping.ChannelGroupID)
 		bot.logger.WarnContext(ctx, "failed to fetch channel group name",
 			"channel_group_id", mapping.ChannelGroupID,
 			"error", nameErr)
+	} else if groupResp != nil {
+		groupShortName = groupResp.ChannelGroup.Name
 	}
 
 	if opErr != nil {

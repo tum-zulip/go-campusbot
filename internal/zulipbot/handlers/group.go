@@ -74,6 +74,14 @@ type namedEmojiGroupMapping struct {
 	ShortName string
 }
 
+type visibleZulipUserGroupSummary struct {
+	ID            int64
+	Name          string
+	Description   string
+	MemberCount   int
+	IsSystemGroup bool
+}
+
 func (h *GroupHandler) emojiGroupMappingByShortName(
 	ctx context.Context,
 	shortName string,
@@ -839,17 +847,17 @@ func isZulipBadRequestMessage(err error, text string) bool {
 // in Zulip, excluding deactivated and system groups. Sorted by ID.
 func (h *GroupHandler) listVisibleZulipUserGroups(
 	ctx context.Context,
-) ([]channelgroup.ZulipUserGroupSummary, error) {
+) ([]visibleZulipUserGroupSummary, error) {
 	resp, _, err := h.client.GetUserGroups(ctx).IncludeDeactivatedGroups(false).Execute()
 	if err != nil {
 		return nil, fmt.Errorf("list zulip user groups: %w", err)
 	}
-	summaries := make([]channelgroup.ZulipUserGroupSummary, 0, len(resp.UserGroups))
+	summaries := make([]visibleZulipUserGroupSummary, 0, len(resp.UserGroups))
 	for _, group := range resp.UserGroups {
 		if group.Deactivated || group.IsSystemGroup {
 			continue
 		}
-		summaries = append(summaries, channelgroup.ZulipUserGroupSummary{
+		summaries = append(summaries, visibleZulipUserGroupSummary{
 			ID:            group.ID,
 			Name:          group.Name,
 			Description:   group.Description,

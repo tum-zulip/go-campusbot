@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"log/slog"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -19,36 +18,6 @@ import (
 	storagedb "github.com/tum-zulip/go-campusbot/internal/zulipbot/storage/db"
 	"github.com/tum-zulip/go-campusbot/internal/zulipmock"
 )
-
-type recordingGroupSubscriber struct {
-	subscribedUserID  int64
-	subscribedGroupID int64
-}
-
-func (s *recordingGroupSubscriber) SubscribeUser(
-	_ context.Context,
-	userID int64,
-	channelGroupID int64,
-) error {
-	s.subscribedUserID = userID
-	s.subscribedGroupID = channelGroupID
-	return nil
-}
-
-func (s *recordingGroupSubscriber) UnsubscribeUser(
-	_ context.Context,
-	_ int64,
-	_ int64,
-) error {
-	return nil
-}
-
-func (s *recordingGroupSubscriber) ChannelGroupName(
-	_ context.Context,
-	channelGroupID int64,
-) (string, error) {
-	return "group-" + strconv.FormatInt(channelGroupID, 10), nil
-}
 
 func decodeReactionEvent(t *testing.T, raw string) events.ReactionEvent {
 	t.Helper()
@@ -406,6 +375,7 @@ func TestHandleReactionSubscribesForNonUnicodeMappedEmoji(t *testing.T) {
 	client := zulipmock.NewClient()
 	client.SetOwnUser(zulip.User{UserID: 100, Email: "bot@example.com", FullName: "Mock Bot", IsBot: true})
 	client.AddUser(zulip.User{UserID: 100, IsBot: true})
+	client.AddUser(zulip.User{UserID: 7, Role: zulip.RoleMember})
 
 	dbPath := filepath.Join(t.TempDir(), "bot.sqlite3")
 	db, queries := openZulipbotTestStorage(t, dbPath)
@@ -422,7 +392,13 @@ func TestHandleReactionSubscribesForNonUnicodeMappedEmoji(t *testing.T) {
 
 	const messageID = int64(4242)
 	const userID = int64(7)
-	const channelGroupID = int64(99)
+	created, _, err := bot.ChannelGroupClientForTest().CreateChannelGroup(ctx).
+		Name("group-99").
+		Execute()
+	if err != nil {
+		t.Fatalf("CreateChannelGroup: %v", err)
+	}
+	channelGroupID := created.ChannelGroupID
 	if err = queries.SaveAnnouncementState(ctx, storagedb.SaveAnnouncementStateParams{
 		MessageID: sql.NullInt64{Int64: messageID, Valid: true},
 		UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano),
@@ -439,9 +415,6 @@ func TestHandleReactionSubscribesForNonUnicodeMappedEmoji(t *testing.T) {
 		t.Fatalf("UpsertEmojiGroupMapping: %v", err)
 	}
 
-	subscriber := &recordingGroupSubscriber{}
-	bot.SetGroupSubscriberForTest(subscriber)
-
 	event := decodeReactionEvent(t, `{
 		"id": 6,
 		"type": "reaction",
@@ -456,14 +429,14 @@ func TestHandleReactionSubscribesForNonUnicodeMappedEmoji(t *testing.T) {
 		t.Fatalf("HandleReaction: %v", err)
 	}
 
-	if subscriber.subscribedUserID != userID || subscriber.subscribedGroupID != channelGroupID {
-		t.Fatalf(
-			"SubscribeUser called with user=%d group=%d, want user=%d group=%d",
-			subscriber.subscribedUserID,
-			subscriber.subscribedGroupID,
-			userID,
-			channelGroupID,
-		)
+	resp, _, err := bot.ChannelGroupClientForTest().
+		GetIsChannelGroupSubscriber(ctx, channelGroupID, userID).
+		Execute()
+	if err != nil {
+		t.Fatalf("GetIsChannelGroupSubscriber: %v", err)
+	}
+	if !resp.IsSubscriber {
+		t.Fatalf("user %d was not subscribed to channel group %d", userID, channelGroupID)
 	}
 }
 
