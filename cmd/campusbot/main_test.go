@@ -7,6 +7,8 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -122,6 +124,73 @@ func TestNewLoggerSupportsJSONFormat(t *testing.T) {
 	}
 }
 
+func TestWorkerZulipRCPathsDefaultsToNoWorkers(t *testing.T) {
+	got, err := workerZulipRCPaths("", testLogger(t, nil))
+	if err != nil {
+		t.Fatalf("workerZulipRCPaths() error = %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("workerZulipRCPaths() = %q, want no worker paths", got)
+	}
+}
+
+func TestWorkerZulipRCPathsLoadsOnlyDirectoryZulipRCs(t *testing.T) {
+	dir := t.TempDir()
+	writeTestFile(t, filepath.Join(dir, "b.zuliprc"))
+	writeTestFile(t, filepath.Join(dir, "a.zuliprc"))
+	writeTestFile(t, filepath.Join(dir, "zuliprc"))
+	writeTestFile(t, filepath.Join(dir, "README.md"))
+	if err := os.Mkdir(filepath.Join(dir, "nested.zuliprc"), 0o750); err != nil {
+		t.Fatalf("mkdir nested.zuliprc: %v", err)
+	}
+
+	got, err := workerZulipRCPaths(dir, testLogger(t, nil))
+	if err != nil {
+		t.Fatalf("workerZulipRCPaths() error = %v", err)
+	}
+	want := []string{
+		filepath.Join(dir, "a.zuliprc"),
+		filepath.Join(dir, "b.zuliprc"),
+		filepath.Join(dir, "zuliprc"),
+	}
+	if !equalStrings(got, want) {
+		t.Fatalf("workerZulipRCPaths() = %q, want %q", got, want)
+	}
+}
+
+func TestWorkerZulipRCPathsWarnsAndReturnsNoWorkersWhenDirectoryHasNoZulipRCs(t *testing.T) {
+	dir := t.TempDir()
+	writeTestFile(t, filepath.Join(dir, "README.md"))
+	var logs bytes.Buffer
+
+	got, err := workerZulipRCPaths(dir, testLogger(t, &logs))
+	if err != nil {
+		t.Fatalf("workerZulipRCPaths() error = %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("workerZulipRCPaths() = %q, want no worker paths", got)
+	}
+	if log := logs.String(); !strings.Contains(log, "using main Zulip client for background requests") {
+		t.Fatalf("warning log = %q, want no-workers warning", log)
+	}
+}
+
+func TestWorkerZulipRCPathsWarnsAndReturnsNoWorkersWhenDirectoryIsMissing(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "missing")
+	var logs bytes.Buffer
+
+	got, err := workerZulipRCPaths(dir, testLogger(t, &logs))
+	if err != nil {
+		t.Fatalf("workerZulipRCPaths() error = %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("workerZulipRCPaths() = %q, want no worker paths", got)
+	}
+	if log := logs.String(); !strings.Contains(log, "worker rc directory not found") {
+		t.Fatalf("warning log = %q, want missing-directory warning", log)
+	}
+}
+
 func TestResettableBodyTransportRewindsRequestBody(t *testing.T) {
 	recorder := &bodyRecorderTransport{}
 	transport := resettableBodyTransport{base: recorder}
@@ -175,4 +244,19 @@ func equalStrings(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+func testLogger(t *testing.T, w io.Writer) *slog.Logger {
+	t.Helper()
+	if w == nil {
+		w = io.Discard
+	}
+	return slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: slog.LevelDebug}))
+}
+
+func writeTestFile(t *testing.T, path string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte("test"), 0o600); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
 }
