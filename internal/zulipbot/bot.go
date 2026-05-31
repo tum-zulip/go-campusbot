@@ -47,13 +47,6 @@ type QueueState struct {
 	LastEventID int64
 }
 
-// GroupSubscriber handles subscribe/unsubscribe for reaction events.
-type GroupSubscriber interface {
-	SubscribeUser(ctx context.Context, userID int64, channelGroupID int64) error
-	UnsubscribeUser(ctx context.Context, userID int64, channelGroupID int64) error
-	ChannelGroupName(ctx context.Context, channelGroupID int64) (string, error)
-}
-
 type RuntimeConfig struct {
 	Logger *slog.Logger
 	// RunContext is the context used for background goroutines (e.g. the
@@ -72,10 +65,10 @@ type Bot struct {
 	logger    *slog.Logger
 	startedAt time.Time
 
-	registry        *command.Registry
-	argParser       *command.ArgParser
-	groupSubscriber GroupSubscriber
-	channelGroups   interface{ Close() error }
+	registry           *command.Registry
+	argParser          *command.ArgParser
+	channelGroupClient channelgroup.Client
+	channelGroups      interface{ Close() error }
 
 	accepting atomic.Bool
 	requested atomic.Bool
@@ -114,6 +107,8 @@ func New(ctx context.Context, client zulipclient.Client) (*Bot, error) {
 // NewBot wires the full bot: client, storage queries, configuration service,
 // announcement manager, channel-group client, command registry, and the
 // long-poll loop. Replaces the former App.
+//
+//nolint:funlen // NewBot is necessarily long because it wires together many components; splitting would just move the complexity to the caller.
 func NewBot(
 	ctx context.Context,
 	cfg RuntimeConfig,
@@ -157,8 +152,7 @@ func NewBot(
 	if closer, ok := channelGroupClient.(interface{ Close() error }); ok {
 		bot.channelGroups = closer
 	}
-	groupService := channelgroup.NewGroupService(channelGroupClient)
-	bot.groupSubscriber = groupService
+	bot.channelGroupClient = channelGroupClient
 
 	bot.registry = command.NewRegistry()
 	if err := bot.registry.Register(handlers.NewGroupHandler(
@@ -167,6 +161,15 @@ func NewBot(
 		bot,
 		cfg.Logger,
 	)); err != nil {
+		if closer, ok := channelGroupClient.(interface{ Close() error }); ok {
+			if closeErr := closer.Close(); closeErr != nil {
+				return nil, fmt.Errorf(
+					"register group handler: %w; close channel group client: %w",
+					err,
+					closeErr,
+				)
+			}
+		}
 		return nil, err
 	}
 
@@ -561,12 +564,32 @@ func (bot *Bot) dispatchOne(ctx context.Context, req command.Request) (command.R
 	}
 
 	if meta.ArgSpec != nil && bot.argParser != nil {
+		requiredPermission := command.RequiredPermission(meta.ArgSpec, req.Invocation.Args)
+		if err := bot.Check(ctx, req.Actor, requiredPermission); err != nil {
+			bot.logger.WarnContext(
+				ctx,
+				"subcommand permission denied",
+				"command",
+				meta.Name,
+				"actor_user_id",
+				req.Actor.UserID,
+				"message_id",
+				req.MessageID,
+				"error",
+				err,
+			)
+			return permissionDeniedResult(err), false
+		}
+
 		bot.logger.DebugContext(ctx, "parsing command arguments",
 			"command", meta.Name,
 			"arg_count", len(req.Invocation.Args),
 			"actor_user_id", req.Actor.UserID,
 			"message_id", req.MessageID)
-		parsed, parseErr := bot.argParser.Parse(ctx, meta.ArgSpec, req.Invocation.Args)
+		visibleArgSpec := command.FilterArgSpec(meta.ArgSpec, func(permission zulip.Role) bool {
+			return bot.Check(ctx, req.Actor, permission) == nil
+		})
+		parsed, parseErr := bot.argParser.Parse(ctx, visibleArgSpec, req.Invocation.Args)
 		if parseErr != nil {
 			var userErr command.UserError
 			if errors.As(parseErr, &userErr) {
@@ -1473,6 +1496,13 @@ func (bot *Bot) handleMessage(
 			"message_type", msg.Type)
 		return nil
 	}
+	if !directMessageIncludesUser(msg, bot.ownUser.UserID) {
+		bot.logger.DebugContext(ctx, "skipping direct Zulip message without bot recipient",
+			"message_id", msg.ID,
+			"sender_id", msg.SenderID,
+			"bot_user_id", bot.ownUser.UserID)
+		return nil
+	}
 
 	alreadyProcessed, err := bot.messageProcessed(ctx, msg.ID)
 	if err != nil {
@@ -1623,8 +1653,8 @@ func (bot *Bot) logCommandReceived(
 
 //nolint:funlen // reaction handling is a single transactional flow with distinct early exits
 func (bot *Bot) handleReaction(ctx context.Context, event events.ReactionEvent) error {
-	if bot.groupSubscriber == nil {
-		bot.logger.DebugContext(ctx, "skipping reaction event without group subscriber",
+	if bot.channelGroupClient == nil {
+		bot.logger.DebugContext(ctx, "skipping reaction event without channel group client",
 			"message_id", event.MessageID,
 			"user_id", event.UserID,
 			"emoji_name", event.EmojiName)
@@ -1693,14 +1723,34 @@ func (bot *Bot) handleReaction(ctx context.Context, event events.ReactionEvent) 
 			"channel_group_id", mapping.ChannelGroupID,
 			"emoji_name", event.EmojiName,
 			"message_id", event.MessageID)
-		opErr = bot.groupSubscriber.SubscribeUser(ctx, event.UserID, mapping.ChannelGroupID)
+		_, _, opErr = bot.channelGroupClient.SubscribeToChannelGroup(ctx, mapping.ChannelGroupID).
+			Principals(zulip.Principals{UserIDs: &[]int64{event.UserID}}).
+			Execute()
+		if opErr != nil {
+			opErr = fmt.Errorf(
+				"subscribe user %d to channel group %d: %w",
+				event.UserID,
+				mapping.ChannelGroupID,
+				opErr,
+			)
+		}
 	case events.EventOpRemove:
 		bot.logger.DebugContext(ctx, "unsubscribing user from reaction",
 			"user_id", event.UserID,
 			"channel_group_id", mapping.ChannelGroupID,
 			"emoji_name", event.EmojiName,
 			"message_id", event.MessageID)
-		opErr = bot.groupSubscriber.UnsubscribeUser(ctx, event.UserID, mapping.ChannelGroupID)
+		_, _, opErr = bot.channelGroupClient.UnsubscribeFromChannelGroup(ctx, mapping.ChannelGroupID).
+			Principals(zulip.Principals{UserIDs: &[]int64{event.UserID}}).
+			Execute()
+		if opErr != nil {
+			opErr = fmt.Errorf(
+				"unsubscribe user %d from channel group %d: %w",
+				event.UserID,
+				mapping.ChannelGroupID,
+				opErr,
+			)
+		}
 	default:
 		bot.logger.DebugContext(ctx, "skipping unsupported reaction operation",
 			"message_id", event.MessageID,
@@ -1710,12 +1760,14 @@ func (bot *Bot) handleReaction(ctx context.Context, event events.ReactionEvent) 
 		return nil
 	}
 
-	groupShortName, nameErr := bot.groupSubscriber.ChannelGroupName(ctx, mapping.ChannelGroupID)
+	groupShortName := fmt.Sprintf("channel_group_id:%d", mapping.ChannelGroupID)
+	groupResp, _, nameErr := bot.channelGroupClient.GetChannelGroup(ctx, mapping.ChannelGroupID).Execute()
 	if nameErr != nil {
-		groupShortName = fmt.Sprintf("channel_group_id:%d", mapping.ChannelGroupID)
 		bot.logger.WarnContext(ctx, "failed to fetch channel group name",
 			"channel_group_id", mapping.ChannelGroupID,
 			"error", nameErr)
+	} else if groupResp != nil {
+		groupShortName = groupResp.ChannelGroup.Name
 	}
 
 	if opErr != nil {
@@ -1801,6 +1853,18 @@ func replyTargetFromMessage(msg zulip.Message, ownUserID int64) (command.ReplyTa
 		return target, nil
 	}
 	return command.ReplyTarget{}, fmt.Errorf("unsupported Zulip message type %q", msg.Type)
+}
+
+func directMessageIncludesUser(msg zulip.Message, userID int64) bool {
+	if msg.DisplayRecipient.UserRecipents == nil {
+		return false
+	}
+	for _, recipient := range *msg.DisplayRecipient.UserRecipents {
+		if recipient.ID != nil && *recipient.ID == userID {
+			return true
+		}
+	}
+	return false
 }
 
 func directReplyUserIDs(msg zulip.Message, ownUserID int64) []int64 {

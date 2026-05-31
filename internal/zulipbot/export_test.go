@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/tum-zulip/go-campusbot/internal/channelgroup"
 	realtimeevents "github.com/tum-zulip/go-zulip/zulip/api/real_time_events"
 	"github.com/tum-zulip/go-zulip/zulip/events"
 
@@ -38,8 +39,8 @@ func (bot *Bot) SaveEventQueueStateForTest(ctx context.Context, state QueueState
 	return bot.saveEventQueueState(ctx, state)
 }
 
-func (bot *Bot) SetGroupSubscriberForTest(subscriber GroupSubscriber) {
-	bot.groupSubscriber = subscriber
+func (bot *Bot) ChannelGroupClientForTest() channelgroup.Client {
+	return bot.channelGroupClient
 }
 
 func (bot *Bot) SetStartedAtForTest(t time.Time) {
