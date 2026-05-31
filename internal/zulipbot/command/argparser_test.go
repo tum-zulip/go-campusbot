@@ -269,6 +269,205 @@ func TestArgParserNestedSubcmd(t *testing.T) {
 	}
 }
 
+func TestArgParserRestrictedSpecDispatchesWrappedSpec(t *testing.T) {
+	t.Parallel()
+	result := parse(t, command.RequireRole(command.PermAdmin, testSpec), []string{"a", "hello"})
+	got, ok := result.(subA)
+	if !ok {
+		t.Fatalf("expected subA, got %T", result)
+	}
+	if got.Val != "hello" {
+		t.Fatalf("Val = %q, want %q", got.Val, "hello")
+	}
+}
+
+func TestRequiredPermissionReturnsSelectedSubcommandPermission(t *testing.T) {
+	t.Parallel()
+	spec := command.SubcmdSpec{
+		"open":       subA{},
+		"restricted": command.RequireRole(command.PermAdmin, subA{}),
+		"nested": command.RequireRole(command.PermAdmin, command.SubcmdSpec{
+			"owner": command.RequireRole(command.PermOwner, subA{}),
+		}),
+	}
+	if got := command.RequiredPermission(spec, []string{"open", "value"}); got != command.PermOpen {
+		t.Fatalf("open permission = %v, want %v", got, command.PermOpen)
+	}
+	if got := command.RequiredPermission(spec, []string{"restricted"}); got != command.PermAdmin {
+		t.Fatalf("restricted permission = %v, want %v", got, command.PermAdmin)
+	}
+	if got := command.RequiredPermission(spec, []string{"nested", "owner"}); got != command.PermOwner {
+		t.Fatalf("nested owner permission = %v, want %v", got, command.PermOwner)
+	}
+}
+
+func TestFilterArgSpecRemovesDisallowedSubcommands(t *testing.T) {
+	t.Parallel()
+	spec := command.SubcmdSpec{
+		"open":       subA{},
+		"restricted": command.RequireRole(command.PermAdmin, subA{}),
+	}
+	filtered := command.FilterArgSpec(spec, func(permission zulip.Role) bool {
+		return permission == command.PermOpen
+	})
+	msg := parseErr(t, filtered, []string{"restricted"})
+	if strings.Contains(msg, "open, restricted") || strings.Contains(msg, "restricted, open") {
+		t.Fatalf("filtered error leaked restricted subcommand: %q", msg)
+	}
+	if !strings.Contains(msg, "open") {
+		t.Fatalf("filtered error should mention open subcommand: %q", msg)
+	}
+}
+
+// --- RequiredPermission additional edge cases ---
+
+func TestRequiredPermissionPlainLeafStructReturnsOpen(t *testing.T) {
+	t.Parallel()
+	// A plain struct (non-SubcmdSpec, non-RestrictedSpec) has no restriction.
+	if got := command.RequiredPermission(subA{}, []string{"ignored"}); got != command.PermOpen {
+		t.Fatalf("plain leaf permission = %v, want PermOpen", got)
+	}
+}
+
+func TestRequiredPermissionEmptyArgsNoDefaultKeyReturnsOpen(t *testing.T) {
+	t.Parallel()
+	// SubcmdSpec without "" key + empty args → returns accumulated permission (PermOpen).
+	spec := command.SubcmdSpec{
+		"sub": subA{},
+	}
+	if got := command.RequiredPermission(spec, nil); got != command.PermOpen {
+		t.Fatalf("empty args no default key permission = %v, want PermOpen", got)
+	}
+}
+
+func TestRequiredPermissionUnknownSubcommandReturnsAccumulated(t *testing.T) {
+	t.Parallel()
+	// Unknown subcommand key → stop and return what's accumulated so far.
+	spec := command.RequireRole(command.PermAdmin, command.SubcmdSpec{
+		"known": subA{},
+	})
+	if got := command.RequiredPermission(spec, []string{"unknown"}); got != command.PermAdmin {
+		t.Fatalf("unknown subcommand permission = %v, want PermAdmin", got)
+	}
+}
+
+func TestRequiredPermissionDefaultKeySubcmdFollowsDefaultBranch(t *testing.T) {
+	t.Parallel()
+	// SubcmdSpec with "" key + empty args → follows default branch.
+	spec := command.SubcmdSpec{
+		"":    command.RequireRole(command.PermOwner, subA{}),
+		"sub": subA{},
+	}
+	if got := command.RequiredPermission(spec, nil); got != command.PermOwner {
+		t.Fatalf("default key permission = %v, want PermOwner", got)
+	}
+}
+
+func TestRequiredPermissionDoubleRestrictedSpecUsesStrictestRole(t *testing.T) {
+	t.Parallel()
+	// RestrictedSpec(Admin) wrapping RestrictedSpec(Owner) => Owner is stricter.
+	spec := command.RequireRole(command.PermAdmin, command.RequireRole(command.PermOwner, subA{}))
+	if got := command.RequiredPermission(spec, nil); got != command.PermOwner {
+		t.Fatalf("double restricted permission = %v, want PermOwner", got)
+	}
+}
+
+func TestRequiredPermissionRestrictedSpecWrapsLeafStruct(t *testing.T) {
+	t.Parallel()
+	// RestrictedSpec wrapping a plain struct (no further nesting) returns the wrapper's permission.
+	spec := command.RequireRole(command.PermAdmin, subA{})
+	if got := command.RequiredPermission(spec, []string{"anything"}); got != command.PermAdmin {
+		t.Fatalf("restricted leaf permission = %v, want PermAdmin", got)
+	}
+}
+
+// --- FilterArgSpec additional edge cases ---
+
+func TestFilterArgSpecAllRestrictedReturnsEmptySubcmdSpec(t *testing.T) {
+	t.Parallel()
+	spec := command.SubcmdSpec{
+		"admin-a": command.RequireRole(command.PermAdmin, subA{}),
+		"admin-b": command.RequireRole(command.PermAdmin, subB{}),
+	}
+	// No permissions allowed → both entries removed.
+	filtered := command.FilterArgSpec(spec, func(_ zulip.Role) bool { return false })
+	// Parsing with no args should fail with "expected subcommand: " (empty list).
+	msg := parseErr(t, filtered, nil)
+	// The error should list no available subcommands since all were filtered out.
+	if strings.Contains(msg, "admin-a") || strings.Contains(msg, "admin-b") {
+		t.Fatalf("filtered spec leaked restricted subcommand names as available options: %q", msg)
+	}
+}
+
+func TestFilterArgSpecNoneRestrictedPassesAllThrough(t *testing.T) {
+	t.Parallel()
+	spec := command.SubcmdSpec{
+		"a": subA{},
+		"b": subB{},
+	}
+	// All permissions allowed → nothing filtered.
+	filtered := command.FilterArgSpec(spec, func(_ zulip.Role) bool { return true })
+	result := parse(t, filtered, []string{"a", "hello"})
+	if _, ok := result.(subA); !ok {
+		t.Fatalf("expected subA after filtering with allow-all, got %T", result)
+	}
+}
+
+func TestFilterArgSpecPlainStructPassesThroughUnchanged(t *testing.T) {
+	t.Parallel()
+	// A plain struct (no restriction) should be returned as-is.
+	filtered := command.FilterArgSpec(subA{}, func(_ zulip.Role) bool { return false })
+	result := parse(t, filtered, []string{"hello"})
+	got, ok := result.(subA)
+	if !ok {
+		t.Fatalf("expected subA, got %T", result)
+	}
+	if got.Val != "hello" {
+		t.Fatalf("Val = %q, want %q", got.Val, "hello")
+	}
+}
+
+func TestFilterArgSpecUnwrapsAllowedRestrictedSpec(t *testing.T) {
+	t.Parallel()
+	// When RestrictedSpec is allowed, the inner spec is unwrapped and accessible.
+	spec := command.RequireRole(command.PermAdmin, command.SubcmdSpec{
+		"sub": subA{},
+	})
+	filtered := command.FilterArgSpec(spec, func(_ zulip.Role) bool { return true })
+	result := parse(t, filtered, []string{"sub", "val"})
+	got, ok := result.(subA)
+	if !ok {
+		t.Fatalf("expected subA after allowed restricted spec, got %T", result)
+	}
+	if got.Val != "val" {
+		t.Fatalf("Val = %q, want %q", got.Val, "val")
+	}
+}
+
+func TestFilterArgSpecDeniedRestrictedSpecReturnsNil(t *testing.T) {
+	t.Parallel()
+	// When a top-level RestrictedSpec is denied, FilterArgSpec returns nil.
+	spec := command.RequireRole(command.PermAdmin, subA{})
+	filtered := command.FilterArgSpec(spec, func(_ zulip.Role) bool { return false })
+	if filtered != nil {
+		t.Fatalf("expected nil for denied top-level RestrictedSpec, got %T", filtered)
+	}
+}
+
+// --- RequireRole construction ---
+
+func TestRequireRoleStoresPermissionAndSpec(t *testing.T) {
+	t.Parallel()
+	inner := subA{}
+	restricted := command.RequireRole(command.PermAdmin, inner)
+	if restricted.Permission != command.PermAdmin {
+		t.Fatalf("Permission = %v, want PermAdmin", restricted.Permission)
+	}
+	if _, ok := restricted.Spec.(subA); !ok {
+		t.Fatalf("Spec type = %T, want subA", restricted.Spec)
+	}
+}
+
 // --- empty-string key (default subcommand) ---
 
 // defaultArgs represents the zero-arg default case (e.g. "group announce" with no subcommand).

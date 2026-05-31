@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"log/slog"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -19,36 +18,6 @@ import (
 	storagedb "github.com/tum-zulip/go-campusbot/internal/zulipbot/storage/db"
 	"github.com/tum-zulip/go-campusbot/internal/zulipmock"
 )
-
-type recordingGroupSubscriber struct {
-	subscribedUserID  int64
-	subscribedGroupID int64
-}
-
-func (s *recordingGroupSubscriber) SubscribeUser(
-	_ context.Context,
-	userID int64,
-	channelGroupID int64,
-) error {
-	s.subscribedUserID = userID
-	s.subscribedGroupID = channelGroupID
-	return nil
-}
-
-func (s *recordingGroupSubscriber) UnsubscribeUser(
-	_ context.Context,
-	_ int64,
-	_ int64,
-) error {
-	return nil
-}
-
-func (s *recordingGroupSubscriber) ChannelGroupName(
-	_ context.Context,
-	channelGroupID int64,
-) (string, error) {
-	return "group-" + strconv.FormatInt(channelGroupID, 10), nil
-}
 
 func decodeReactionEvent(t *testing.T, raw string) events.ReactionEvent {
 	t.Helper()
@@ -326,6 +295,39 @@ func TestDispatchUnknownCommand(t *testing.T) {
 	}
 }
 
+func TestDispatchDeniesRestrictedSubcommandBeforeArgErrors(t *testing.T) {
+	t.Parallel()
+
+	bot := newDispatchTestBot(t)
+	result := bot.Dispatch(context.Background(), memberRequest("group", "create"))
+	if result.Content != "permission denied" {
+		t.Fatalf("group create reply = %q, want permission denied", result.Content)
+	}
+	if strings.Contains(result.Content, "Usage:") || strings.Contains(result.Content, "emoji_name") {
+		t.Fatalf("restricted arg error leaked in reply: %q", result.Content)
+	}
+}
+
+func TestDispatchSubcommandArgErrorsOnlyShowVisibleSubcommands(t *testing.T) {
+	t.Parallel()
+
+	bot := newDispatchTestBot(t)
+	result := bot.Dispatch(context.Background(), memberRequest("group", "bogus"))
+	if !strings.Contains(result.Content, `unknown subcommand "bogus"`) {
+		t.Fatalf("group bogus reply = %q", result.Content)
+	}
+	for _, restricted := range []string{"create", "mapping", "channel", "folder", "announce"} {
+		if strings.Contains(result.Content, restricted) {
+			t.Fatalf("restricted subcommand %q leaked in reply: %q", restricted, result.Content)
+		}
+	}
+	for _, visible := range []string{"subscribe", "unsubscribe", "ls", "show"} {
+		if !strings.Contains(result.Content, visible) {
+			t.Fatalf("visible subcommand %q missing from reply: %q", visible, result.Content)
+		}
+	}
+}
+
 func TestRegisterQueueRequestsReactionEvents(t *testing.T) {
 	t.Parallel()
 
@@ -373,6 +375,7 @@ func TestHandleReactionSubscribesForNonUnicodeMappedEmoji(t *testing.T) {
 	client := zulipmock.NewClient()
 	client.SetOwnUser(zulip.User{UserID: 100, Email: "bot@example.com", FullName: "Mock Bot", IsBot: true})
 	client.AddUser(zulip.User{UserID: 100, IsBot: true})
+	client.AddUser(zulip.User{UserID: 7, Role: zulip.RoleMember})
 
 	dbPath := filepath.Join(t.TempDir(), "bot.sqlite3")
 	db, queries := openZulipbotTestStorage(t, dbPath)
@@ -389,7 +392,13 @@ func TestHandleReactionSubscribesForNonUnicodeMappedEmoji(t *testing.T) {
 
 	const messageID = int64(4242)
 	const userID = int64(7)
-	const channelGroupID = int64(99)
+	created, _, err := bot.ChannelGroupClientForTest().CreateChannelGroup(ctx).
+		Name("group-99").
+		Execute()
+	if err != nil {
+		t.Fatalf("CreateChannelGroup: %v", err)
+	}
+	channelGroupID := created.ChannelGroupID
 	if err = queries.SaveAnnouncementState(ctx, storagedb.SaveAnnouncementStateParams{
 		MessageID: sql.NullInt64{Int64: messageID, Valid: true},
 		UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano),
@@ -406,9 +415,6 @@ func TestHandleReactionSubscribesForNonUnicodeMappedEmoji(t *testing.T) {
 		t.Fatalf("UpsertEmojiGroupMapping: %v", err)
 	}
 
-	subscriber := &recordingGroupSubscriber{}
-	bot.SetGroupSubscriberForTest(subscriber)
-
 	event := decodeReactionEvent(t, `{
 		"id": 6,
 		"type": "reaction",
@@ -423,14 +429,14 @@ func TestHandleReactionSubscribesForNonUnicodeMappedEmoji(t *testing.T) {
 		t.Fatalf("HandleReaction: %v", err)
 	}
 
-	if subscriber.subscribedUserID != userID || subscriber.subscribedGroupID != channelGroupID {
-		t.Fatalf(
-			"SubscribeUser called with user=%d group=%d, want user=%d group=%d",
-			subscriber.subscribedUserID,
-			subscriber.subscribedGroupID,
-			userID,
-			channelGroupID,
-		)
+	resp, _, err := bot.ChannelGroupClientForTest().
+		GetIsChannelGroupSubscriber(ctx, channelGroupID, userID).
+		Execute()
+	if err != nil {
+		t.Fatalf("GetIsChannelGroupSubscriber: %v", err)
+	}
+	if !resp.IsSubscriber {
+		t.Fatalf("user %d was not subscribed to channel group %d", userID, channelGroupID)
 	}
 }
 
@@ -531,5 +537,243 @@ func TestHandleMessageSendsTypingStartAndStopAroundCommand(t *testing.T) {
 		if status.RecipientType == nil || *status.RecipientType != zulip.RecipientTypeDirect {
 			t.Fatalf("typing status %d recipient type = %v, want direct", i, status.RecipientType)
 		}
+	}
+}
+
+func TestHandleMessageIgnoresDirectMentionWhenBotIsNotRecipient(t *testing.T) {
+	t.Parallel()
+
+	client := zulipmock.NewClient()
+	client.SetOwnUser(zulip.User{UserID: 100, Email: "bot@example.com", FullName: "Mock Bot", IsBot: true})
+	client.AddUser(zulip.User{UserID: 7, Role: zulip.RoleMember})
+	client.AddUser(zulip.User{UserID: 8, Role: zulip.RoleMember})
+
+	dbPath := filepath.Join(t.TempDir(), "bot.sqlite3")
+	db, queries := openZulipbotTestStorage(t, dbPath)
+	bot, err := zulipbot.NewBot(
+		context.Background(),
+		zulipbot.RuntimeConfig{Logger: slog.Default()},
+		client,
+		db,
+		queries,
+	)
+	if err != nil {
+		t.Fatalf("NewBot: %v", err)
+	}
+
+	senderID := int64(7)
+	otherRecipientID := int64(8)
+	err = bot.HandleMessage(context.Background(), events.MessageEvent{
+		Message: zulip.Message{
+			ID:       1235,
+			Content:  "help @**Mock Bot**",
+			SenderID: senderID,
+			Type:     zulip.RecipientTypeDirect,
+			DisplayRecipient: zulip.DisplayRecipientFromUserRecipentArray([]zulip.UserRecipent{
+				{ID: &senderID},
+				{ID: &otherRecipientID},
+			}),
+		},
+	})
+	if err != nil {
+		t.Fatalf("HandleMessage: %v", err)
+	}
+
+	if message := client.LastSentMessage(); message != nil {
+		t.Fatalf("expected no command response, got %#v", message)
+	}
+	if statuses := client.TypingStatuses(); len(statuses) != 0 {
+		t.Fatalf("expected no typing statuses, got %#v", statuses)
+	}
+}
+
+func TestHandleMessageProcessesDirectMessageWhenBotIsRecipient(t *testing.T) {
+	t.Parallel()
+
+	client := zulipmock.NewClient()
+	botID := int64(100)
+	client.SetOwnUser(zulip.User{UserID: botID, Email: "bot@example.com", FullName: "Mock Bot", IsBot: true})
+	client.AddUser(zulip.User{UserID: botID, IsBot: true})
+	client.AddUser(zulip.User{UserID: 7, Role: zulip.RoleMember})
+
+	dbPath := filepath.Join(t.TempDir(), "bot.sqlite3")
+	db, queries := openZulipbotTestStorage(t, dbPath)
+	bot, err := zulipbot.NewBot(
+		context.Background(),
+		zulipbot.RuntimeConfig{Logger: slog.Default()},
+		client,
+		db,
+		queries,
+	)
+	if err != nil {
+		t.Fatalf("NewBot: %v", err)
+	}
+	bot.SetStartedAtForTest(time.Now().Add(-2 * time.Hour))
+
+	senderID := int64(7)
+	err = bot.HandleMessage(context.Background(), events.MessageEvent{
+		Message: zulip.Message{
+			ID:       9001,
+			Content:  "help",
+			SenderID: senderID,
+			Type:     zulip.RecipientTypeDirect,
+			DisplayRecipient: zulip.DisplayRecipientFromUserRecipentArray([]zulip.UserRecipent{
+				{ID: &senderID},
+				{ID: &botID},
+			}),
+		},
+	})
+	if err != nil {
+		t.Fatalf("HandleMessage: %v", err)
+	}
+
+	// Bot is in the recipient list → message should be processed and a reply sent.
+	if message := client.LastSentMessage(); message == nil {
+		t.Fatal("expected a command response when bot is a recipient, got none")
+	}
+}
+
+func TestHandleReactionUnsubscribesUserOnRemoveOp(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	client := zulipmock.NewClient()
+	client.SetOwnUser(zulip.User{UserID: 100, Email: "bot@example.com", FullName: "Mock Bot", IsBot: true})
+	client.AddUser(zulip.User{UserID: 100, IsBot: true})
+	client.AddUser(zulip.User{UserID: 7, Role: zulip.RoleMember})
+
+	dbPath := filepath.Join(t.TempDir(), "bot.sqlite3")
+	db, queries := openZulipbotTestStorage(t, dbPath)
+	bot, err := zulipbot.NewBot(
+		ctx,
+		zulipbot.RuntimeConfig{Logger: slog.Default()},
+		client,
+		db,
+		queries,
+	)
+	if err != nil {
+		t.Fatalf("NewBot: %v", err)
+	}
+
+	const messageID = int64(5050)
+	const userID = int64(7)
+
+	// Create a channel group and subscribe user first.
+	created, _, err := bot.ChannelGroupClientForTest().CreateChannelGroup(ctx).
+		Name("remove-test-group").
+		Execute()
+	if err != nil {
+		t.Fatalf("CreateChannelGroup: %v", err)
+	}
+	channelGroupID := created.ChannelGroupID
+
+	// Subscribe the user to the group.
+	if _, _, err = bot.ChannelGroupClientForTest().SubscribeToChannelGroup(ctx, channelGroupID).
+		Principals(zulip.Principals{UserIDs: &[]int64{userID}}).
+		Execute(); err != nil {
+		t.Fatalf("SubscribeToChannelGroup: %v", err)
+	}
+
+	// Verify initial subscription.
+	resp, _, err := bot.ChannelGroupClientForTest().GetIsChannelGroupSubscriber(ctx, channelGroupID, userID).Execute()
+	if err != nil {
+		t.Fatalf("GetIsChannelGroupSubscriber (before): %v", err)
+	}
+	if !resp.IsSubscriber {
+		t.Fatal("user should be subscribed before reaction remove")
+	}
+
+	// Save announcement state and emoji mapping.
+	if err = queries.SaveAnnouncementState(ctx, storagedb.SaveAnnouncementStateParams{
+		MessageID: sql.NullInt64{Int64: messageID, Valid: true},
+		UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano),
+	}); err != nil {
+		t.Fatalf("SaveAnnouncementState: %v", err)
+	}
+	if err = queries.UpsertEmojiGroupMapping(ctx, storagedb.UpsertEmojiGroupMappingParams{
+		ChannelGroupID: channelGroupID,
+		EmojiName:      "thumbsup",
+		Enabled:        1,
+		CreatedAt:      time.Now().UTC().Format(time.RFC3339Nano),
+		UpdatedAt:      time.Now().UTC().Format(time.RFC3339Nano),
+	}); err != nil {
+		t.Fatalf("UpsertEmojiGroupMapping: %v", err)
+	}
+
+	event := decodeReactionEvent(t, `{
+		"id": 7,
+		"type": "reaction",
+		"op": "remove",
+		"message_id": 5050,
+		"user_id": 7,
+		"emoji_name": "thumbsup",
+		"emoji_code": "1f44d",
+		"reaction_type": "unicode_emoji"
+	}`)
+	if err = bot.HandleReaction(ctx, event); err != nil {
+		t.Fatalf("HandleReaction (remove): %v", err)
+	}
+
+	resp, _, err = bot.ChannelGroupClientForTest().GetIsChannelGroupSubscriber(ctx, channelGroupID, userID).Execute()
+	if err != nil {
+		t.Fatalf("GetIsChannelGroupSubscriber (after): %v", err)
+	}
+	if resp.IsSubscriber {
+		t.Fatalf("user %d should be unsubscribed from channel group %d after remove reaction", userID, channelGroupID)
+	}
+}
+
+func TestDispatchGroupCreateDeniedForMember(t *testing.T) {
+	t.Parallel()
+
+	bot := newDispatchTestBot(t)
+	// "group create" requires admin; UserID 7 is a member.
+	result := bot.Dispatch(context.Background(), memberRequest("group", "create"))
+	if result.Content != "permission denied" {
+		t.Fatalf("group create for member = %q, want %q", result.Content, "permission denied")
+	}
+}
+
+func TestDispatchGroupSubscribeAllowedForMember(t *testing.T) {
+	t.Parallel()
+
+	bot := newDispatchTestBot(t)
+	// "group subscribe" does not require admin; should not return permission denied
+	// (it will fail with a usage or arg error, but not permission denied).
+	result := bot.Dispatch(context.Background(), memberRequest("group", "subscribe"))
+	if result.Content == "permission denied" {
+		t.Fatalf("group subscribe should not require admin, got permission denied")
+	}
+}
+
+func TestDispatchGroupMappingDeniedForMember(t *testing.T) {
+	t.Parallel()
+
+	bot := newDispatchTestBot(t)
+	// "group mapping list" requires admin.
+	result := bot.Dispatch(context.Background(), memberRequest("group", "mapping", "list"))
+	if result.Content != "permission denied" {
+		t.Fatalf("group mapping list for member = %q, want %q", result.Content, "permission denied")
+	}
+}
+
+func TestDispatchGroupChannelDeniedForMember(t *testing.T) {
+	t.Parallel()
+
+	bot := newDispatchTestBot(t)
+	result := bot.Dispatch(context.Background(), memberRequest("group", "channel", "create"))
+	if result.Content != "permission denied" {
+		t.Fatalf("group channel create for member = %q, want %q", result.Content, "permission denied")
+	}
+}
+
+func TestDispatchGroupAnnounceDeniedForMember(t *testing.T) {
+	t.Parallel()
+
+	bot := newDispatchTestBot(t)
+	// "group announce" with no subcommand requires admin.
+	result := bot.Dispatch(context.Background(), memberRequest("group", "announce"))
+	if result.Content != "permission denied" {
+		t.Fatalf("group announce for member = %q, want %q", result.Content, "permission denied")
 	}
 }
