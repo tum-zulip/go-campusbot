@@ -1493,6 +1493,13 @@ func (bot *Bot) handleMessage(
 			"message_type", msg.Type)
 		return nil
 	}
+	if !directMessageIncludesUser(msg, bot.ownUser.UserID) {
+		bot.logger.DebugContext(ctx, "skipping direct Zulip message without bot recipient",
+			"message_id", msg.ID,
+			"sender_id", msg.SenderID,
+			"bot_user_id", bot.ownUser.UserID)
+		return nil
+	}
 
 	alreadyProcessed, err := bot.messageProcessed(ctx, msg.ID)
 	if err != nil {
@@ -1821,6 +1828,18 @@ func replyTargetFromMessage(msg zulip.Message, ownUserID int64) (command.ReplyTa
 		return target, nil
 	}
 	return command.ReplyTarget{}, fmt.Errorf("unsupported Zulip message type %q", msg.Type)
+}
+
+func directMessageIncludesUser(msg zulip.Message, userID int64) bool {
+	if msg.DisplayRecipient.UserRecipents == nil {
+		return false
+	}
+	for _, recipient := range *msg.DisplayRecipient.UserRecipents {
+		if recipient.ID != nil && *recipient.ID == userID {
+			return true
+		}
+	}
+	return false
 }
 
 func directReplyUserIDs(msg zulip.Message, ownUserID int64) []int64 {
