@@ -107,6 +107,8 @@ func New(ctx context.Context, client zulipclient.Client) (*Bot, error) {
 // NewBot wires the full bot: client, storage queries, configuration service,
 // announcement manager, channel-group client, command registry, and the
 // long-poll loop. Replaces the former App.
+//
+//nolint:funlen // NewBot is necessarily long because it wires together many components; splitting would just move the complexity to the caller.
 func NewBot(
 	ctx context.Context,
 	cfg RuntimeConfig,
