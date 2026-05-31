@@ -25,8 +25,9 @@ type ChannelLsArgs struct {
 }
 
 type ChannelFolderAddArgs struct {
-	Channel    zulip.Channel `arg:"channel"     mention_only:"true" desc:"Zulip channel mention"`
-	FolderName string        `arg:"folder_name"                     desc:"Zulip channel folder name"`
+	Force      bool          `arg:"-f"          desc:"Reassign the channel if it is already in another folder"`
+	Channel    zulip.Channel `arg:"channel"     desc:"Zulip channel mention"                                   mention_only:"true"`
+	FolderName string        `arg:"folder_name" desc:"Zulip channel folder name"`
 }
 
 type ChannelFolderRemoveArgs struct {
@@ -53,7 +54,7 @@ func (h *ChannelHandler) Metadata() command.Metadata {
 	return command.Metadata{
 		Name:       "channel",
 		Summary:    "List or update Zulip channels.",
-		Usage:      "channel ls [pattern]\nchannel folder <add|remove> <channel_mention> <folder_name>",
+		Usage:      "channel ls [pattern]\nchannel folder add [-f] <channel_mention> <folder_name>\nchannel folder remove <channel_mention> <folder_name>",
 		Permission: command.PermAdmin,
 		ArgSpec:    ChannelArgSpec,
 	}
@@ -136,6 +137,21 @@ func (h *ChannelHandler) handleFolderAdd(
 	if err != nil {
 		return command.Result{}, err
 	}
+	channelResp, _, err := h.client.GetChannelByID(ctx, args.Channel.ChannelID).Execute()
+	if err != nil {
+		return command.Result{}, fmt.Errorf("get channel %d: %w", args.Channel.ChannelID, err)
+	}
+	if channelResp == nil {
+		return command.Result{}, fmt.Errorf("nil channel response for channel %d", args.Channel.ChannelID)
+	}
+	if channelResp.Channel.FolderID != nil && *channelResp.Channel.FolderID != folderID && !args.Force {
+		return command.Result{}, command.NewUserError(fmt.Sprintf(
+			"Channel %d is already in channel folder %d. Use `channel folder add -f` to reassign it to %q.",
+			args.Channel.ChannelID,
+			*channelResp.Channel.FolderID,
+			folderName,
+		))
+	}
 	if _, _, err := h.client.UpdateChannel(ctx, args.Channel.ChannelID).FolderID(folderID).Execute(); err != nil {
 		return command.Result{}, fmt.Errorf(
 			"assign channel %d to folder %d: %w",
@@ -167,6 +183,9 @@ func (h *ChannelHandler) handleFolderRemove(
 	channelResp, _, err := h.client.GetChannelByID(ctx, args.Channel.ChannelID).Execute()
 	if err != nil {
 		return command.Result{}, fmt.Errorf("get channel %d: %w", args.Channel.ChannelID, err)
+	}
+	if channelResp == nil {
+		return command.Result{}, fmt.Errorf("nil channel response for channel %d", args.Channel.ChannelID)
 	}
 	if channelResp.Channel.FolderID == nil {
 		return command.Result{}, command.NewUserError(fmt.Sprintf(

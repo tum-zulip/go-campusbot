@@ -153,6 +153,18 @@ func NewBot(
 		bot.channelGroups = closer
 	}
 	bot.channelGroupClient = channelGroupClient
+	closeChannelGroupClient := func(registerErr error) error {
+		if closer, ok := channelGroupClient.(interface{ Close() error }); ok {
+			if closeErr := closer.Close(); closeErr != nil {
+				return fmt.Errorf(
+					"register handler: %w; close channel group client: %w",
+					registerErr,
+					closeErr,
+				)
+			}
+		}
+		return registerErr
+	}
 
 	bot.registry = command.NewRegistry()
 	if err := bot.registry.Register(handlers.NewGroupHandler(
@@ -161,22 +173,13 @@ func NewBot(
 		bot,
 		cfg.Logger,
 	)); err != nil {
-		if closer, ok := channelGroupClient.(interface{ Close() error }); ok {
-			if closeErr := closer.Close(); closeErr != nil {
-				return nil, fmt.Errorf(
-					"register group handler: %w; close channel group client: %w",
-					err,
-					closeErr,
-				)
-			}
-		}
-		return nil, err
+		return nil, closeChannelGroupClient(fmt.Errorf("register group handler: %w", err))
 	}
 	if err := bot.registry.Register(handlers.NewChannelHandler(
 		channelGroupClient,
 		cfg.Logger,
 	)); err != nil {
-		return nil, err
+		return nil, closeChannelGroupClient(fmt.Errorf("register channel handler: %w", err))
 	}
 
 	return bot, nil

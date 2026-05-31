@@ -203,6 +203,87 @@ func TestChannelFolderRemoveRejectsDifferentFolder(t *testing.T) {
 	}
 }
 
+func TestChannelFolderAddRejectsDifferentFolderWithoutForce(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	client, base := newChannelGroupClient(t)
+	channelID := seedChannel(t, base, "wi-channel")
+	folder, _, err := base.CreateChannelFolder(ctx).Name("manual folder").Execute()
+	if err != nil {
+		t.Fatalf("CreateChannelFolder(manual folder): %v", err)
+	}
+	otherFolder, _, err := base.CreateChannelFolder(ctx).Name("other folder").Execute()
+	if err != nil {
+		t.Fatalf("CreateChannelFolder(other folder): %v", err)
+	}
+	if _, _, err := base.UpdateChannel(ctx, channelID).FolderID(otherFolder.ChannelFolderID).Execute(); err != nil {
+		t.Fatalf("pre-assign channel folder: %v", err)
+	}
+
+	h := handlers.NewChannelHandler(client, nil)
+	_, err = h.Handle(ctx, makeChannelRequest(handlers.ChannelFolderAddArgs{
+		Channel:    z.Channel{ChannelID: channelID},
+		FolderName: "manual folder",
+	}))
+	var userErr command.UserError
+	if !errors.As(err, &userErr) {
+		t.Fatalf("expected UserError, got %T: %v", err, err)
+	}
+	for _, want := range []string{"already in channel folder", "channel folder add -f"} {
+		if !strings.Contains(userErr.Message, want) {
+			t.Fatalf("user error = %q, want %q", userErr.Message, want)
+		}
+	}
+	channel, _, err := base.GetChannelByID(ctx, channelID).Execute()
+	if err != nil {
+		t.Fatalf("GetChannelByID: %v", err)
+	}
+	if channel.Channel.FolderID == nil || *channel.Channel.FolderID != otherFolder.ChannelFolderID {
+		t.Fatalf("channel folder ID = %v, want %d", channel.Channel.FolderID, otherFolder.ChannelFolderID)
+	}
+	if folder.ChannelFolderID == otherFolder.ChannelFolderID {
+		t.Fatal("test setup folders unexpectedly have the same ID")
+	}
+}
+
+func TestChannelFolderAddForceReassignsDifferentFolder(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	client, base := newChannelGroupClient(t)
+	channelID := seedChannel(t, base, "wi-channel")
+	folder, _, err := base.CreateChannelFolder(ctx).Name("manual folder").Execute()
+	if err != nil {
+		t.Fatalf("CreateChannelFolder(manual folder): %v", err)
+	}
+	otherFolder, _, err := base.CreateChannelFolder(ctx).Name("other folder").Execute()
+	if err != nil {
+		t.Fatalf("CreateChannelFolder(other folder): %v", err)
+	}
+	if _, _, err := base.UpdateChannel(ctx, channelID).FolderID(otherFolder.ChannelFolderID).Execute(); err != nil {
+		t.Fatalf("pre-assign channel folder: %v", err)
+	}
+
+	h := handlers.NewChannelHandler(client, nil)
+	result, err := h.Handle(ctx, makeChannelRequest(handlers.ChannelFolderAddArgs{
+		Force:      true,
+		Channel:    z.Channel{ChannelID: channelID},
+		FolderName: "manual folder",
+	}))
+	if err != nil {
+		t.Fatalf("Handle() failed: %v", err)
+	}
+	if result.Content == "" {
+		t.Error("expected non-empty result content")
+	}
+	channel, _, err := base.GetChannelByID(ctx, channelID).Execute()
+	if err != nil {
+		t.Fatalf("GetChannelByID: %v", err)
+	}
+	if channel.Channel.FolderID == nil || *channel.Channel.FolderID != folder.ChannelFolderID {
+		t.Fatalf("channel folder ID = %v, want %d", channel.Channel.FolderID, folder.ChannelFolderID)
+	}
+}
+
 func TestChannelFolderAddUnknownFolderIsUserError(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -245,6 +326,34 @@ func TestChannelFolderSubcommandParses(t *testing.T) {
 	args, ok := parsed.(handlers.ChannelFolderAddArgs)
 	if !ok {
 		t.Fatalf("expected ChannelFolderAddArgs, got %T", parsed)
+	}
+	if args.Channel.ChannelID != channelID || args.Channel.Name != "wi-channel" {
+		t.Fatalf("unexpected channel: %+v", args.Channel)
+	}
+	if args.FolderName != "manual folder" {
+		t.Fatalf("FolderName = %q, want manual folder", args.FolderName)
+	}
+}
+
+func TestChannelFolderAddForceFlagParses(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	_, base := newChannelGroupClient(t)
+	channelID := seedChannel(t, base, "wi-channel")
+	parser := command.NewArgParser(groupArgResolver{Client: base})
+
+	parsed, err := parser.Parse(ctx, handlers.ChannelArgSpec, []string{
+		"folder", "add", "-f", "#**wi-channel**", "manual folder",
+	})
+	if err != nil {
+		t.Fatalf("Parse() failed: %v", err)
+	}
+	args, ok := parsed.(handlers.ChannelFolderAddArgs)
+	if !ok {
+		t.Fatalf("expected ChannelFolderAddArgs, got %T", parsed)
+	}
+	if !args.Force {
+		t.Fatal("Force = false, want true")
 	}
 	if args.Channel.ChannelID != channelID || args.Channel.Name != "wi-channel" {
 		t.Fatalf("unexpected channel: %+v", args.Channel)
