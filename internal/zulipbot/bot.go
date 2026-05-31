@@ -159,6 +159,15 @@ func NewBot(
 		bot,
 		cfg.Logger,
 	)); err != nil {
+		if closer, ok := channelGroupClient.(interface{ Close() error }); ok {
+			if closeErr := closer.Close(); closeErr != nil {
+				return nil, fmt.Errorf(
+					"register group handler: %w; close channel group client: %w",
+					err,
+					closeErr,
+				)
+			}
+		}
 		return nil, err
 	}
 
