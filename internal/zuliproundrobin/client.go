@@ -1,0 +1,240 @@
+package zuliproundrobin
+
+//go:generate go run ./generate_client.go
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"sync"
+	"time"
+
+	"github.com/tum-zulip/go-zulip/zulip"
+	zulipclient "github.com/tum-zulip/go-zulip/zulip/client"
+	"github.com/tum-zulip/go-zulip/zulip/client/statistics"
+)
+
+var errNoClients = errors.New("zulip round-robin client requires a base client")
+
+const permissionCheckTimeout = 10 * time.Second
+
+var _ zulipclient.Client = (*Client)(nil)
+
+// Client implements zulip/client.Client by forwarding user-visible requests to
+// client and background lookup requests to workers in round-robin order.
+type Client struct {
+	mu      sync.Mutex
+	nextIdx int
+	client  zulipclient.Client
+	workers []zulipclient.Client
+}
+
+// NewClients builds a client from an already initialized base client followed
+// by optional worker clients used for round-robin request builders.
+func NewClients(clients ...zulipclient.Client) (*Client, error) {
+	if len(clients) == 0 || clients[0] == nil {
+		return nil, errNoClients
+	}
+	client := clients[0]
+	workers := clients[1:]
+	for i, worker := range workers {
+		if worker == nil {
+			return nil, fmt.Errorf("zulip round-robin worker client %d is nil", i)
+		}
+	}
+	return &Client{
+		client:  client,
+		workers: append([]zulipclient.Client(nil), workers...),
+	}, nil
+}
+
+// NewFromFiles loads one base Zulip client from the first path and one worker
+// Zulip client per remaining path.
+func NewFromFiles(paths ...string) (*Client, error) {
+	if len(paths) == 0 || paths[0] == "" {
+		return nil, errNoClients
+	}
+	basePath := paths[0]
+	workerPaths := paths[1:]
+
+	logger := slog.Default()
+	base, err := newClientFromFile(basePath, clientLogger(logger, "base", "base", 0, basePath))
+	if err != nil {
+		return nil, err
+	}
+
+	workers := make([]zulipclient.Client, 0, len(workerPaths))
+	for i, path := range workerPaths {
+		worker, err := newClientFromFile(
+			path,
+			clientLogger(logger, "worker", fmt.Sprintf("worker-%d", i+1), i+1, path),
+		)
+		if err != nil {
+			return nil, err
+		}
+		workers = append(workers, worker)
+	}
+	warnOnMismatchedPermissionLevels(append([]zulipclient.Client{base}, workers...), paths)
+	return NewClients(append([]zulipclient.Client{base}, workers...)...)
+}
+
+// NewWithWorkerFiles builds a client from an already initialized base client
+// and worker Zulip clients loaded from zuliprc paths.
+func NewWithWorkerFiles(client zulipclient.Client, workerPaths ...string) (*Client, error) {
+	return NewWithWorkerFilesLogger(client, slog.Default(), workerPaths...)
+}
+
+// NewWithWorkerFilesLogger builds a client from an already initialized base client
+// and worker Zulip clients loaded from zuliprc paths using logger.
+func NewWithWorkerFilesLogger(
+	client zulipclient.Client,
+	logger *slog.Logger,
+	workerPaths ...string,
+) (*Client, error) {
+	if client == nil {
+		return nil, errNoClients
+	}
+
+	workers := make([]zulipclient.Client, 0, len(workerPaths))
+	for i, path := range workerPaths {
+		worker, err := newClientFromFile(
+			path,
+			clientLogger(logger, "worker", fmt.Sprintf("worker-%d", i+1), i+1, path),
+		)
+		if err != nil {
+			return nil, err
+		}
+		workers = append(workers, worker)
+	}
+	warnOnMismatchedPermissionLevels(
+		append([]zulipclient.Client{client}, workers...),
+		append([]string{"base client"}, workerPaths...),
+	)
+	return NewClients(append([]zulipclient.Client{client}, workers...)...)
+}
+
+func clientLogger(
+	logger *slog.Logger,
+	role string,
+	id string,
+	index int,
+	path string,
+) *slog.Logger {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return logger.With(
+		"zulip_client_role", role,
+		"zulip_client_id", id,
+		"zulip_client_index", index,
+		"zuliprc", path,
+	)
+}
+
+func newClientFromFile(path string, logger *slog.Logger) (zulipclient.Client, error) {
+	rc, err := zulip.NewZulipRCFromFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("load Zulip config %q: %w", path, err)
+	}
+	client, err := zulipclient.NewClient(rc, zulipclient.WithLogger(logger))
+	if err != nil {
+		return nil, fmt.Errorf("create Zulip client for %q: %w", path, err)
+	}
+	return client, nil
+}
+
+type permissionLevelCheckResult struct {
+	path   string
+	userID int64
+	email  string
+	role   zulip.Role
+}
+
+func warnOnMismatchedPermissionLevels(clients []zulipclient.Client, paths []string) {
+	logger := slog.Default()
+	ctx, cancel := context.WithTimeout(context.Background(), permissionCheckTimeout)
+	defer cancel()
+
+	results := make([]permissionLevelCheckResult, 0, len(clients))
+	for i, client := range clients {
+		ownUser, _, err := client.GetOwnUser(ctx).Execute()
+		if err != nil {
+			logger.Warn(
+				"failed to check Zulip round-robin client permission level",
+				"zuliprc", paths[i],
+				"error", err,
+			)
+			continue
+		}
+		results = append(results, permissionLevelCheckResult{
+			path:   paths[i],
+			userID: ownUser.UserID,
+			email:  ownUser.Email,
+			role:   ownUser.Role,
+		})
+	}
+
+	reference := results[0]
+	for _, result := range results[1:] {
+		if result.role == reference.role {
+			continue
+		}
+		logger.Warn(
+			"Zulip round-robin clients have mismatched permission levels",
+			"reference_zuliprc", reference.path,
+			"reference_user_id", reference.userID,
+			"reference_email", reference.email,
+			"reference_permission_level", roleName(reference.role),
+			"mismatched_zuliprc", result.path,
+			"mismatched_user_id", result.userID,
+			"mismatched_email", result.email,
+			"mismatched_permission_level", roleName(result.role),
+		)
+	}
+}
+
+func roleName(role zulip.Role) string {
+	switch role {
+	case zulip.RoleOwner:
+		return "owner"
+	case zulip.RoleAdmin:
+		return "admin"
+	case zulip.RoleModerator:
+		return "moderator"
+	case zulip.RoleMember:
+		return "member"
+	case zulip.RoleGuest:
+		return "guest"
+	default:
+		return fmt.Sprintf("unknown(%d)", role)
+	}
+}
+
+func (c *Client) next() zulipclient.Client {
+	if len(c.workers) == 0 {
+		return c.client
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	client := c.workers[c.nextIdx]
+	c.nextIdx = (c.nextIdx + 1) % len(c.workers)
+	return client
+}
+
+func (c *Client) GetStatistics() statistics.Statistics {
+	merged := statistics.Statistics{Stats: map[string]statistics.Statistic{}}
+	for _, client := range append([]zulipclient.Client{c.client}, c.workers...) {
+		for endpoint, stat := range client.GetStatistics().Stats {
+			current := merged.Stats[endpoint]
+			current.Count += stat.Count
+			current.ErrCount += stat.ErrCount
+			current.RetryCount += stat.RetryCount
+			current.TotalDuration += stat.TotalDuration
+			merged.Stats[endpoint] = current
+		}
+	}
+	return merged
+}
