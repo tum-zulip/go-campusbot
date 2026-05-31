@@ -132,6 +132,38 @@ func main() {
 		logger.ErrorContext(runCtx, "failed to start streams cache", "error", err)
 		os.Exit(exitFailure)
 	}
+	publicSync, err := zuliproundrobin.SyncPublicChannelSubscriptions(startupCtx, baseClient)
+	if err != nil {
+		cancelStartup()
+		_ = streamsCache.Close()
+		_ = userGroupsCache.Close()
+		logger.ErrorContext(runCtx, "failed to sync public Zulip channel subscriptions", "error", err)
+		os.Exit(exitFailure)
+	}
+	logger.InfoContext(runCtx, "synced main Zulip client public channel subscriptions",
+		"checked_channels", publicSync.CheckedChannels,
+		"existing_channels", publicSync.ExistingChannels,
+		"subscribed_channels", publicSync.SubscribedChannels,
+	)
+	if syncer, ok := botClient.(interface {
+		SyncWorkerSubscriptions(context.Context) (zuliproundrobin.WorkerSubscriptionSyncResult, error)
+	}); ok {
+		workerSync, syncErr := syncer.SyncWorkerSubscriptions(startupCtx)
+		if syncErr != nil {
+			cancelStartup()
+			_ = streamsCache.Close()
+			_ = userGroupsCache.Close()
+			logger.ErrorContext(runCtx, "failed to sync Zulip worker subscriptions", "error", syncErr)
+			os.Exit(exitFailure)
+		}
+		logger.InfoContext(runCtx, "synced Zulip worker subscriptions",
+			"workers", workerSync.WorkerCount,
+			"main_subscribed_channels", workerSync.MainSubscribedChannels,
+			"subscribed_worker_channels", workerSync.SubscribedWorkerChannels,
+			"already_subscribed_worker_channels", workerSync.AlreadySubscribedWorkerChannels,
+			"unauthorized_channels", len(workerSync.UnauthorizedChannelNames),
+		)
+	}
 	db, err := openDatabase(dbPath)
 	if err != nil {
 		cancelStartup()

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -17,6 +18,7 @@ import (
 	"github.com/tum-zulip/go-campusbot/internal/zulipmock"
 	"github.com/tum-zulip/go-campusbot/internal/zuliproundrobin"
 	"github.com/tum-zulip/go-zulip/zulip"
+	"github.com/tum-zulip/go-zulip/zulip/api/channels"
 	zulipclient "github.com/tum-zulip/go-zulip/zulip/client"
 )
 
@@ -311,6 +313,128 @@ func TestNewFromFilesWarnsOnPermissionMismatch(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("warning log = %q, want to contain %q", got, want)
 		}
+	}
+}
+
+func TestSyncPublicChannelSubscriptionsSubscribesMissingPublicChannels(t *testing.T) {
+	ctx := context.Background()
+	base := zulipmock.NewClient()
+
+	if _, _, err := base.CreateChannel(ctx).Name("public-missing").Execute(); err != nil {
+		t.Fatalf("CreateChannel(public-missing) error = %v", err)
+	}
+	if _, _, err := base.Subscribe(ctx).
+		Subscriptions([]channels.SubscriptionRequest{{Name: "public-existing"}}).
+		Execute(); err != nil {
+		t.Fatalf("Subscribe(public-existing) error = %v", err)
+	}
+	if _, _, err := base.Subscribe(ctx).
+		Subscriptions([]channels.SubscriptionRequest{{Name: "private-main"}}).
+		InviteOnly(true).
+		Execute(); err != nil {
+		t.Fatalf("Subscribe(private-main) error = %v", err)
+	}
+	archived, _, err := base.CreateChannel(ctx).Name("archived-public").Execute()
+	if err != nil {
+		t.Fatalf("CreateChannel(archived-public) error = %v", err)
+	}
+	if _, _, err := base.ArchiveChannel(ctx, archived.ID).Execute(); err != nil {
+		t.Fatalf("ArchiveChannel(archived-public) error = %v", err)
+	}
+
+	result, err := zuliproundrobin.SyncPublicChannelSubscriptions(ctx, base)
+	if err != nil {
+		t.Fatalf("SyncPublicChannelSubscriptions() error = %v", err)
+	}
+	if got, want := result.SubscribedChannelNames, []string{"public-missing"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("subscribed channel names = %v, want %v", got, want)
+	}
+
+	subscriptions, _, err := base.GetSubscriptions(ctx).Execute()
+	if err != nil {
+		t.Fatalf("GetSubscriptions() error = %v", err)
+	}
+	got := subscriptionNames(subscriptions.Subscriptions)
+	want := []string{"private-main", "public-existing", "public-missing"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("subscriptions = %v, want %v", got, want)
+	}
+}
+
+func TestSyncWorkerSubscriptionsSubscribesWorkersToMainChannels(t *testing.T) {
+	ctx := context.Background()
+	base := zulipmock.NewClient()
+	if _, _, err := base.Subscribe(ctx).
+		Subscriptions([]channels.SubscriptionRequest{{Name: "main-public"}}).
+		Execute(); err != nil {
+		t.Fatalf("Subscribe(main-public) error = %v", err)
+	}
+	if _, _, err := base.Subscribe(ctx).
+		Subscriptions([]channels.SubscriptionRequest{{Name: "main-private"}}).
+		InviteOnly(true).
+		Execute(); err != nil {
+		t.Fatalf("Subscribe(main-private) error = %v", err)
+	}
+
+	firstWorker := zulipmock.NewClient()
+	firstWorker.SetOwnUser(zulip.User{UserID: 20, Email: "first@example.com", FullName: "First Bot", IsBot: true})
+	secondWorker := zulipmock.NewClient()
+	secondWorker.SetOwnUser(zulip.User{UserID: 30, Email: "second@example.com", FullName: "Second Bot", IsBot: true})
+
+	client, err := zuliproundrobin.NewClients(base, firstWorker, secondWorker)
+	if err != nil {
+		t.Fatalf("NewClients() error = %v", err)
+	}
+
+	result, err := client.SyncWorkerSubscriptions(ctx)
+	if err != nil {
+		t.Fatalf("SyncWorkerSubscriptions() error = %v", err)
+	}
+	if result.WorkerCount != 2 || result.MainSubscribedChannels != 2 || result.SubscribedWorkerChannels != 4 {
+		t.Fatalf("sync result = %+v, want 2 workers, 2 channels, 4 new subscriptions", result)
+	}
+
+	assertSubscribers(t, ctx, base, "main-public", []int64{0, 20, 30})
+	assertSubscribers(t, ctx, base, "main-private", []int64{0, 20, 30})
+
+	result, err = client.SyncWorkerSubscriptions(ctx)
+	if err != nil {
+		t.Fatalf("second SyncWorkerSubscriptions() error = %v", err)
+	}
+	if result.SubscribedWorkerChannels != 0 || result.AlreadySubscribedWorkerChannels != 4 {
+		t.Fatalf("second sync result = %+v, want idempotent already-subscribed result", result)
+	}
+}
+
+func subscriptionNames(subscriptions []zulip.Subscription) []string {
+	names := make([]string, 0, len(subscriptions))
+	for _, subscription := range subscriptions {
+		names = append(names, subscription.Name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func assertSubscribers(
+	t *testing.T,
+	ctx context.Context,
+	client zulipclient.Client,
+	channelName string,
+	want []int64,
+) {
+	t.Helper()
+	channelID, _, err := client.GetChannelID(ctx).Channel(channelName).Execute()
+	if err != nil {
+		t.Fatalf("GetChannelID(%q) error = %v", channelName, err)
+	}
+	subscribers, _, err := client.GetSubscribers(ctx, channelID.ChannelID).Execute()
+	if err != nil {
+		t.Fatalf("GetSubscribers(%q) error = %v", channelName, err)
+	}
+	got := append([]int64(nil), subscribers.Subscribers...)
+	sort.Slice(got, func(i, j int) bool { return got[i] < got[j] })
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("subscribers for %q = %v, want %v", channelName, got, want)
 	}
 }
 

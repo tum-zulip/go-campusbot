@@ -7,10 +7,14 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/tum-zulip/go-zulip/zulip"
+	"github.com/tum-zulip/go-zulip/zulip/api/channels"
 	zulipclient "github.com/tum-zulip/go-zulip/zulip/client"
 	"github.com/tum-zulip/go-zulip/zulip/client/statistics"
 )
@@ -28,6 +32,22 @@ type Client struct {
 	nextIdx int
 	client  zulipclient.Client
 	workers []zulipclient.Client
+}
+
+type PublicChannelSyncResult struct {
+	CheckedChannels        int
+	ExistingChannels       int
+	SubscribedChannels     int
+	SubscribedChannelNames []string
+}
+
+type WorkerSubscriptionSyncResult struct {
+	WorkerCount                     int
+	MainSubscribedChannels          int
+	SubscribedWorkerChannels        int
+	SubscribedChannelNames          []string
+	AlreadySubscribedWorkerChannels int
+	UnauthorizedChannelNames        []string
 }
 
 // NewClients builds a client from an already initialized base client followed
@@ -222,6 +242,163 @@ func (c *Client) next() zulipclient.Client {
 	client := c.workers[c.nextIdx]
 	c.nextIdx = (c.nextIdx + 1) % len(c.workers)
 	return client
+}
+
+// SyncPublicChannelSubscriptions subscribes client to all active public
+// channels that it can see and is not already subscribed to.
+func SyncPublicChannelSubscriptions(
+	ctx context.Context,
+	client zulipclient.Client,
+) (PublicChannelSyncResult, error) {
+	if client == nil {
+		return PublicChannelSyncResult{}, errNoClients
+	}
+
+	channelsResp, _, err := client.GetChannels(ctx).
+		IncludePublic(true).
+		IncludeWebPublic(true).
+		IncludeSubscribed(true).
+		ExcludeArchived(true).
+		Execute()
+	if err != nil {
+		return PublicChannelSyncResult{}, fmt.Errorf("get public Zulip channels: %w", err)
+	}
+	subscriptionsResp, _, err := client.GetSubscriptions(ctx).Execute()
+	if err != nil {
+		return PublicChannelSyncResult{}, fmt.Errorf("get Zulip subscriptions: %w", err)
+	}
+
+	subscribed := subscribedChannelSet(subscriptionsResp.Subscriptions)
+	missing := make([]channels.SubscriptionRequest, 0)
+	for _, channel := range channelsResp.Channels {
+		if channel.IsArchived || channel.InviteOnly || channel.Name == "" {
+			continue
+		}
+		if _, ok := subscribed[channelKey(channel.ChannelID, channel.Name)]; ok {
+			continue
+		}
+		missing = append(missing, channels.SubscriptionRequest{Name: channel.Name})
+	}
+	sort.Slice(missing, func(i, j int) bool { return missing[i].Name < missing[j].Name })
+
+	result := PublicChannelSyncResult{
+		CheckedChannels:    len(channelsResp.Channels),
+		ExistingChannels:   len(subscriptionsResp.Subscriptions),
+		SubscribedChannels: len(missing),
+	}
+	for _, subscription := range missing {
+		result.SubscribedChannelNames = append(result.SubscribedChannelNames, subscription.Name)
+	}
+	if len(missing) == 0 {
+		return result, nil
+	}
+	if _, _, err := client.Subscribe(ctx).
+		Subscriptions(missing).
+		SendNewSubscriptionMessages(false).
+		Execute(); err != nil {
+		return PublicChannelSyncResult{}, fmt.Errorf("subscribe main Zulip client to public channels: %w", err)
+	}
+	return result, nil
+}
+
+// SyncWorkerSubscriptions subscribes every worker client to all active channels
+// that the base client is subscribed to, including private channels.
+//
+//nolint:funlen // SyncWorkerSubscriptions is necessarily long due to the number of steps and error checks involved in the process.
+func (c *Client) SyncWorkerSubscriptions(ctx context.Context) (WorkerSubscriptionSyncResult, error) {
+	if c == nil || c.client == nil {
+		return WorkerSubscriptionSyncResult{}, errNoClients
+	}
+	if len(c.workers) == 0 {
+		return WorkerSubscriptionSyncResult{}, nil
+	}
+
+	workerIDs := make([]int64, 0, len(c.workers))
+	for i, worker := range c.workers {
+		ownUser, _, err := worker.GetOwnUser(ctx).Execute()
+		if err != nil {
+			return WorkerSubscriptionSyncResult{}, fmt.Errorf("get Zulip worker %d own user: %w", i+1, err)
+		}
+		if ownUser == nil || ownUser.UserID == 0 {
+			return WorkerSubscriptionSyncResult{}, fmt.Errorf("get Zulip worker %d own user: missing user ID", i+1)
+		}
+		workerIDs = append(workerIDs, ownUser.UserID)
+	}
+
+	subscriptionsResp, _, err := c.client.GetSubscriptions(ctx).Execute()
+	if err != nil {
+		return WorkerSubscriptionSyncResult{}, fmt.Errorf("get main Zulip client subscriptions: %w", err)
+	}
+	subscriptions := make([]channels.SubscriptionRequest, 0, len(subscriptionsResp.Subscriptions))
+	for _, subscription := range subscriptionsResp.Subscriptions {
+		if subscription.IsArchived || subscription.Name == "" {
+			continue
+		}
+		subscriptions = append(subscriptions, channels.SubscriptionRequest{Name: subscription.Name})
+	}
+	sort.Slice(subscriptions, func(i, j int) bool { return subscriptions[i].Name < subscriptions[j].Name })
+
+	result := WorkerSubscriptionSyncResult{
+		WorkerCount:            len(workerIDs),
+		MainSubscribedChannels: len(subscriptions),
+	}
+	for _, subscription := range subscriptions {
+		result.SubscribedChannelNames = append(result.SubscribedChannelNames, subscription.Name)
+	}
+	if len(subscriptions) == 0 {
+		return result, nil
+	}
+
+	resp, _, err := c.client.Subscribe(ctx).
+		Subscriptions(subscriptions).
+		Principals(zulip.UserIDsAsPrincipals(workerIDs...)).
+		AuthorizationErrorsFatal(false).
+		SendNewSubscriptionMessages(false).
+		Execute()
+	if err != nil {
+		return WorkerSubscriptionSyncResult{}, fmt.Errorf("subscribe Zulip workers to main client channels: %w", err)
+	}
+	if resp != nil {
+		result.SubscribedWorkerChannels = subscriptionResponseCount(resp.Subscribed)
+		result.AlreadySubscribedWorkerChannels = subscriptionResponseCount(resp.AlreadySubscribed)
+		result.UnauthorizedChannelNames = append([]string(nil), resp.Unauthorized...)
+		sort.Strings(result.UnauthorizedChannelNames)
+	}
+	if len(result.UnauthorizedChannelNames) > 0 {
+		return result, fmt.Errorf(
+			"subscribe Zulip workers to main client channels: unauthorized channels: %s",
+			strings.Join(result.UnauthorizedChannelNames, ", "),
+		)
+	}
+	return result, nil
+}
+
+func subscribedChannelSet(subscriptions []zulip.Subscription) map[string]struct{} {
+	subscribed := make(map[string]struct{})
+	for _, subscription := range subscriptions {
+		if subscription.ChannelID != 0 {
+			subscribed[channelKey(subscription.ChannelID, "")] = struct{}{}
+		}
+		if subscription.Name != "" {
+			subscribed[channelKey(0, subscription.Name)] = struct{}{}
+		}
+	}
+	return subscribed
+}
+
+func channelKey(channelID int64, name string) string {
+	if channelID != 0 {
+		return strconv.FormatInt(channelID, 10)
+	}
+	return name
+}
+
+func subscriptionResponseCount(values map[string][]string) int {
+	var count int
+	for _, channels := range values {
+		count += len(channels)
+	}
+	return count
 }
 
 func (c *Client) GetStatistics() statistics.Statistics {
