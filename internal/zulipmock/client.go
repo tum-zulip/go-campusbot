@@ -635,6 +635,11 @@ func requestBoolPtr[T any](request T, name string) *bool {
 	return (*bool)(unsafe.Pointer(field.Pointer()))
 }
 
+func requestBoolValue[T any](request T, name string) bool {
+	value := requestBoolPtr(request, name)
+	return value != nil && *value
+}
+
 func requestInt64SlicePtr[T any](request T, name string) *[]int64 {
 	v := reflect.ValueOf(request)
 	field := v.FieldByName(name)
@@ -886,6 +891,12 @@ func (c Client) CreateChannelExecute(r channels.CreateChannelRequest) (*channels
 			ChannelID:   channelID,
 			Name:        name,
 			Description: description,
+			InviteOnly:  requestBoolValue(r, "inviteOnly"),
+			IsWebPublic: requestBoolValue(r, "isWebPublic"),
+			HistoryPublicToSubscribers: requestBoolValue(
+				r,
+				"historyPublicToSubscribers",
+			),
 		},
 		subscribers: map[int64]bool{},
 	}
@@ -1971,6 +1982,12 @@ func (c Client) SubscribeExecute(r channels.SubscribeRequest) (*channels.Subscri
 					ChannelID:   channelID,
 					Name:        sub.Name,
 					Description: description,
+					InviteOnly:  requestBoolValue(r, "inviteOnly"),
+					IsWebPublic: requestBoolValue(r, "isWebPublic"),
+					HistoryPublicToSubscribers: requestBoolValue(
+						r,
+						"historyPublicToSubscribers",
+					),
 				},
 				subscribers: map[int64]bool{},
 			}

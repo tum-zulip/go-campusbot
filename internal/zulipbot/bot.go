@@ -172,6 +172,12 @@ func NewBot(
 		}
 		return nil, err
 	}
+	if err := bot.registry.Register(handlers.NewChannelHandler(
+		channelGroupClient,
+		cfg.Logger,
+	)); err != nil {
+		return nil, err
+	}
 
 	return bot, nil
 }
