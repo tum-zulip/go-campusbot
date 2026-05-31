@@ -481,12 +481,172 @@ func permissionDeniedResult(err error) command.Result {
 	return command.Result{Content: "permission denied"}
 }
 
+type actorRoleState struct {
+	role      zulip.Role
+	available bool
+}
+
+func (state actorRoleState) allows(permission zulip.Role) bool {
+	return permission == command.PermOpen || (state.available && roleAllows(state.role, permission))
+}
+
+func (bot *Bot) authorizeCommand(
+	ctx context.Context,
+	req command.Request,
+	meta command.Metadata,
+) (actorRoleState, command.Result, bool) {
+	role, err := bot.checkRole(ctx, req.Actor, meta.Permission)
+	if err != nil {
+		bot.logger.WarnContext(
+			ctx,
+			"command permission denied",
+			"command",
+			meta.Name,
+			"actor_user_id",
+			req.Actor.UserID,
+			"error",
+			err,
+		)
+		return actorRoleState{}, permissionDeniedResult(err), false
+	}
+	if meta.Permission == command.PermOpen {
+		return actorRoleState{}, command.Result{}, true
+	}
+	return actorRoleState{role: role, available: true}, command.Result{}, true
+}
+
+func (bot *Bot) parseCommandArgs(
+	ctx context.Context,
+	req command.Request,
+	meta command.Metadata,
+	roleState actorRoleState,
+) (any, command.Result, bool) {
+	requiredPermission := command.RequiredPermission(meta.ArgSpec, req.Invocation.Args)
+	roleState, result, ok := bot.authorizeArgSpec(ctx, req, meta, roleState, requiredPermission)
+	if !ok {
+		return nil, result, false
+	}
+
+	bot.logger.DebugContext(ctx, "parsing command arguments",
+		"command", meta.Name,
+		"arg_count", len(req.Invocation.Args),
+		"actor_user_id", req.Actor.UserID,
+		"message_id", req.MessageID)
+	visibleArgSpec := command.FilterArgSpec(meta.ArgSpec, roleState.allows)
+	parsed, parseErr := bot.argParser.Parse(ctx, visibleArgSpec, req.Invocation.Args)
+	if parseErr == nil {
+		return parsed, command.Result{}, true
+	}
+
+	var userErr command.UserError
+	if errors.As(parseErr, &userErr) {
+		bot.logger.DebugContext(ctx, "command argument parsing returned user error",
+			"command", meta.Name,
+			"actor_user_id", req.Actor.UserID,
+			"message_id", req.MessageID,
+			"error", parseErr)
+		return nil, command.Result{Content: userErr.Message}, false
+	}
+	bot.logger.ErrorContext(
+		ctx,
+		"arg parsing failed",
+		"command",
+		meta.Name,
+		"error",
+		parseErr,
+	)
+	return nil, command.Result{Content: "Command failed because of an internal error."}, false
+}
+
+func (bot *Bot) authorizeArgSpec(
+	ctx context.Context,
+	req command.Request,
+	meta command.Metadata,
+	roleState actorRoleState,
+	requiredPermission zulip.Role,
+) (actorRoleState, command.Result, bool) {
+	if requiredPermission == command.PermOpen {
+		return bot.roleStateForFiltering(ctx, req, meta, roleState), command.Result{}, true
+	}
+
+	roleState, err := bot.requireActorRole(ctx, req, roleState)
+	if err != nil {
+		bot.logSubcommandPermissionDenied(ctx, req, meta, err)
+		return roleState, permissionDeniedResult(err), false
+	}
+	if roleAllows(roleState.role, requiredPermission) {
+		return roleState, command.Result{}, true
+	}
+
+	err = fmt.Errorf("%w", command.ErrDenied)
+	bot.logSubcommandPermissionDenied(ctx, req, meta, err)
+	return roleState, permissionDeniedResult(err), false
+}
+
+func (bot *Bot) roleStateForFiltering(
+	ctx context.Context,
+	req command.Request,
+	meta command.Metadata,
+	roleState actorRoleState,
+) actorRoleState {
+	if roleState.available {
+		return roleState
+	}
+
+	role, err := bot.roleFor(ctx, req.Actor)
+	if err == nil {
+		return actorRoleState{role: role, available: true}
+	}
+	bot.logger.DebugContext(ctx, "actor role unavailable while filtering command arg spec",
+		"command", meta.Name,
+		"actor_user_id", req.Actor.UserID,
+		"message_id", req.MessageID,
+		"error", err)
+	return roleState
+}
+
+func (bot *Bot) requireActorRole(
+	ctx context.Context,
+	req command.Request,
+	roleState actorRoleState,
+) (actorRoleState, error) {
+	if roleState.available {
+		return roleState, nil
+	}
+
+	role, err := bot.roleFor(ctx, req.Actor)
+	if err != nil {
+		return roleState, fmt.Errorf("%w: %w", command.ErrPermissionUnavailable, err)
+	}
+	return actorRoleState{role: role, available: true}, nil
+}
+
+func (bot *Bot) logSubcommandPermissionDenied(
+	ctx context.Context,
+	req command.Request,
+	meta command.Metadata,
+	err error,
+) {
+	bot.logger.WarnContext(
+		ctx,
+		"subcommand permission denied",
+		"command",
+		meta.Name,
+		"actor_user_id",
+		req.Actor.UserID,
+		"message_id",
+		req.MessageID,
+		"error",
+		err,
+	)
+}
+
 // dispatchOne resolves and executes a command request. Static commands (help,
 // status, restart) are handled directly; everything else goes through the
 // registry. The returned bool is the command-chain status: true means later
 // && commands should run, false means later || commands should run.
 //
-//nolint:gocognit,funlen // dispatch is the central command boundary; splitting would obscure the command flow
+//nolint:funlen // dispatch is the central command boundary; splitting would obscure the command flow
 func (bot *Bot) dispatchOne(ctx context.Context, req command.Request) (command.Result, bool) {
 	name := req.Invocation.Name
 	bot.logger.DebugContext(ctx, "dispatching command",
@@ -544,104 +704,15 @@ func (bot *Bot) dispatchOne(ctx context.Context, req command.Request) (command.R
 	}
 
 	meta := handler.Metadata()
-	if err := bot.Check(ctx, req.Actor, meta.Permission); err != nil {
-		bot.logger.WarnContext(
-			ctx,
-			"command permission denied",
-			"command",
-			meta.Name,
-			"actor_user_id",
-			req.Actor.UserID,
-			"error",
-			err,
-		)
-		if errors.Is(err, command.ErrPermissionUnavailable) {
-			return command.Result{
-				Content: "I cannot verify permissions right now, so I will not run that command.",
-			}, false
-		}
-		return command.Result{Content: "permission denied"}, false
+	roleState, result, ok := bot.authorizeCommand(ctx, req, meta)
+	if !ok {
+		return result, false
 	}
 
 	if meta.ArgSpec != nil && bot.argParser != nil {
-		requiredPermission := command.RequiredPermission(meta.ArgSpec, req.Invocation.Args)
-		var actorRole zulip.Role
-		roleAvailable := false
-		if requiredPermission != command.PermOpen {
-			var err error
-			actorRole, err = bot.roleFor(ctx, req.Actor)
-			if err != nil {
-				err = fmt.Errorf("%w: %w", command.ErrPermissionUnavailable, err)
-				bot.logger.WarnContext(
-					ctx,
-					"subcommand permission denied",
-					"command",
-					meta.Name,
-					"actor_user_id",
-					req.Actor.UserID,
-					"message_id",
-					req.MessageID,
-					"error",
-					err,
-				)
-				return permissionDeniedResult(err), false
-			}
-			roleAvailable = true
-			if !roleAllows(actorRole, requiredPermission) {
-				err := fmt.Errorf("%w", command.ErrDenied)
-				bot.logger.WarnContext(
-					ctx,
-					"subcommand permission denied",
-					"command",
-					meta.Name,
-					"actor_user_id",
-					req.Actor.UserID,
-					"message_id",
-					req.MessageID,
-					"error",
-					err,
-				)
-				return permissionDeniedResult(err), false
-			}
-		} else if role, err := bot.roleFor(ctx, req.Actor); err == nil {
-			actorRole = role
-			roleAvailable = true
-		} else {
-			bot.logger.DebugContext(ctx, "actor role unavailable while filtering command arg spec",
-				"command", meta.Name,
-				"actor_user_id", req.Actor.UserID,
-				"message_id", req.MessageID,
-				"error", err)
-		}
-
-		bot.logger.DebugContext(ctx, "parsing command arguments",
-			"command", meta.Name,
-			"arg_count", len(req.Invocation.Args),
-			"actor_user_id", req.Actor.UserID,
-			"message_id", req.MessageID)
-		visibleArgSpec := command.FilterArgSpec(meta.ArgSpec, func(permission zulip.Role) bool {
-			return permission == command.PermOpen || (roleAvailable && roleAllows(actorRole, permission))
-		})
-		parsed, parseErr := bot.argParser.Parse(ctx, visibleArgSpec, req.Invocation.Args)
-		if parseErr != nil {
-			var userErr command.UserError
-			if errors.As(parseErr, &userErr) {
-				bot.logger.DebugContext(ctx, "command argument parsing returned user error",
-					"command", meta.Name,
-					"actor_user_id", req.Actor.UserID,
-					"message_id", req.MessageID,
-					"error", parseErr)
-				return command.Result{Content: userErr.Message}, false
-			}
-			bot.logger.ErrorContext(
-				ctx,
-				"arg parsing failed",
-				"command",
-				meta.Name,
-				"error",
-				parseErr,
-			)
-			return command.Result{Content: "Command failed because of an internal error."}, false
+		parsed, parseResult, ok := bot.parseCommandArgs(ctx, req, meta, roleState)
+		if !ok {
+			return parseResult, false
 		}
 		req.ParsedArgs = parsed
 	}
@@ -999,17 +1070,22 @@ func (bot *Bot) sendReply(
 }
 
 func (bot *Bot) Check(ctx context.Context, actor command.Actor, minRole zulip.Role) error {
+	_, err := bot.checkRole(ctx, actor, minRole)
+	return err
+}
+
+func (bot *Bot) checkRole(ctx context.Context, actor command.Actor, minRole zulip.Role) (zulip.Role, error) {
 	if minRole == 0 {
-		return nil
+		return zulip.RoleGuest, nil
 	}
 	actorRole, err := bot.fetchRole(ctx, actor.UserID)
 	if err != nil {
-		return fmt.Errorf("%w: %w", command.ErrPermissionUnavailable, err)
+		return zulip.RoleGuest, fmt.Errorf("%w: %w", command.ErrPermissionUnavailable, err)
 	}
 	if actorRole <= minRole {
-		return nil
+		return actorRole, nil
 	}
-	return fmt.Errorf("%w", command.ErrDenied)
+	return actorRole, fmt.Errorf("%w", command.ErrDenied)
 }
 
 func (bot *Bot) CheckBotOwner(actor command.Actor) error {
