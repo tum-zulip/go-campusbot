@@ -101,7 +101,7 @@ func NewFromFiles(paths ...string) (*Client, error) {
 		}
 		workers = append(workers, worker)
 	}
-	warnOnMismatchedPermissionLevels(append([]zulipclient.Client{base}, workers...), paths)
+	warnOnMismatchedPermissionLevels(logger, append([]zulipclient.Client{base}, workers...), paths)
 	return NewClients(append([]zulipclient.Client{base}, workers...)...)
 }
 
@@ -134,6 +134,7 @@ func NewWithWorkerFilesLogger(
 		workers = append(workers, worker)
 	}
 	warnOnMismatchedPermissionLevels(
+		logger,
 		append([]zulipclient.Client{client}, workers...),
 		append([]string{"base client"}, workerPaths...),
 	)
@@ -177,8 +178,10 @@ type permissionLevelCheckResult struct {
 	role   zulip.Role
 }
 
-func warnOnMismatchedPermissionLevels(clients []zulipclient.Client, paths []string) {
-	logger := slog.Default()
+func warnOnMismatchedPermissionLevels(logger *slog.Logger, clients []zulipclient.Client, paths []string) {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), permissionCheckTimeout)
 	defer cancel()
 
@@ -201,6 +204,9 @@ func warnOnMismatchedPermissionLevels(clients []zulipclient.Client, paths []stri
 		})
 	}
 
+	if len(results) == 0 {
+		return
+	}
 	reference := results[0]
 	for _, result := range results[1:] {
 		if result.role == reference.role {
