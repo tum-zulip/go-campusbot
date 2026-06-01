@@ -1,0 +1,62 @@
+# Installing campusbot
+
+Use a release binary for deployment. The usual layout is:
+
+- `/opt/campusbot/bin/campusbot` for the binary
+- `/etc/campusbot/zuliprc` for the bot credentials
+- `/etc/campusbot/workers` for optional worker credentials
+- `/var/lib/campusbot` for the SQLite database
+
+Create a system user without a home directory:
+
+```sh
+sudo useradd --system --user-group --no-create-home \
+  --home-dir /nonexistent --shell /usr/sbin/nologin campusbot
+```
+
+Install the binary and credentials:
+
+```sh
+sudo install -d -o root -g root -m 0755 /opt/campusbot/bin
+sudo install -m 0755 ./campusbot /opt/campusbot/bin/campusbot
+
+sudo install -d -o root -g campusbot -m 0750 /etc/campusbot /etc/campusbot/workers
+sudo install -o root -g campusbot -m 0640 ./zuliprc /etc/campusbot/zuliprc
+
+sudo install -d -o campusbot -g campusbot -m 0750 /var/lib/campusbot
+```
+
+Create `/etc/systemd/system/campusbot.service`:
+
+```ini
+[Unit]
+Description=Campusbot Zulip bot
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=campusbot
+Group=campusbot
+WorkingDirectory=/var/lib/campusbot
+ExecStart=/opt/campusbot/bin/campusbot --zuliprc /etc/campusbot/zuliprc --worker-rc-dir /etc/campusbot/workers --db /var/lib/campusbot/campusbot.sqlite3 --log-format json
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/campusbot
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Enable and start the service:
+
+```sh
+sudo systemctl daemon-reload
+sudo systemctl enable campusbot.service
+sudo systemctl start campusbot.service
+sudo systemctl status campusbot.service
+```
