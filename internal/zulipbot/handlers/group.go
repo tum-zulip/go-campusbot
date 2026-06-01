@@ -994,10 +994,14 @@ func (h *GroupHandler) handleShow(
 				fmt.Fprintf(&b, "  - id=%d\n", channelID)
 				continue
 			}
-			fmt.Fprintf(&b, "  - #**%s** (id=%d)\n", channelResp.Channel.Name, channelID)
+			fmt.Fprintf(&b, "  - %s\n", zulipChannelMention(channelResp.Channel.Name, channelID))
 		}
 	}
 	return command.Result{Content: strings.TrimSpace(b.String())}, nil
+}
+
+func zulipChannelMention(name string, id int64) string {
+	return fmt.Sprintf("#**%s|%d**", name, id)
 }
 
 func (h *GroupHandler) handleMappingList(

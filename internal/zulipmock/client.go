@@ -151,12 +151,15 @@ func (s *state) renderedMentionUserIDLocked(content string) (int64, bool) {
 }
 
 func (s *state) renderedMentionChannelIDLocked(content string) (int64, bool) {
-	name, ok := splitChannelMention(content)
+	name, id, ok := splitChannelMention(content)
 	if !ok {
 		return 0, false
 	}
-	id, ok := s.channelIDs[name]
-	return id, ok
+	if id != 0 {
+		return id, true
+	}
+	resolvedID, ok := s.channelIDs[name]
+	return resolvedID, ok
 }
 
 func splitUserMention(content string) (string, int64, bool) {
@@ -180,13 +183,21 @@ func splitUserMention(content string) (string, int64, bool) {
 	return name, id, name != ""
 }
 
-func splitChannelMention(content string) (string, bool) {
+func splitChannelMention(content string) (string, int64, bool) {
 	content = strings.TrimSpace(content)
 	if !strings.HasPrefix(content, "#**") || !strings.HasSuffix(content, "**") {
-		return "", false
+		return "", 0, false
 	}
-	name := strings.TrimSuffix(strings.TrimPrefix(content, "#**"), "**")
-	return name, name != ""
+	body := strings.TrimSuffix(strings.TrimPrefix(content, "#**"), "**")
+	name, rawID, hasID := strings.Cut(body, "|")
+	if !hasID {
+		return name, 0, name != ""
+	}
+	id, err := strconv.ParseInt(rawID, 10, 64)
+	if err != nil {
+		return "", 0, false
+	}
+	return name, id, name != ""
 }
 
 type SentMessage struct {

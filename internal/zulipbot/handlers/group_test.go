@@ -1447,6 +1447,30 @@ func TestGroupSubscribeStillWorksForNoneUser(t *testing.T) {
 	}
 }
 
+func TestGroupShowRendersChannelsWithIDMentions(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env, groupID := newCourseTestEnv(t)
+	channelID := seedChannel(t, env.base, "wi-channel")
+	if _, _, err := env.client.UpdateChannelGroupChannels(ctx, groupID).Add([]int64{channelID}).Execute(); err != nil {
+		t.Fatalf("UpdateChannelGroupChannels: %v", err)
+	}
+
+	h := env.handler(allowAll{})
+	result, err := h.Handle(ctx, makeGroupRequest(handlers.GroupShowArgs{ShortName: "WI"}))
+	if err != nil {
+		t.Fatalf("Handle() failed: %v", err)
+	}
+
+	want := "#**wi-channel|" + itoa(channelID) + "**"
+	if !strings.Contains(result.Content, want) {
+		t.Fatalf("expected channel mention %q, got:\n%s", want, result.Content)
+	}
+	if strings.Contains(result.Content, "(id=") {
+		t.Fatalf("expected no parenthesized channel ID, got:\n%s", result.Content)
+	}
+}
+
 func TestGroupAnnounceInspect(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
