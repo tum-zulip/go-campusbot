@@ -25,7 +25,8 @@ Useful options:
 
 ## Deploy
 
-Use the published GitHub releases for deployment binaries.
+Use the published GitHub releases for deployment binaries. See `INSTALL` for a
+minimal systemd setup.
 
 ## Development
 
