@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"path/filepath"
@@ -542,6 +543,12 @@ func TestGroupCreateAdminCreatesChannelGroupAndMapping(t *testing.T) {
 	if !strings.Contains(result.Content, "PGDP") || !strings.Contains(result.Content, "books") {
 		t.Errorf("expected created group response with name and emoji, got: %s", result.Content)
 	}
+	if !strings.Contains(result.Content, "@_*PGDP*") {
+		t.Errorf("expected silent user-group mention, got: %s", result.Content)
+	}
+	if strings.Contains(result.Content, "user group ID") {
+		t.Errorf("expected no raw user-group ID in response, got: %s", result.Content)
+	}
 }
 
 func TestGroupRemoveEmptyGroup(t *testing.T) {
@@ -664,7 +671,9 @@ func TestGroupRemoveForceDoesNotArchiveChannelsSharedWithOtherGroups(t *testing.
 	if _, _, err := env.client.UpdateChannelGroupChannels(ctx, groupID).Add([]int64{channelID}).Execute(); err != nil {
 		t.Fatalf("pre-add channel %d to group %d: %v", channelID, groupID, err)
 	}
-	if _, _, err := env.client.UpdateChannelGroupChannels(ctx, otherGroupID).Add([]int64{channelID}).Execute(); err != nil {
+	if _, _, err := env.client.UpdateChannelGroupChannels(ctx, otherGroupID).
+		Add([]int64{channelID}).
+		Execute(); err != nil {
 		t.Fatalf("pre-add channel %d to group %d: %v", channelID, otherGroupID, err)
 	}
 
@@ -805,7 +814,7 @@ func TestGroupMappingSetAutoImportsWhenZulipVisibleButNotLocal(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	env := newGroupTestEnv(t)
-	groupID := seedZulipUserGroup(t, env.base, "PGDP", []int64{1})
+	groupID := seedZulipUserGroup(t, env.base, "PGDP Tutors", []int64{1})
 	msgID := int64(555)
 	if err := saveAnnouncementState(ctx, env.queries, &msgID); err != nil {
 		t.Fatalf("SaveAnnouncementState: %v", err)
@@ -817,7 +826,7 @@ func TestGroupMappingSetAutoImportsWhenZulipVisibleButNotLocal(t *testing.T) {
 		ctx,
 		makeGroupRequest(handlers.GroupMappingSetArgs{
 			ShortName:  "PGDP",
-			ZulipGroup: z.User{UserID: groupID, FullName: "PGDP"},
+			ZulipGroup: z.User{UserID: groupID, FullName: "PGDP Tutors"},
 			EmojiName:  ":math:",
 		}),
 	)
@@ -826,6 +835,12 @@ func TestGroupMappingSetAutoImportsWhenZulipVisibleButNotLocal(t *testing.T) {
 	}
 	if !strings.Contains(strings.ToLower(result.Content), "imported") {
 		t.Errorf("success message should mention auto-import, got: %q", result.Content)
+	}
+	if !strings.Contains(result.Content, "@_*PGDP Tutors*") {
+		t.Errorf("success message should mention the Zulip group name, got: %q", result.Content)
+	}
+	if strings.Contains(result.Content, "@_*PGDP*") {
+		t.Errorf("success message should not mention the short name as Zulip group, got: %q", result.Content)
 	}
 	// Local channel group now exists.
 	if _, _, err := env.client.GetChannelGroup(ctx, groupID).Execute(); err != nil {
@@ -857,20 +872,26 @@ func TestGroupMappingSetParsesUserGroupMention(t *testing.T) {
 	groupID := seedZulipUserGroup(t, env.base, "PGDP", []int64{1})
 	parser := command.NewArgParser(groupArgResolver{Client: env.base})
 
-	parsed, err := parser.Parse(
-		ctx,
-		handlers.GroupArgSpec,
-		[]string{"mapping", "set", "PGDP", "@**PGDP**", ":math:"},
-	)
-	if err != nil {
-		t.Fatalf("Parse() failed: %v", err)
-	}
-	args, ok := parsed.(handlers.GroupMappingSetArgs)
-	if !ok {
-		t.Fatalf("expected GroupMappingSetArgs, got %T", parsed)
-	}
-	if args.ZulipGroup.UserID != groupID || args.ZulipGroup.FullName != "PGDP" {
-		t.Fatalf("unexpected ZulipGroup: %+v", args.ZulipGroup)
+	for _, mention := range []string{"@_**PGDP**", "@_*PGDP*"} {
+		t.Run(mention, func(t *testing.T) {
+			t.Parallel()
+
+			parsed, err := parser.Parse(
+				ctx,
+				handlers.GroupArgSpec,
+				[]string{"mapping", "set", "PGDP", mention, ":math:"},
+			)
+			if err != nil {
+				t.Fatalf("Parse() failed: %v", err)
+			}
+			args, ok := parsed.(handlers.GroupMappingSetArgs)
+			if !ok {
+				t.Fatalf("expected GroupMappingSetArgs, got %T", parsed)
+			}
+			if args.ZulipGroup.UserID != groupID || args.ZulipGroup.FullName != "PGDP" {
+				t.Fatalf("unexpected ZulipGroup: %+v", args.ZulipGroup)
+			}
+		})
 	}
 }
 
@@ -890,7 +911,7 @@ func TestGroupMappingSetRejectsNumericUserGroupID(t *testing.T) {
 	if !errors.As(err, &userErr) {
 		t.Fatalf("expected UserError, got %T: %v", err, err)
 	}
-	if !strings.Contains(userErr.Message, "Zulip user mention") {
+	if !strings.Contains(userErr.Message, "Zulip user group mention") {
 		t.Fatalf("expected mention-only error, got %q", userErr.Message)
 	}
 }
@@ -943,7 +964,7 @@ func TestGroupMappingSetRejectsDuplicateEnabledEmoji(t *testing.T) {
 	if !errors.As(err, &userErr) {
 		t.Fatalf("expected UserError for duplicate emoji, got %T: %v", err, err)
 	}
-	if !strings.Contains(userErr.Message, "already mapped to `channel_group_id:100`") {
+	if !strings.Contains(userErr.Message, "already mapped to `missing channel group`") {
 		t.Fatalf("expected duplicate emoji guidance, got: %q", userErr.Message)
 	}
 	mappings, err := env.queries.ListAllEmojiGroupMappings(ctx)
@@ -959,7 +980,7 @@ func TestGroupMappingSetSkipsAutoImportWhenAlreadyLocal(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	env := newGroupTestEnv(t)
-	groupID := seedChannelGroup(t, env.client, env.base, "NEWCOURSE")
+	groupID := seedChannelGroup(t, env.client, env.base, "New Course Zulip Group")
 	setAnnouncementConfig(t, env.queries, 1, "t")
 
 	h := env.handler(allowAll{})
@@ -968,7 +989,7 @@ func TestGroupMappingSetSkipsAutoImportWhenAlreadyLocal(t *testing.T) {
 		makeGroupRequest(
 			handlers.GroupMappingSetArgs{
 				ShortName:  "NEWCOURSE",
-				ZulipGroup: z.User{UserID: groupID, FullName: "NEWCOURSE"},
+				ZulipGroup: z.User{UserID: groupID, FullName: "New Course Zulip Group"},
 				EmojiName:  ":newemoji:",
 			},
 		),
@@ -981,6 +1002,12 @@ func TestGroupMappingSetSkipsAutoImportWhenAlreadyLocal(t *testing.T) {
 			"success message must not mention import when no import happened, got: %q",
 			result.Content,
 		)
+	}
+	if !strings.Contains(result.Content, "@_*New Course Zulip Group*") {
+		t.Errorf("expected silent user-group mention with Zulip group name, got: %q", result.Content)
+	}
+	if strings.Contains(result.Content, "@_*NEWCOURSE*") {
+		t.Errorf("success message should not mention the short name as Zulip group, got: %q", result.Content)
 	}
 	m, ok, err := getGroupMappingByShortName(ctx, env.queries, "NEWCOURSE")
 	if err != nil || !ok || m.ChannelGroupID != groupID {
@@ -1169,8 +1196,9 @@ func TestGroupAnnounceRejectsInvalidEnabledMapping(t *testing.T) {
 			err,
 		)
 	}
-	if !strings.Contains(userErr.Message, "channel_group_id:9999") || !strings.Contains(userErr.Message, "9999") {
-		t.Errorf("error should list invalid mapping channel_group_id:9999/9999, got: %q", userErr.Message)
+	if !strings.Contains(userErr.Message, "missing channel group") ||
+		strings.Contains(userErr.Message, "9999") {
+		t.Errorf("error should list invalid mapping by name without raw IDs, got: %q", userErr.Message)
 	}
 	if got := announcementHash(t, env.queries); got != "" {
 		t.Errorf("expected no announcement update when validation fails, got hash %q", got)
@@ -1272,8 +1300,8 @@ func TestGroupMappingListAnnotatesMissingChannelGroups(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Handle() failed: %v", err)
 	}
-	if !strings.Contains(result.Content, "channel_group_id:9999") ||
-		!strings.Contains(result.Content, "missing channel group") {
+	if !strings.Contains(result.Content, "missing channel group") ||
+		strings.Contains(result.Content, "9999") {
 		t.Errorf("expected missing channel group to be flagged, got:\n%s", result.Content)
 	}
 	for _, line := range strings.Split(result.Content, "\n") {
@@ -1444,6 +1472,30 @@ func TestGroupSubscribeStillWorksForNoneUser(t *testing.T) {
 	}
 	if result.Content == "" {
 		t.Error("expected non-empty result")
+	}
+}
+
+func TestGroupShowRendersChannelsWithIDMentions(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env, groupID := newCourseTestEnv(t)
+	channelID := seedChannel(t, env.base, "wi-channel")
+	if _, _, err := env.client.UpdateChannelGroupChannels(ctx, groupID).Add([]int64{channelID}).Execute(); err != nil {
+		t.Fatalf("UpdateChannelGroupChannels: %v", err)
+	}
+
+	h := env.handler(allowAll{})
+	result, err := h.Handle(ctx, makeGroupRequest(handlers.GroupShowArgs{ShortName: "WI"}))
+	if err != nil {
+		t.Fatalf("Handle() failed: %v", err)
+	}
+
+	want := "#_**wi-channel|" + itoa(channelID) + "**"
+	if !strings.Contains(result.Content, want) {
+		t.Fatalf("expected channel mention %q, got:\n%s", want, result.Content)
+	}
+	if strings.Contains(result.Content, "(id=") {
+		t.Fatalf("expected no parenthesized channel ID, got:\n%s", result.Content)
 	}
 }
 
@@ -1748,6 +1800,9 @@ func TestGroupFolderRemoveUserErrorForChannelOutsideGroupInFolder(t *testing.T) 
 	if !strings.Contains(userErr.Message, "not part of **WI**") {
 		t.Fatalf("expected external channel message, got %q", userErr.Message)
 	}
+	if !strings.Contains(userErr.Message, fmt.Sprintf("Channel %d", extraChannelID)) {
+		t.Fatalf("expected external channel id in message, got %q", userErr.Message)
+	}
 }
 
 func TestGroupFolderRemoveBadRequestIsUserError(t *testing.T) {
@@ -1804,6 +1859,9 @@ func TestGroupFolderAddUserErrorForChannelInDifferentFolder(t *testing.T) {
 	}
 	if !strings.Contains(userErr.Message, "another channel folder") {
 		t.Fatalf("expected folder conflict message, got %q", userErr.Message)
+	}
+	if !strings.Contains(userErr.Message, fmt.Sprintf("Channel %d", channelID)) {
+		t.Fatalf("expected conflicting channel id in message, got %q", userErr.Message)
 	}
 }
 

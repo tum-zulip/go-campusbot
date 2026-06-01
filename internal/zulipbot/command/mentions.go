@@ -13,8 +13,10 @@ var errRenderedIDNotFound = errors.New("rendered mention did not contain an ID")
 var (
 	userMentionPattern       = regexp.MustCompile(`^@_?\*\*([^\*` + "`" + `\\>"@]+)\*\*$`)
 	userMentionWithIDPattern = regexp.MustCompile(`^@_?\*\*([^\*` + "`" + `\\>"@]+)\|(\d+)\*\*$`)
-	channelMentionPattern    = regexp.MustCompile(`^#\*\*(.+)\*\*$`)
+	userGroupMentionPattern  = regexp.MustCompile(`^@_?\*([^\*` + "`" + `\\>"@]+)\*$`)
+	channelMentionPattern    = regexp.MustCompile(`^#_?\*\*(.+)\*\*$`)
 	renderedUserIDPattern    = regexp.MustCompile(`data-user-id="(\d+)"`)
+	renderedGroupIDPattern   = regexp.MustCompile(`data-user-group-id="(\d+)"`)
 	renderedChannelIDPattern = regexp.MustCompile(`data-stream-id="(\d+)"`)
 )
 
@@ -33,6 +35,23 @@ func zulipUserMentionID(token string) (int64, bool) {
 		return 0, false
 	}
 	return id, true
+}
+
+func zulipUserMentionName(token string) (string, bool) {
+	matches := userMentionPattern.FindStringSubmatch(strings.TrimSpace(token))
+	if matches == nil {
+		return "", false
+	}
+	name, _, _ := strings.Cut(matches[1], "|")
+	return name, name != ""
+}
+
+func zulipUserGroupMentionName(token string) (string, bool) {
+	matches := userGroupMentionPattern.FindStringSubmatch(strings.TrimSpace(token))
+	if matches == nil {
+		return "", false
+	}
+	return matches[1], true
 }
 
 func isZulipChannelMention(token string) bool {

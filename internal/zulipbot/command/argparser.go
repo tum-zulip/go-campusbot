@@ -216,6 +216,10 @@ func (p *ArgParser) userFromToken(
 	field reflect.StructField,
 	argName, token string,
 ) (zulip.User, error) {
+	if argName == "zulip_user_group" {
+		return p.userGroupFromToken(ctx, argName, token)
+	}
+
 	var n int64
 	var err error
 	if field.Tag.Get("mention_only") == "true" {
@@ -238,6 +242,39 @@ func (p *ArgParser) userFromToken(
 		return zulip.User{}, fmt.Errorf("resolve user %d: %w", n, err)
 	}
 	return user, nil
+}
+
+func (p *ArgParser) userGroupFromToken(ctx context.Context, argName, token string) (zulip.User, error) {
+	name, hasGroupName := zulipUserGroupMentionName(token)
+	switch {
+	case hasGroupName:
+		id, err := p.resolveMentionID(ctx, token, renderedGroupIDPattern)
+		if err != nil {
+			if errors.Is(err, errRenderedIDNotFound) {
+				return zulip.User{}, NewUserError(
+					fmt.Sprintf("%s must resolve to a valid Zulip user group mention, got %q", argName, token),
+				)
+			}
+			return zulip.User{}, fmt.Errorf("resolve user group mention %q: %w", token, err)
+		}
+		return zulip.User{UserID: id, FullName: name}, nil
+
+	case isZulipUserMention(token):
+		id, err := p.resolveMentionID(ctx, token, renderedUserIDPattern)
+		if err != nil {
+			if errors.Is(err, errRenderedIDNotFound) {
+				return zulip.User{}, NewUserError(
+					fmt.Sprintf("%s must resolve to a valid Zulip user group mention, got %q", argName, token),
+				)
+			}
+			return zulip.User{}, fmt.Errorf("resolve user group mention %q: %w", token, err)
+		}
+		userName, _ := zulipUserMentionName(token)
+		return zulip.User{UserID: id, FullName: userName}, nil
+
+	default:
+		return zulip.User{}, NewUserError(fmt.Sprintf("%s must be a Zulip user group mention, got %q", argName, token))
+	}
 }
 
 func (p *ArgParser) channelFromToken(

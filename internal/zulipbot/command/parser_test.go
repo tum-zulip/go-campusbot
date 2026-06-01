@@ -49,18 +49,23 @@ func TestParserKeepsZulipMentionsWithSpacesAsSingleArguments(t *testing.T) {
 	}{
 		{
 			name:     "user mention",
-			input:    `role set @**The User Name** admin`,
-			wantArgs: []string{"set", "@**The User Name**", "admin"},
-		},
-		{
-			name:     "silent user mention",
 			input:    `role set @_**The User Name** admin`,
 			wantArgs: []string{"set", "@_**The User Name**", "admin"},
+		},
+		{
+			name:     "user group mention",
+			input:    `group mapping set PGDP @_*The Group Name* :math:`,
+			wantArgs: []string{"mapping", "set", "PGDP", "@_*The Group Name*", ":math:"},
 		},
 		{
 			name:     "channel mention",
 			input:    `group channel add #**The Channel Name** WI`,
 			wantArgs: []string{"channel", "add", "#**The Channel Name**", "WI"},
+		},
+		{
+			name:     "silent channel mention",
+			input:    `group channel add #_**The Channel Name** WI`,
+			wantArgs: []string{"channel", "add", "#_**The Channel Name**", "WI"},
 		},
 	}
 	for _, tt := range tests {

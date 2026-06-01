@@ -362,6 +362,10 @@ type userMentionArgs struct {
 	User zulip.User `arg:"user" mention_only:"true" desc:"Zulip user mention"`
 }
 
+type userGroupMentionArgs struct {
+	Group zulip.User `arg:"zulip_user_group" mention_only:"true" desc:"Zulip user group mention"`
+}
+
 type fakeResolver struct {
 	users    map[int64]zulip.User
 	channels map[int64]zulip.Channel
@@ -418,11 +422,11 @@ func TestArgParserUserMentionResolution(t *testing.T) {
 			42: {UserID: 42, FullName: "The User Name"},
 		},
 		rendered: map[string]string{
-			`@**The User Name**`: `<p><span data-user-id="42">@The User Name</span></p>`,
+			`@_**The User Name**`: `<p><span data-user-id="42">@The User Name</span></p>`,
 		},
 	}
 	parser := command.NewArgParser(resolver)
-	result, err := parser.Parse(context.Background(), userArgs{}, []string{`@**The User Name**`})
+	result, err := parser.Parse(context.Background(), userArgs{}, []string{`@_**The User Name**`})
 	if err != nil {
 		t.Fatalf("Parse() error: %v", err)
 	}
@@ -438,7 +442,7 @@ func TestArgParserUserMentionWithEmbeddedIDResolution(t *testing.T) {
 		42: {UserID: 42, FullName: "The User Name"},
 	}}
 	parser := command.NewArgParser(resolver)
-	result, err := parser.Parse(context.Background(), userArgs{}, []string{`@**The User Name|42**`})
+	result, err := parser.Parse(context.Background(), userArgs{}, []string{`@_**The User Name|42**`})
 	if err != nil {
 		t.Fatalf("Parse() error: %v", err)
 	}
@@ -454,7 +458,7 @@ func TestArgParserUserMentionOnlyAcceptsMention(t *testing.T) {
 		42: {UserID: 42, FullName: "The User Name"},
 	}}
 	parser := command.NewArgParser(resolver)
-	result, err := parser.Parse(context.Background(), userMentionArgs{}, []string{`@**The User Name|42**`})
+	result, err := parser.Parse(context.Background(), userMentionArgs{}, []string{`@_**The User Name|42**`})
 	if err != nil {
 		t.Fatalf("Parse() error: %v", err)
 	}
@@ -477,6 +481,37 @@ func TestArgParserUserMentionOnlyRejectsInteger(t *testing.T) {
 	}
 	if !strings.Contains(userErr.Message, "Zulip user mention") {
 		t.Fatalf("expected mention-only error, got %q", userErr.Message)
+	}
+}
+
+func TestArgParserUserGroupMentionResolution(t *testing.T) {
+	t.Parallel()
+	resolver := &fakeResolver{
+		rendered: map[string]string{
+			`@_*The Group Name*`: `<p><span class="user-group-mention silent" data-user-group-id="17">The Group Name</span></p>`,
+		},
+	}
+	parser := command.NewArgParser(resolver)
+	result, err := parser.Parse(context.Background(), userGroupMentionArgs{}, []string{`@_*The Group Name*`})
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	got := result.(userGroupMentionArgs)
+	if got.Group.UserID != 17 || got.Group.FullName != "The Group Name" {
+		t.Fatalf("unexpected group: %+v", got.Group)
+	}
+}
+
+func TestArgParserUserGroupMentionRejectsInteger(t *testing.T) {
+	t.Parallel()
+	parser := command.NewArgParser(nil)
+	_, err := parser.Parse(context.Background(), userGroupMentionArgs{}, []string{"17"})
+	var userErr command.UserError
+	if !errors.As(err, &userErr) {
+		t.Fatalf("expected UserError, got %T: %v", err, err)
+	}
+	if !strings.Contains(userErr.Message, "Zulip user group mention") {
+		t.Fatalf("expected user-group mention error, got %q", userErr.Message)
 	}
 }
 
@@ -553,6 +588,27 @@ func TestArgParserChannelMentionOnlyAcceptsMention(t *testing.T) {
 		t.Fatalf("Parse() error: %v", err)
 	}
 	got := result.(channelMentionArgs)
+	if got.Channel.ChannelID != 24 || got.Channel.Name != "The Channel Name" {
+		t.Fatalf("unexpected channel: %+v", got.Channel)
+	}
+}
+
+func TestArgParserSilentChannelMentionResolution(t *testing.T) {
+	t.Parallel()
+	resolver := &fakeResolver{
+		channels: map[int64]zulip.Channel{
+			24: {ChannelID: 24, Name: "The Channel Name"},
+		},
+		rendered: map[string]string{
+			`#_**The Channel Name**`: `<p><a data-stream-id="24">#The Channel Name</a></p>`,
+		},
+	}
+	parser := command.NewArgParser(resolver)
+	result, err := parser.Parse(context.Background(), channelArgs{}, []string{`#_**The Channel Name**`})
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	got := result.(channelArgs)
 	if got.Channel.ChannelID != 24 || got.Channel.Name != "The Channel Name" {
 		t.Fatalf("unexpected channel: %+v", got.Channel)
 	}

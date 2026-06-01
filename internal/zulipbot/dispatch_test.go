@@ -566,7 +566,7 @@ func TestHandleMessageIgnoresDirectMentionWhenBotIsNotRecipient(t *testing.T) {
 	err = bot.HandleMessage(context.Background(), events.MessageEvent{
 		Message: zulip.Message{
 			ID:       1235,
-			Content:  "help @**Mock Bot**",
+			Content:  "help @_**Mock Bot**",
 			SenderID: senderID,
 			Type:     zulip.RecipientTypeDirect,
 			DisplayRecipient: zulip.DisplayRecipientFromUserRecipentArray([]zulip.UserRecipent{

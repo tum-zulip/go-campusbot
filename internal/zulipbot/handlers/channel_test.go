@@ -37,7 +37,7 @@ func TestChannelLsDefaultsToAllChannels(t *testing.T) {
 	if !strings.Contains(result.Content, "Channels matching `.*`:") {
 		t.Fatalf("result = %q, want default pattern header", result.Content)
 	}
-	for _, want := range []string{"#**Algorithms**", "#**Databases**"} {
+	for _, want := range []string{"#_**Algorithms|1**", "#_**Databases|2**"} {
 		if !strings.Contains(result.Content, want) {
 			t.Errorf("result = %q, want %q", result.Content, want)
 		}
@@ -57,13 +57,15 @@ func TestChannelLsMatchesRegexPattern(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Handle() failed: %v", err)
 	}
-	for _, want := range []string{"#**IN0001**", "#**IN0002**"} {
+	for _, want := range []string{"#_**IN0001|1**", "#_**IN0002|2**"} {
 		if !strings.Contains(result.Content, want) {
 			t.Errorf("result = %q, want %q", result.Content, want)
 		}
 	}
-	if strings.Contains(result.Content, "#**MA0901**") {
-		t.Errorf("result = %q, did not expect MA0901", result.Content)
+	for _, unwanted := range []string{"#_**MA0901**", "#_**MA0901|"} {
+		if strings.Contains(result.Content, unwanted) {
+			t.Errorf("result = %q, did not expect MA0901 mention %q", result.Content, unwanted)
+		}
 	}
 }
 
@@ -229,7 +231,7 @@ func TestChannelFolderAddRejectsDifferentFolderWithoutForce(t *testing.T) {
 	if !errors.As(err, &userErr) {
 		t.Fatalf("expected UserError, got %T: %v", err, err)
 	}
-	for _, want := range []string{"already in channel folder", "channel folder add -f"} {
+	for _, want := range []string{"already in another channel folder", "channel folder add -f"} {
 		if !strings.Contains(userErr.Message, want) {
 			t.Fatalf("user error = %q, want %q", userErr.Message, want)
 		}

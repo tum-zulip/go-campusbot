@@ -150,13 +150,32 @@ func (s *state) renderedMentionUserIDLocked(content string) (int64, bool) {
 	return 0, false
 }
 
-func (s *state) renderedMentionChannelIDLocked(content string) (int64, bool) {
-	name, ok := splitChannelMention(content)
+func (s *state) renderedMentionUserGroupIDLocked(content string) (int64, bool) {
+	name, ok := splitUserGroupMention(content)
 	if !ok {
 		return 0, false
 	}
-	id, ok := s.channelIDs[name]
-	return id, ok
+	for id, group := range s.userGroups {
+		if group.group.Name == name {
+			return id, true
+		}
+	}
+	return 0, false
+}
+
+func (s *state) renderedMentionChannelIDLocked(content string) (int64, bool) {
+	name, id, ok := splitChannelMention(content)
+	if !ok {
+		return 0, false
+	}
+	if id != 0 {
+		if _, ok := s.channels[id]; ok {
+			return id, true
+		}
+		return 0, false
+	}
+	resolvedID, ok := s.channelIDs[name]
+	return resolvedID, ok
 }
 
 func splitUserMention(content string) (string, int64, bool) {
@@ -180,13 +199,44 @@ func splitUserMention(content string) (string, int64, bool) {
 	return name, id, name != ""
 }
 
-func splitChannelMention(content string) (string, bool) {
+func splitUserGroupMention(content string) (string, bool) {
 	content = strings.TrimSpace(content)
-	if !strings.HasPrefix(content, "#**") || !strings.HasSuffix(content, "**") {
-		return "", false
+	for _, format := range []struct {
+		prefix string
+		suffix string
+	}{
+		{prefix: "@_**", suffix: "**"},
+		{prefix: "@_*", suffix: "*"},
+		{prefix: "@*", suffix: "*"},
+	} {
+		if !strings.HasPrefix(content, format.prefix) || !strings.HasSuffix(content, format.suffix) {
+			continue
+		}
+		body := strings.TrimSuffix(strings.TrimPrefix(content, format.prefix), format.suffix)
+		return body, body != ""
 	}
-	name := strings.TrimSuffix(strings.TrimPrefix(content, "#**"), "**")
-	return name, name != ""
+	return "", false
+}
+
+func splitChannelMention(content string) (string, int64, bool) {
+	content = strings.TrimSpace(content)
+	prefix := "#**"
+	if strings.HasPrefix(content, "#_**") {
+		prefix = "#_**"
+	}
+	if !strings.HasPrefix(content, prefix) || !strings.HasSuffix(content, "**") {
+		return "", 0, false
+	}
+	body := strings.TrimSuffix(strings.TrimPrefix(content, prefix), "**")
+	name, rawID, hasID := strings.Cut(body, "|")
+	if !hasID {
+		return name, 0, name != ""
+	}
+	id, err := strconv.ParseInt(rawID, 10, 64)
+	if err != nil {
+		return "", 0, false
+	}
+	return name, id, name != ""
 }
 
 type SentMessage struct {
@@ -1817,6 +1867,8 @@ func (Client) RenderMessageExecute(r messages.RenderMessageRequest) (*messages.R
 	rendered := content
 	if userID, ok := state.renderedMentionUserIDLocked(content); ok {
 		rendered = fmt.Sprintf(`<p><span data-user-id="%d">%s</span></p>`, userID, content)
+	} else if userGroupID, ok := state.renderedMentionUserGroupIDLocked(content); ok {
+		rendered = fmt.Sprintf(`<p><span data-user-group-id="%d">%s</span></p>`, userGroupID, content)
 	} else if channelID, ok := state.renderedMentionChannelIDLocked(content); ok {
 		rendered = fmt.Sprintf(`<p><a data-stream-id="%d">%s</a></p>`, channelID, content)
 	}
