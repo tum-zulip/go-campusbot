@@ -271,27 +271,34 @@ func scanZulipMentionToken(runes []rune, start int) (string, int, bool) {
 		if i < len(runes) && runes[i] == '_' {
 			i++
 		}
-		if !hasRunesAt(runes, i, "**") {
-			return "", start, false
+		if hasRunesAt(runes, i, "**") {
+			return scanDelimitedMention(runes, start, i+2, "**")
 		}
-		end, ok := findRunes(runes, i+2, "**")
-		if !ok {
-			return "", start, false
+		if hasRunesAt(runes, i, "*") {
+			return scanDelimitedMention(runes, start, i+1, "*")
 		}
-		return string(runes[start : end+2]), end + 2, true
+		return "", start, false
 	case '#':
 		i := start + 1
+		if i < len(runes) && runes[i] == '_' {
+			i++
+		}
 		if !hasRunesAt(runes, i, "**") {
 			return "", start, false
 		}
-		end, ok := findRunes(runes, i+2, "**")
-		if !ok {
-			return "", start, false
-		}
-		return string(runes[start : end+2]), end + 2, true
+		return scanDelimitedMention(runes, start, i+2, "**")
 	default:
 		return "", start, false
 	}
+}
+
+func scanDelimitedMention(runes []rune, start, contentStart int, delimiter string) (string, int, bool) {
+	end, ok := findRunes(runes, contentStart, delimiter)
+	if !ok {
+		return "", start, false
+	}
+	next := end + len([]rune(delimiter))
+	return string(runes[start:next]), next, true
 }
 
 func hasRunesAt(runes []rune, start int, value string) bool {

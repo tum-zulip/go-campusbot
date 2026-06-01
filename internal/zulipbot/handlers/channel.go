@@ -117,7 +117,7 @@ func (h *ChannelHandler) handleLs(ctx context.Context, args ChannelLsArgs) (comm
 	var b strings.Builder
 	fmt.Fprintf(&b, "Channels matching `%s`:\n", pattern)
 	for _, channel := range matches {
-		fmt.Fprintf(&b, "- #**%s** (id=%d)\n", channel.Name, channel.ChannelID)
+		fmt.Fprintf(&b, "- %s\n", zulipChannelMention(channel.Name, channel.ChannelID))
 	}
 	return command.Result{Content: strings.TrimSpace(b.String())}, nil
 }
@@ -146,9 +146,8 @@ func (h *ChannelHandler) handleFolderAdd(
 	}
 	if channelResp.Channel.FolderID != nil && *channelResp.Channel.FolderID != folderID && !args.Force {
 		return command.Result{}, command.NewUserError(fmt.Sprintf(
-			"Channel %d is already in channel folder %d. Use `channel folder add -f` to reassign it to %q.",
-			args.Channel.ChannelID,
-			*channelResp.Channel.FolderID,
+			"%s is already in another channel folder. Use `channel folder add -f` to reassign it to %q.",
+			zulipChannelMention(channelResp.Channel.Name, args.Channel.ChannelID),
 			folderName,
 		))
 	}
@@ -161,7 +160,11 @@ func (h *ChannelHandler) handleFolderAdd(
 		)
 	}
 	return command.Result{
-		Content: fmt.Sprintf("Added folder **%s** to channel %d.", folderName, args.Channel.ChannelID),
+		Content: fmt.Sprintf(
+			"Added folder **%s** to %s.",
+			folderName,
+			zulipChannelMention(channelResp.Channel.Name, args.Channel.ChannelID),
+		),
 	}, nil
 }
 
@@ -189,22 +192,26 @@ func (h *ChannelHandler) handleFolderRemove(
 	}
 	if channelResp.Channel.FolderID == nil {
 		return command.Result{}, command.NewUserError(fmt.Sprintf(
-			"Channel %d is not in channel folder %q.",
-			args.Channel.ChannelID,
+			"%s is not in channel folder %q.",
+			zulipChannelMention(channelResp.Channel.Name, args.Channel.ChannelID),
 			folderName,
 		))
 	}
 	if *channelResp.Channel.FolderID != folderID {
 		return command.Result{}, command.NewUserError(fmt.Sprintf(
-			"Channel %d is in another channel folder.",
-			args.Channel.ChannelID,
+			"%s is in another channel folder.",
+			zulipChannelMention(channelResp.Channel.Name, args.Channel.ChannelID),
 		))
 	}
 	if _, _, err := h.client.UpdateChannel(ctx, args.Channel.ChannelID).FolderIDNone().Execute(); err != nil {
 		return command.Result{}, fmt.Errorf("remove folder from channel %d: %w", args.Channel.ChannelID, err)
 	}
 	return command.Result{
-		Content: fmt.Sprintf("Removed folder **%s** from channel %d.", folderName, args.Channel.ChannelID),
+		Content: fmt.Sprintf(
+			"Removed folder **%s** from %s.",
+			folderName,
+			zulipChannelMention(channelResp.Channel.Name, args.Channel.ChannelID),
+		),
 	}, nil
 }
 

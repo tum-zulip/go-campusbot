@@ -150,6 +150,19 @@ func (s *state) renderedMentionUserIDLocked(content string) (int64, bool) {
 	return 0, false
 }
 
+func (s *state) renderedMentionUserGroupIDLocked(content string) (int64, bool) {
+	name, ok := splitUserGroupMention(content)
+	if !ok {
+		return 0, false
+	}
+	for id, group := range s.userGroups {
+		if group.group.Name == name {
+			return id, true
+		}
+	}
+	return 0, false
+}
+
 func (s *state) renderedMentionChannelIDLocked(content string) (int64, bool) {
 	name, id, ok := splitChannelMention(content)
 	if !ok {
@@ -183,12 +196,29 @@ func splitUserMention(content string) (string, int64, bool) {
 	return name, id, name != ""
 }
 
+func splitUserGroupMention(content string) (string, bool) {
+	content = strings.TrimSpace(content)
+	prefix := "@*"
+	if strings.HasPrefix(content, "@_*") {
+		prefix = "@_*"
+	}
+	if !strings.HasPrefix(content, prefix) || !strings.HasSuffix(content, "*") {
+		return "", false
+	}
+	body := strings.TrimSuffix(strings.TrimPrefix(content, prefix), "*")
+	return body, body != ""
+}
+
 func splitChannelMention(content string) (string, int64, bool) {
 	content = strings.TrimSpace(content)
-	if !strings.HasPrefix(content, "#**") || !strings.HasSuffix(content, "**") {
+	prefix := "#**"
+	if strings.HasPrefix(content, "#_**") {
+		prefix = "#_**"
+	}
+	if !strings.HasPrefix(content, prefix) || !strings.HasSuffix(content, "**") {
 		return "", 0, false
 	}
-	body := strings.TrimSuffix(strings.TrimPrefix(content, "#**"), "**")
+	body := strings.TrimSuffix(strings.TrimPrefix(content, prefix), "**")
 	name, rawID, hasID := strings.Cut(body, "|")
 	if !hasID {
 		return name, 0, name != ""
@@ -1828,6 +1858,8 @@ func (Client) RenderMessageExecute(r messages.RenderMessageRequest) (*messages.R
 	rendered := content
 	if userID, ok := state.renderedMentionUserIDLocked(content); ok {
 		rendered = fmt.Sprintf(`<p><span data-user-id="%d">%s</span></p>`, userID, content)
+	} else if userGroupID, ok := state.renderedMentionUserGroupIDLocked(content); ok {
+		rendered = fmt.Sprintf(`<p><span data-user-group-id="%d">%s</span></p>`, userGroupID, content)
 	} else if channelID, ok := state.renderedMentionChannelIDLocked(content); ok {
 		rendered = fmt.Sprintf(`<p><a data-stream-id="%d">%s</a></p>`, channelID, content)
 	}
