@@ -1,4 +1,4 @@
-.zuliprc
+*.zuliprc
 zuliprc
 .env.*
 CLAUDE.md
