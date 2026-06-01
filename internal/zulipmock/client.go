@@ -169,7 +169,10 @@ func (s *state) renderedMentionChannelIDLocked(content string) (int64, bool) {
 		return 0, false
 	}
 	if id != 0 {
-		return id, true
+		if _, ok := s.channels[id]; ok {
+			return id, true
+		}
+		return 0, false
 	}
 	resolvedID, ok := s.channelIDs[name]
 	return resolvedID, ok
@@ -198,15 +201,21 @@ func splitUserMention(content string) (string, int64, bool) {
 
 func splitUserGroupMention(content string) (string, bool) {
 	content = strings.TrimSpace(content)
-	prefix := "@*"
-	if strings.HasPrefix(content, "@_*") {
-		prefix = "@_*"
+	for _, format := range []struct {
+		prefix string
+		suffix string
+	}{
+		{prefix: "@_**", suffix: "**"},
+		{prefix: "@_*", suffix: "*"},
+		{prefix: "@*", suffix: "*"},
+	} {
+		if !strings.HasPrefix(content, format.prefix) || !strings.HasSuffix(content, format.suffix) {
+			continue
+		}
+		body := strings.TrimSuffix(strings.TrimPrefix(content, format.prefix), format.suffix)
+		return body, body != ""
 	}
-	if !strings.HasPrefix(content, prefix) || !strings.HasSuffix(content, "*") {
-		return "", false
-	}
-	body := strings.TrimSuffix(strings.TrimPrefix(content, prefix), "*")
-	return body, body != ""
+	return "", false
 }
 
 func splitChannelMention(content string) (string, int64, bool) {

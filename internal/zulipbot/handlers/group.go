@@ -1107,6 +1107,10 @@ func (h *GroupHandler) handleMappingSet(
 	}
 	shortName := args.ShortName
 	channelGroupID := args.ZulipGroup.UserID
+	zulipGroupName := args.ZulipGroup.FullName
+	if zulipGroupName == "" {
+		zulipGroupName = shortName
+	}
 	emojiName, emojiErr := parseEmojiName(args.EmojiName)
 
 	if channelGroupID <= 0 {
@@ -1148,12 +1152,12 @@ func (h *GroupHandler) handleMappingSet(
 	if imported {
 		return command.Result{
 			Content: fmt.Sprintf("Imported %s and mapped `%s` → :%s:.",
-				silentZulipUserGroupMention(shortName), shortName, emojiName),
+				silentZulipUserGroupMention(zulipGroupName), shortName, emojiName),
 		}, nil
 	}
 	return command.Result{
 		Content: fmt.Sprintf("Mapped `%s` → :%s: (%s).",
-			shortName, emojiName, silentZulipUserGroupMention(shortName)),
+			shortName, emojiName, silentZulipUserGroupMention(zulipGroupName)),
 	}, nil
 }
 
@@ -1530,7 +1534,8 @@ func folderUserError(err error, shortName string) (command.UserError, bool) {
 	var folderConflict channelgroup.ChannelFolderConflictError
 	if errors.As(err, &folderConflict) {
 		return command.NewUserError(fmt.Sprintf(
-			"A channel is in another channel folder. Remove it from that folder before changing the folder for **%s**.",
+			"Channel %d is in another channel folder. Remove it from that folder before changing the folder for **%s**.",
+			folderConflict.ChannelID,
 			shortName,
 		)), true
 	}
@@ -1544,7 +1549,8 @@ func folderUserError(err error, shortName string) (command.UserError, bool) {
 			)), true
 		}
 		return command.NewUserError(fmt.Sprintf(
-			"A channel is in this channel folder but is not part of **%s**. Remove it from the folder before removing the group folder.",
+			"Channel %d is in this channel folder but is not part of **%s**. Remove it from the folder before removing the group folder.",
+			externalChannel.ChannelID,
 			shortName,
 		)), true
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"path/filepath"
@@ -813,7 +814,7 @@ func TestGroupMappingSetAutoImportsWhenZulipVisibleButNotLocal(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	env := newGroupTestEnv(t)
-	groupID := seedZulipUserGroup(t, env.base, "PGDP", []int64{1})
+	groupID := seedZulipUserGroup(t, env.base, "PGDP Tutors", []int64{1})
 	msgID := int64(555)
 	if err := saveAnnouncementState(ctx, env.queries, &msgID); err != nil {
 		t.Fatalf("SaveAnnouncementState: %v", err)
@@ -825,7 +826,7 @@ func TestGroupMappingSetAutoImportsWhenZulipVisibleButNotLocal(t *testing.T) {
 		ctx,
 		makeGroupRequest(handlers.GroupMappingSetArgs{
 			ShortName:  "PGDP",
-			ZulipGroup: z.User{UserID: groupID, FullName: "PGDP"},
+			ZulipGroup: z.User{UserID: groupID, FullName: "PGDP Tutors"},
 			EmojiName:  ":math:",
 		}),
 	)
@@ -834,6 +835,12 @@ func TestGroupMappingSetAutoImportsWhenZulipVisibleButNotLocal(t *testing.T) {
 	}
 	if !strings.Contains(strings.ToLower(result.Content), "imported") {
 		t.Errorf("success message should mention auto-import, got: %q", result.Content)
+	}
+	if !strings.Contains(result.Content, "@_*PGDP Tutors*") {
+		t.Errorf("success message should mention the Zulip group name, got: %q", result.Content)
+	}
+	if strings.Contains(result.Content, "@_*PGDP*") {
+		t.Errorf("success message should not mention the short name as Zulip group, got: %q", result.Content)
 	}
 	// Local channel group now exists.
 	if _, _, err := env.client.GetChannelGroup(ctx, groupID).Execute(); err != nil {
@@ -973,7 +980,7 @@ func TestGroupMappingSetSkipsAutoImportWhenAlreadyLocal(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	env := newGroupTestEnv(t)
-	groupID := seedChannelGroup(t, env.client, env.base, "NEWCOURSE")
+	groupID := seedChannelGroup(t, env.client, env.base, "New Course Zulip Group")
 	setAnnouncementConfig(t, env.queries, 1, "t")
 
 	h := env.handler(allowAll{})
@@ -982,7 +989,7 @@ func TestGroupMappingSetSkipsAutoImportWhenAlreadyLocal(t *testing.T) {
 		makeGroupRequest(
 			handlers.GroupMappingSetArgs{
 				ShortName:  "NEWCOURSE",
-				ZulipGroup: z.User{UserID: groupID, FullName: "NEWCOURSE"},
+				ZulipGroup: z.User{UserID: groupID, FullName: "New Course Zulip Group"},
 				EmojiName:  ":newemoji:",
 			},
 		),
@@ -996,8 +1003,11 @@ func TestGroupMappingSetSkipsAutoImportWhenAlreadyLocal(t *testing.T) {
 			result.Content,
 		)
 	}
-	if !strings.Contains(result.Content, "@_*NEWCOURSE*") {
-		t.Errorf("expected silent user-group mention, got: %q", result.Content)
+	if !strings.Contains(result.Content, "@_*New Course Zulip Group*") {
+		t.Errorf("expected silent user-group mention with Zulip group name, got: %q", result.Content)
+	}
+	if strings.Contains(result.Content, "@_*NEWCOURSE*") {
+		t.Errorf("success message should not mention the short name as Zulip group, got: %q", result.Content)
 	}
 	m, ok, err := getGroupMappingByShortName(ctx, env.queries, "NEWCOURSE")
 	if err != nil || !ok || m.ChannelGroupID != groupID {
@@ -1790,6 +1800,9 @@ func TestGroupFolderRemoveUserErrorForChannelOutsideGroupInFolder(t *testing.T) 
 	if !strings.Contains(userErr.Message, "not part of **WI**") {
 		t.Fatalf("expected external channel message, got %q", userErr.Message)
 	}
+	if !strings.Contains(userErr.Message, fmt.Sprintf("Channel %d", extraChannelID)) {
+		t.Fatalf("expected external channel id in message, got %q", userErr.Message)
+	}
 }
 
 func TestGroupFolderRemoveBadRequestIsUserError(t *testing.T) {
@@ -1846,6 +1859,9 @@ func TestGroupFolderAddUserErrorForChannelInDifferentFolder(t *testing.T) {
 	}
 	if !strings.Contains(userErr.Message, "another channel folder") {
 		t.Fatalf("expected folder conflict message, got %q", userErr.Message)
+	}
+	if !strings.Contains(userErr.Message, fmt.Sprintf("Channel %d", channelID)) {
+		t.Fatalf("expected conflicting channel id in message, got %q", userErr.Message)
 	}
 }
 
