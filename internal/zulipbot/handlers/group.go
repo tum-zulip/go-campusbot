@@ -1112,7 +1112,6 @@ func (h *GroupHandler) handleMappingSet(
 		zulipGroupName = shortName
 	}
 	emojiName, emojiErr := parseEmojiName(args.EmojiName)
-
 	if channelGroupID <= 0 {
 		return command.Result{}, command.NewUserError(
 			"zulip_user_group must resolve to a valid Zulip user group",
@@ -1134,7 +1133,6 @@ func (h *GroupHandler) handleMappingSet(
 	if err != nil {
 		return command.Result{}, err
 	}
-
 	now := formatTime(time.Now())
 	mapping := storagedb.UpsertEmojiGroupMappingParams{
 		ChannelGroupID: channelGroupID,
@@ -1148,7 +1146,6 @@ func (h *GroupHandler) handleMappingSet(
 	}
 
 	h.triggerAnnouncementUpdate(ctx)
-
 	if imported {
 		return command.Result{
 			Content: fmt.Sprintf("Imported %s and mapped `%s` → :%s:.",
