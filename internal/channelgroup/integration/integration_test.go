@@ -17,7 +17,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"testing"
@@ -169,15 +168,20 @@ func newInitializedChannelGroupClient(
 ) channelgroup.Client {
 	t.Helper()
 
-	client, err := channelgroup.NewInitializedClient(
+	client, err := channelgroup.NewClient(
 		ctx,
 		base,
 		database,
-		channelgroup.WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
+		channelgroup.WithLogger(slog.New(slog.DiscardHandler)),
 	)
 	if err != nil {
-		t.Fatalf("NewInitializedClient failed: %v", err)
+		t.Fatalf("NewClient failed: %v", err)
 	}
+	t.Cleanup(func() {
+		if err := client.Close(); err != nil {
+			t.Errorf("close channel group client: %v", err)
+		}
+	})
 	return client
 }
 

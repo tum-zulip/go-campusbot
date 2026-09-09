@@ -165,7 +165,7 @@ func (bot *Bot) setConfig(
 		Key:             key,
 		Value:           normalized,
 		UpdatedByUserID: nullableInt64(actor.UserID),
-		UpdatedAt:       formatTime(time.Now()),
+		UpdatedAt:       storagedb.FormatTime(time.Now()),
 	}); err != nil {
 		return configValue{}, configValue{}, err
 	}
@@ -191,7 +191,7 @@ func (bot *Bot) handleConfig(ctx context.Context, req command.Request) command.R
 			return command.Result{Content: userErr.Message}
 		}
 		bot.logger.ErrorContext(ctx, "config arg parsing failed", "error", err)
-		return command.Result{Content: "Command failed because of an internal error."}
+		return command.Result{Content: internalCommandErrorMessage}
 	}
 	switch args := parsed.(type) {
 	case command.NoArgs:

@@ -6,8 +6,9 @@ for background Zulip requests.
 
 ## Requirements
 
-- Go 1.25+
-- `sqlc` available for code generation
+- Go 1.27.1+
+- A C compiler (SQLite uses CGO)
+- GNU Make 4.3+ for Makefile targets (`gmake` on macOS)
 - A Zulip bot `zuliprc` file
 
 ## Run Locally

@@ -64,10 +64,6 @@ func NewGroupHandler(
 	}
 }
 
-func formatTime(value time.Time) string {
-	return value.UTC().Format(time.RFC3339Nano)
-}
-
 type namedEmojiGroupMapping struct {
 	storagedb.EmojiGroupMapping
 
@@ -209,7 +205,7 @@ func (h *GroupHandler) saveAnnouncementState(
 	if err := h.queries.SaveAnnouncementState(ctx, storagedb.SaveAnnouncementStateParams{
 		MessageID:   messageID,
 		ContentHash: contentHash,
-		UpdatedAt:   formatTime(time.Now()),
+		UpdatedAt:   storagedb.FormatTime(time.Now()),
 	}); err != nil {
 		return fmt.Errorf("save announcement state: %w", err)
 	}
@@ -401,7 +397,7 @@ func (h *GroupHandler) handleCreate(
 		return fmt.Errorf("%w (rollback failed: %w)", cause, errors.Join(rollbackErrs...))
 	}
 
-	now := formatTime(time.Now())
+	now := storagedb.FormatTime(time.Now())
 	if err := h.queries.UpsertEmojiGroupMapping(ctx, storagedb.UpsertEmojiGroupMappingParams{
 		ChannelGroupID: channelGroupID,
 		EmojiName:      emojiName,
@@ -1133,7 +1129,7 @@ func (h *GroupHandler) handleMappingSet(
 	if err != nil {
 		return command.Result{}, err
 	}
-	now := formatTime(time.Now())
+	now := storagedb.FormatTime(time.Now())
 	mapping := storagedb.UpsertEmojiGroupMappingParams{
 		ChannelGroupID: channelGroupID,
 		EmojiName:      emojiName,
@@ -1273,7 +1269,7 @@ func (h *GroupHandler) handleMappingDisable(
 
 	if err := h.queries.SetEmojiGroupMappingEnabled(ctx, storagedb.SetEmojiGroupMappingEnabledParams{
 		Enabled:        0,
-		UpdatedAt:      formatTime(time.Now()),
+		UpdatedAt:      storagedb.FormatTime(time.Now()),
 		ChannelGroupID: channelGroupID,
 	}); err != nil {
 		return command.Result{}, fmt.Errorf("disable emoji group mapping: %w", err)

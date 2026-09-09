@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -24,6 +25,8 @@ import (
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/handlers"
 	storagedb "github.com/tum-zulip/go-campusbot/internal/zulipbot/storage/db"
 )
+
+const internalCommandErrorMessage = "Command failed because of an internal error."
 
 const (
 	DefaultClientName = "go-campusbot"
@@ -68,7 +71,6 @@ type Bot struct {
 	registry           *command.Registry
 	argParser          *command.ArgParser
 	channelGroupClient channelgroup.Client
-	channelGroups      interface{ Close() error }
 
 	accepting atomic.Bool
 	requested atomic.Bool
@@ -149,19 +151,14 @@ func NewBot(
 	if err != nil {
 		return nil, fmt.Errorf("initialize channel group client: %w", err)
 	}
-	if closer, ok := channelGroupClient.(interface{ Close() error }); ok {
-		bot.channelGroups = closer
-	}
 	bot.channelGroupClient = channelGroupClient
 	closeChannelGroupClient := func(registerErr error) error {
-		if closer, ok := channelGroupClient.(interface{ Close() error }); ok {
-			if closeErr := closer.Close(); closeErr != nil {
-				return fmt.Errorf(
-					"register handler: %w; close channel group client: %w",
-					registerErr,
-					closeErr,
-				)
-			}
+		if closeErr := channelGroupClient.Close(); closeErr != nil {
+			return fmt.Errorf(
+				"register handler: %w; close channel group client: %w",
+				registerErr,
+				closeErr,
+			)
 		}
 		return registerErr
 	}
@@ -386,8 +383,8 @@ func (bot *Bot) Close() error {
 	if !bot.closed.CompareAndSwap(false, true) {
 		return nil
 	}
-	if bot.channelGroups != nil {
-		if err := bot.channelGroups.Close(); err != nil {
+	if bot.channelGroupClient != nil {
+		if err := bot.channelGroupClient.Close(); err != nil {
 			return err
 		}
 	}
@@ -564,7 +561,7 @@ func (bot *Bot) parseCommandArgs(
 		"error",
 		parseErr,
 	)
-	return nil, command.Result{Content: "Command failed because of an internal error."}, false
+	return nil, command.Result{Content: internalCommandErrorMessage}, false
 }
 
 func (bot *Bot) authorizeArgSpec(
@@ -761,7 +758,7 @@ func (bot *Bot) dispatchOne(ctx context.Context, req command.Request) (command.R
 		"error",
 		err,
 	)
-	return command.Result{Content: "Command failed because of an internal error."}, false
+	return command.Result{Content: internalCommandErrorMessage}, false
 }
 
 // --- Static command handlers ----------------------------------------------
@@ -990,11 +987,9 @@ func roleAllows(actorRole, requiredRole zulip.Role) bool {
 }
 
 func sortMetas(metas []command.Metadata) {
-	for i := 1; i < len(metas); i++ {
-		for j := i; j > 0 && metas[j-1].Name > metas[j].Name; j-- {
-			metas[j-1], metas[j] = metas[j], metas[j-1]
-		}
-	}
+	slices.SortFunc(metas, func(a, b command.Metadata) int {
+		return strings.Compare(a.Name, b.Name)
+	})
 }
 
 // --- Messaging / client wrappers ------------------------------------------
@@ -1252,7 +1247,7 @@ func (bot *Bot) saveEventQueueState(ctx context.Context, state QueueState) error
 	if err := bot.queries.SaveEventQueueState(ctx, storagedb.SaveEventQueueStateParams{
 		QueueID:     state.QueueID,
 		LastEventID: state.LastEventID,
-		UpdatedAt:   formatTime(time.Now()),
+		UpdatedAt:   storagedb.FormatTime(time.Now()),
 	}); err != nil {
 		return fmt.Errorf("save event queue state: %w", err)
 	}
@@ -1268,7 +1263,7 @@ func (bot *Bot) cleanupProcessedMessages(
 	if retention > 0 {
 		count, err := bot.queries.DeleteExpiredProcessedMessages(
 			ctx,
-			formatTime(time.Now().Add(-retention)),
+			storagedb.FormatTime(time.Now().Add(-retention)),
 		)
 		if err != nil {
 			return 0, fmt.Errorf("delete expired processed messages: %w", err)
@@ -1311,7 +1306,7 @@ func (bot *Bot) createRestartRequest(
 		ChannelID:         nullableInt64(target.ChannelID),
 		Topic:             nullableString(target.Topic),
 		RecipientUserIds:  string(targetUsers),
-		RequestedAt:       formatTime(time.Now()),
+		RequestedAt:       storagedb.FormatTime(time.Now()),
 	}); err != nil {
 		return 0, fmt.Errorf("create restart request: %w", err)
 	}
@@ -1385,7 +1380,7 @@ func (bot *Bot) completeRestartRequest(
 	}
 	if err := bot.queries.CompleteRestartRequest(ctx, storagedb.CompleteRestartRequestParams{
 		Status:              status,
-		CompletedAt:         nullableString(formatTime(time.Now())),
+		CompletedAt:         nullableString(storagedb.FormatTime(time.Now())),
 		CompletionMessageID: nullableInt64(completionMessageID),
 		Failure:             nullableString(failure),
 		ID:                  id,
@@ -1412,7 +1407,7 @@ func (bot *Bot) markMessageProcessed(ctx context.Context, messageID int64) error
 	}
 	if err := bot.queries.MarkMessageProcessed(ctx, storagedb.MarkMessageProcessedParams{
 		MessageID:   messageID,
-		ProcessedAt: formatTime(time.Now()),
+		ProcessedAt: storagedb.FormatTime(time.Now()),
 	}); err != nil {
 		return fmt.Errorf("mark processed message %d: %w", messageID, err)
 	}
@@ -2023,10 +2018,6 @@ func nullStringValue(value sql.NullString) string {
 		return ""
 	}
 	return value.String
-}
-
-func formatTime(value time.Time) string {
-	return value.UTC().Format(time.RFC3339Nano)
 }
 
 // --- Queue register-response decoding (moved from source.go) --------------

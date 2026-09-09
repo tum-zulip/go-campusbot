@@ -3,7 +3,6 @@ package zulipbot_test
 import (
 	"context"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -124,7 +123,7 @@ func writeZulipRCAt(t *testing.T, path string, site string) {
 }
 
 func newTestLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(io.Discard, nil))
+	return slog.New(slog.DiscardHandler)
 }
 
 func newTestZulipClient(t *testing.T, rcPath string) zulipclient.Client {

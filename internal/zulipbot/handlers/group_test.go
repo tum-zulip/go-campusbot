@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"path/filepath"
 	"strconv"
@@ -189,7 +188,7 @@ func newChannelGroupClient(t *testing.T) (channelgroup.Client, zulipmock.Client)
 		context.Background(),
 		base,
 		db,
-		channelgroup.WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
+		channelgroup.WithLogger(slog.New(slog.DiscardHandler)),
 	)
 	if err != nil {
 		t.Fatalf("channelgroup.NewClient: %v", err)

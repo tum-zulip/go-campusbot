@@ -3,7 +3,6 @@ package channelgroup
 import (
 	"context"
 	"database/sql"
-	"io"
 	"log/slog"
 	"os"
 	"testing"
@@ -38,7 +37,7 @@ func newInternalTestService(t *testing.T, base zulipmock.Client) *channelGroups 
 	return newChannelGroups(
 		base,
 		database,
-		WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
+		WithLogger(slog.New(slog.DiscardHandler)),
 	)
 }
 

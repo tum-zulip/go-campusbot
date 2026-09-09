@@ -67,6 +67,9 @@ const zulipAdministratorsSystemGroupName = "role:administrators"
 type Client interface {
 	client.Client
 	APIChannelGroups
+	// Close stops the background channel-group event listener and releases
+	// resources owned by the channel-group service.
+	Close() error
 }
 
 // channelGroupClient embeds the upstream client so every existing endpoint

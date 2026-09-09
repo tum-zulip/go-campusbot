@@ -48,8 +48,12 @@ func TestStreamsHandleEventUpdatesCachedBody(t *testing.T) {
 	client := &http.Client{Transport: cache.RoundTripper(roundTripFunc(func(*http.Request) (*http.Response, error) {
 		return jsonResponse(`{"result":"success","msg":"","streams":[{"stream_id":1,"name":"one"}]}`), nil
 	}))}
-	if _, err := client.Get("https://zulip.example/api/v1/streams?include_all=true"); err != nil {
-		t.Fatalf("prime cache: %v", err)
+	primeResp, primeErr := client.Get("https://zulip.example/api/v1/streams?include_all=true")
+	if primeErr != nil {
+		t.Fatalf("prime cache: %v", primeErr)
+	}
+	if err := primeResp.Body.Close(); err != nil {
+		t.Fatalf("close priming response: %v", err)
 	}
 
 	cache.HandleEvent(events.ChannelCreateEvent{
@@ -83,8 +87,12 @@ func TestStreamsHandleUnarchiveEventDoesNotInvalidate(t *testing.T) {
 			`{"result":"success","msg":"","streams":[{"stream_id":1,"name":"one","is_archived":true}]}`,
 		), nil
 	}))}
-	if _, err := client.Get("https://zulip.example/api/v1/streams?include_all=true"); err != nil {
-		t.Fatalf("prime cache: %v", err)
+	primeResp, primeErr := client.Get("https://zulip.example/api/v1/streams?include_all=true")
+	if primeErr != nil {
+		t.Fatalf("prime cache: %v", primeErr)
+	}
+	if err := primeResp.Body.Close(); err != nil {
+		t.Fatalf("close priming response: %v", err)
 	}
 
 	archived := false
