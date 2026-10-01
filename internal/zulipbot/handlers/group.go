@@ -151,7 +151,7 @@ func (h *GroupHandler) zulipChannelMention(ctx context.Context, channelID int64)
 	if channelResp == nil {
 		return "", fmt.Errorf("nil channel response for channel %d", channelID)
 	}
-	return zulipChannelMention(channelResp.Channel.Name, channelID), nil
+	return zulipChannelMention(channelResp.Channel.Name), nil
 }
 
 func (h *GroupHandler) namedEmojiGroupMappings(
@@ -1014,14 +1014,14 @@ func (h *GroupHandler) handleShow(
 				b.WriteString("  - unavailable channel\n")
 				continue
 			}
-			fmt.Fprintf(&b, "  - %s\n", zulipChannelMention(channelResp.Channel.Name, channelID))
+			fmt.Fprintf(&b, "  - %s\n", zulipChannelMention(channelResp.Channel.Name))
 		}
 	}
 	return command.Result{Content: strings.TrimSpace(b.String())}, nil
 }
 
-func zulipChannelMention(name string, id int64) string {
-	return fmt.Sprintf("#_**%s|%d**", name, id)
+func zulipChannelMention(name string) string {
+	return fmt.Sprintf("#**%s**", name)
 }
 
 func silentZulipUserGroupMention(name string) string {
@@ -1451,7 +1451,7 @@ func (h *GroupHandler) handleChannelModify(
 		}
 		return command.Result{}, fmt.Errorf("channel group operation: %w", err)
 	}
-	channelRef := zulipChannelMention(channel.Name, channelID)
+	channelRef := zulipChannelMention(channel.Name)
 	if channel.Name == "" {
 		var mentionErr error
 		channelRef, mentionErr = h.zulipChannelMention(ctx, channelID)
@@ -1627,14 +1627,13 @@ func (h *GroupHandler) handleChannelCreate(
 		)
 	}
 
-	channelID, err := h.createChannelAndAddToGroup(ctx, channelName, mapping.ChannelGroupID)
-	if err != nil {
+	if err := h.createChannelAndAddToGroup(ctx, channelName, mapping.ChannelGroupID); err != nil {
 		return command.Result{}, fmt.Errorf("create channel and add to group: %w", err)
 	}
 	return command.Result{
 		Content: fmt.Sprintf(
 			"Created channel %s and added it to **%s**.",
-			zulipChannelMention(channelName, channelID),
+			zulipChannelMention(channelName),
 			mapping.ShortName,
 		),
 	}, nil
@@ -1646,13 +1645,13 @@ func (h *GroupHandler) createChannelAndAddToGroup(
 	ctx context.Context,
 	channelName string,
 	channelGroupID int64,
-) (int64, error) {
+) error {
 	ownUserResp, _, err := h.client.GetOwnUser(ctx).Execute()
 	if err != nil {
-		return 0, fmt.Errorf("get own Zulip user for channel creation: %w", err)
+		return fmt.Errorf("get own Zulip user for channel creation: %w", err)
 	}
 	if ownUserResp == nil || ownUserResp.User.UserID <= 0 {
-		return 0, errors.New("get own Zulip user for channel creation: missing user ID")
+		return errors.New("get own Zulip user for channel creation: missing user ID")
 	}
 	channelResp, _, err := h.client.CreateChannel(ctx).
 		Name(channelName).
@@ -1667,31 +1666,31 @@ func (h *GroupHandler) createChannelAndAddToGroup(
 				"error", err,
 				"error_type", fmt.Sprintf("%T", err),
 			)
-			return 0, fmt.Errorf("create channel %q: %w", channelName, err)
+			return fmt.Errorf("create channel %q: %w", channelName, err)
 		}
 		channelID, getErr := h.existingChannelID(ctx, channelName)
 		if getErr != nil {
-			return 0, fmt.Errorf("get existing channel %q: %w", channelName, getErr)
+			return fmt.Errorf("get existing channel %q: %w", channelName, getErr)
 		}
 		h.logger.DebugContext(ctx, "reusing existing channel after duplicate create",
 			"channel_name", channelName,
 			"channel_id", channelID,
 		)
 		if err := h.unarchiveChannel(ctx, channelID); err != nil {
-			return 0, fmt.Errorf("unarchive existing channel %q: %w", channelName, err)
+			return fmt.Errorf("unarchive existing channel %q: %w", channelName, err)
 		}
 		if _, _, subscribeErr := h.client.Subscribe(ctx).
 			Subscriptions([]channels.SubscriptionRequest{{Name: channelName}}).
 			Principals(zulip.UserIDsAsPrincipals(ownUserResp.User.UserID)).
 			Execute(); subscribeErr != nil {
-			return 0, fmt.Errorf("subscribe bot to existing channel %q: %w", channelName, subscribeErr)
+			return fmt.Errorf("subscribe bot to existing channel %q: %w", channelName, subscribeErr)
 		}
 		channelResp = &channels.CreateChannelResponse{ID: channelID}
 	}
 	if err := h.addChannelToGroup(ctx, channelGroupID, channelResp.ID); err != nil {
-		return 0, fmt.Errorf("add channel %d to group %d: %w", channelResp.ID, channelGroupID, err)
+		return fmt.Errorf("add channel %d to group %d: %w", channelResp.ID, channelGroupID, err)
 	}
-	return channelResp.ID, nil
+	return nil
 }
 
 func (h *GroupHandler) existingChannelID(ctx context.Context, channelName string) (int64, error) {
