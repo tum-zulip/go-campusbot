@@ -387,6 +387,41 @@ func TestCreateChannelGroupRollsBackUserGroupOnError(t *testing.T) {
 	}
 }
 
+func TestDeleteChannelGroupEmptiesUserGroupBeforeDeactivating(t *testing.T) {
+	ctx := context.Background()
+	base := zulipmock.NewClient()
+	client := newTestClient(t, base)
+
+	created, _, err := client.CreateChannelGroup(ctx).
+		Name("semester group").
+		InitialSubscribers(zulip.UserIDsAsPrincipals(101, 102)).
+		Execute()
+	if err != nil {
+		t.Fatalf("CreateChannelGroup error = %v", err)
+	}
+
+	if err := client.DeleteChannelGroup(ctx, created.ChannelGroupID); err != nil {
+		t.Fatalf("DeleteChannelGroup error = %v", err)
+	}
+
+	members, _, err := base.GetUserGroupMembers(ctx, created.ChannelGroupID).Execute()
+	if err != nil {
+		t.Fatalf("GetUserGroupMembers error = %v", err)
+	}
+	if len(members.Members) != 0 {
+		t.Fatalf("user group members = %v, want empty", members.Members)
+	}
+
+	groups, _, err := base.GetUserGroups(ctx).IncludeDeactivatedGroups(true).Execute()
+	if err != nil {
+		t.Fatalf("GetUserGroups error = %v", err)
+	}
+	group, ok := findUserGroupByID(groups.UserGroups, created.ChannelGroupID)
+	if !ok || !group.Deactivated {
+		t.Fatalf("user group %d not deactivated: %+v", created.ChannelGroupID, groups.UserGroups)
+	}
+}
+
 func TestChannelGroupWithChannelFolderAssignsInitialAndAddedChannels(t *testing.T) {
 	ctx := context.Background()
 	base := zulipmock.NewClient()

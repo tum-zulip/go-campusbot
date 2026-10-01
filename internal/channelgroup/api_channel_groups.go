@@ -958,6 +958,15 @@ func (s *channelGroups) GetChannelGroupExecute(
 }
 
 func (s *channelGroups) DeleteChannelGroup(ctx context.Context, channelGroupID int64) error {
+	members, err := s.userGroupMembers(ctx, channelGroupID)
+	if err != nil {
+		return fmt.Errorf("list members of user group %d: %w", channelGroupID, err)
+	}
+	if len(members) > 0 {
+		if _, _, err := s.base.UpdateUserGroupMembers(ctx, channelGroupID).Delete(members).Execute(); err != nil {
+			return fmt.Errorf("empty user group %d: %w", channelGroupID, err)
+		}
+	}
 	if err := s.deleteChannelGroup(ctx, channelGroupID); err != nil {
 		return fmt.Errorf("delete local channel group %d: %w", channelGroupID, err)
 	}
