@@ -8,21 +8,17 @@ import (
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot"
 )
 
-func TestCloseDeregistersQueueAfterCleanShutdown(t *testing.T) {
+func TestCloseKeepsStoredQueue(t *testing.T) {
 	t.Parallel()
 
 	bot := openBotWithStoredQueue(t)
 	if err := bot.Close(); err != nil {
 		t.Fatalf("Close() failed: %v", err)
 	}
-	if _, ok, err := bot.EventQueueStateForTest(context.Background()); err != nil {
-		t.Fatalf("EventQueueStateForTest: %v", err)
-	} else if ok {
-		t.Fatal("queue state should be cleared after a clean shutdown")
-	}
+	assertStoredQueueKept(t, bot)
 }
 
-func TestCloseKeepsQueueAfterFailedRun(t *testing.T) {
+func TestCloseKeepsStoredQueueAfterFailedRun(t *testing.T) {
 	t.Parallel()
 
 	bot := openBotWithStoredQueue(t)
@@ -34,13 +30,7 @@ func TestCloseKeepsQueueAfterFailedRun(t *testing.T) {
 	if err := bot.Close(); err != nil {
 		t.Fatalf("Close() failed: %v", err)
 	}
-	state, ok, err := bot.EventQueueStateForTest(context.Background())
-	if err != nil {
-		t.Fatalf("EventQueueStateForTest: %v", err)
-	}
-	if !ok || state.QueueID != "stored-queue" || state.LastEventID != 42 {
-		t.Fatalf("queue state after failed run = %+v, %v; want stored-queue@42", state, ok)
-	}
+	assertStoredQueueKept(t, bot)
 }
 
 func openBotWithStoredQueue(t *testing.T) *zulipbot.Bot {
@@ -54,4 +44,16 @@ func openBotWithStoredQueue(t *testing.T) *zulipbot.Bot {
 		t.Fatalf("SaveEventQueueStateForTest: %v", err)
 	}
 	return bot
+}
+
+func assertStoredQueueKept(t *testing.T, bot *zulipbot.Bot) {
+	t.Helper()
+
+	state, ok, err := bot.EventQueueStateForTest(context.Background())
+	if err != nil {
+		t.Fatalf("EventQueueStateForTest: %v", err)
+	}
+	if !ok || state.QueueID != "stored-queue" || state.LastEventID != 42 {
+		t.Fatalf("queue state after Close = %+v, %v; want stored-queue@42", state, ok)
+	}
 }

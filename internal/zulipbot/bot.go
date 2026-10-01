@@ -34,7 +34,6 @@ const (
 	errContentRequired = "content must not be empty"
 	errContextRequired = "context must not be nil"
 
-	closeDeregisterTimeout    = 5 * time.Second
 	processedMessageRetention = 7 * 24 * time.Hour
 	processedMessageMaxRows   = 100000
 
@@ -76,7 +75,6 @@ type Bot struct {
 	requested atomic.Bool
 	update    atomic.Bool
 
-	failed atomic.Bool
 	closed atomic.Bool
 }
 
@@ -215,16 +213,9 @@ func (bot *Bot) UpdateRequested() bool {
 
 // Run consumes the Zulip event queue via realtimeevents.EventQueue, recovering
 // expired queues by re-registering. Returns true if a restart was requested.
-func (bot *Bot) Run(ctx context.Context) (bool, error) {
-	restart, err := bot.run(ctx)
-	if err != nil {
-		bot.failed.Store(true)
-	}
-	return restart, err
-}
-
+//
 //nolint:funlen,gocognit // event-loop branching is clearer kept with the queue lifecycle it controls
-func (bot *Bot) run(ctx context.Context) (bool, error) {
+func (bot *Bot) Run(ctx context.Context) (bool, error) {
 	if bot.queries == nil {
 		return false, errors.New("Bot.Run requires storage queries (use NewBot)")
 	}
@@ -383,8 +374,7 @@ func (bot *Bot) consumeQueue(ctx context.Context, state QueueState) (bool, bool,
 	}
 }
 
-// Close deregisters the Zulip queue unless a restart is pending or Run failed,
-// so the next process resumes from the stored queue without missing events.
+// Close keeps the stored Zulip queue so the next process resumes it.
 func (bot *Bot) Close() error {
 	if bot == nil || bot.queries == nil {
 		return nil
@@ -393,16 +383,7 @@ func (bot *Bot) Close() error {
 		return nil
 	}
 	if bot.channelGroupClient != nil {
-		if err := bot.channelGroupClient.Close(); err != nil {
-			return err
-		}
-	}
-	if !bot.requested.Load() && !bot.failed.Load() {
-		ctx, cancel := context.WithTimeout(context.Background(), closeDeregisterTimeout)
-		defer cancel()
-		if err := bot.deregisterStoredQueue(ctx); err != nil {
-			bot.logger.WarnContext(ctx, "failed to deregister Zulip event queue", "error", err)
-		}
+		return bot.channelGroupClient.Close()
 	}
 	return nil
 }
@@ -1487,20 +1468,6 @@ func (bot *Bot) registerAndSaveQueue(ctx context.Context) (QueueState, error) {
 		state.LastEventID,
 	)
 	return state, nil
-}
-
-func (bot *Bot) deregisterStoredQueue(ctx context.Context) error {
-	stored, ok, err := bot.eventQueueState(ctx)
-	if err != nil {
-		return err
-	}
-	if !ok {
-		return nil
-	}
-	if err := bot.deleteQueue(ctx, stored.QueueID); err != nil {
-		return err
-	}
-	return bot.queries.ClearEventQueueState(ctx)
 }
 
 func (bot *Bot) replaceMainEventQueue(ctx context.Context) error {
