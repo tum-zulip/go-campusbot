@@ -154,6 +154,7 @@ type channelGroups struct {
 
 	memberOpsMu         sync.Mutex
 	memberOpGenerations map[channelGroupMemberKey]uint64
+	memberWriteMus      map[int64]*sync.RWMutex
 
 	listenerMu     sync.Mutex
 	listenerCancel context.CancelFunc
@@ -172,6 +173,7 @@ func newChannelGroups(base client.Client, database *sql.DB, opts ...ClientOption
 		queries:             channelgroupdb.New(database),
 		logger:              slog.Default(),
 		memberOpGenerations: make(map[channelGroupMemberKey]uint64),
+		memberWriteMus:      make(map[int64]*sync.RWMutex),
 	}
 	for _, opt := range opts {
 		opt(service)
@@ -958,11 +960,33 @@ func (s *channelGroups) GetChannelGroupExecute(
 }
 
 func (s *channelGroups) DeleteChannelGroup(ctx context.Context, channelGroupID int64) error {
-	if err := s.deleteChannelGroup(ctx, channelGroupID); err != nil {
-		return fmt.Errorf("delete local channel group %d: %w", channelGroupID, err)
+	mu := s.memberWriteMu(channelGroupID)
+	mu.Lock()
+	defer mu.Unlock()
+
+	members, err := s.userGroupMembers(ctx, channelGroupID)
+	if err != nil {
+		return fmt.Errorf("list members of user group %d: %w", channelGroupID, err)
+	}
+	if len(members) > 0 {
+		if _, _, err := s.base.UpdateUserGroupMembers(ctx, channelGroupID).Delete(members).Execute(); err != nil {
+			return fmt.Errorf("empty user group %d: %w", channelGroupID, err)
+		}
 	}
 	if _, _, err := s.base.DeactivateUserGroup(ctx, channelGroupID).Execute(); err != nil {
-		return fmt.Errorf("deactivate user group %d: %w", channelGroupID, err)
+		err = fmt.Errorf("deactivate user group %d: %w", channelGroupID, err)
+		if len(members) == 0 {
+			return err
+		}
+		if _, _, restoreErr := s.base.UpdateUserGroupMembers(ctx, channelGroupID).
+			Add(members).
+			Execute(); restoreErr != nil {
+			return fmt.Errorf("%w (restore members failed: %w)", err, restoreErr)
+		}
+		return err
+	}
+	if err := s.deleteChannelGroup(ctx, channelGroupID); err != nil {
+		return fmt.Errorf("delete local channel group %d: %w", channelGroupID, err)
 	}
 	return nil
 }
@@ -1276,11 +1300,6 @@ func (s *channelGroups) SubscribeToChannelGroupExecute(
 	r SubscribeToChannelGroupRequest,
 ) (*SubscribeToChannelGroupResponse, *http.Response, error) {
 	r.ctx = callorigin.With(r.ctx, originSubscribe)
-	group, err := s.getGroup(r.ctx, r.channelGroupID)
-	if err != nil {
-		return nil, nil, err
-	}
-
 	userIDs, err := userIDPrincipals(r.principals)
 	if err != nil {
 		return nil, nil, err
@@ -1289,19 +1308,10 @@ func (s *channelGroups) SubscribeToChannelGroupExecute(
 		return nil, nil, errors.New("principals with user IDs are required")
 	}
 
-	_, _, err = s.base.UpdateUserGroupMembers(r.ctx, group.ID).Add(userIDs).Execute()
+	group, err := s.addChannelGroupMembers(r.ctx, r.channelGroupID, userIDs)
 	if err != nil {
-		if isAlreadyChannelGroupMemberError(err) {
-			s.logger.InfoContext(r.ctx, "users already subscribed to channel group",
-				"channel_group_id", r.channelGroupID,
-				"user_group_id", group.ID,
-				"user_ids", userIDs,
-			)
-		} else {
-			return nil, nil, err
-		}
+		return nil, nil, err
 	}
-	s.bumpMemberOpGenerations(r.channelGroupID, userIDs)
 
 	latestState, touchedChannels, err := s.subscribeUsersToCurrentChannelGroupChannels(
 		r.ctx,
@@ -1354,7 +1364,10 @@ func (s *channelGroups) UnsubscribeFromChannelGroupExecute(
 		return nil, nil, errors.New("principals with user IDs are required")
 	}
 
+	mu := s.memberWriteMu(r.channelGroupID)
+	mu.Lock()
 	startGenerations := s.memberOpGenerationsFor(r.channelGroupID, userIDs)
+	mu.Unlock()
 	if !r.keepChannels && len(group.ChannelIDs) > 0 {
 		if err = s.unsubscribeUsersFromChannelGroupChannels(
 			r.ctx,
@@ -1365,7 +1378,19 @@ func (s *channelGroups) UnsubscribeFromChannelGroupExecute(
 			return nil, nil, err
 		}
 	}
-	userIDsToDelete := s.memberIDsUnchangedSince(r.channelGroupID, userIDs, startGenerations)
+	userIDsToDelete, err := s.deleteUnchangedChannelGroupMembers(
+		r.ctx,
+		r.channelGroupID,
+		group.ID,
+		userIDs,
+		startGenerations,
+	)
+	resubscribed := removeInt64s(userIDs, userIDsToDelete)
+	if !r.keepChannels && len(group.ChannelIDs) > 0 && len(resubscribed) > 0 {
+		if subErr := s.subscribeUsersToChannels(r.ctx, group.ChannelIDs, resubscribed); subErr != nil {
+			return nil, nil, subErr
+		}
+	}
 	if len(userIDsToDelete) == 0 {
 		s.logger.InfoContext(r.ctx, "skipped stale channel group unsubscribe",
 			"channel_group_id", r.channelGroupID,
@@ -1376,8 +1401,6 @@ func (s *channelGroups) UnsubscribeFromChannelGroupExecute(
 			Response: successResponse(),
 		}, nil, nil
 	}
-
-	_, _, err = s.base.UpdateUserGroupMembers(r.ctx, group.ID).Delete(userIDsToDelete).Execute()
 	if err != nil {
 		if isNotChannelGroupMemberError(err) {
 			s.logger.InfoContext(r.ctx, "users already absent from channel group",
@@ -1442,6 +1465,66 @@ func (s *channelGroups) getGroup(ctx context.Context, channelGroupID int64) (Cha
 		return err
 	})
 	return group, err
+}
+
+// memberWriteMu makes member additions with their generation bump (shared) atomic
+// against generation checks with member deletions (exclusive) of one channel group.
+func (s *channelGroups) memberWriteMu(channelGroupID int64) *sync.RWMutex {
+	s.memberOpsMu.Lock()
+	defer s.memberOpsMu.Unlock()
+	mu, ok := s.memberWriteMus[channelGroupID]
+	if !ok {
+		mu = &sync.RWMutex{}
+		s.memberWriteMus[channelGroupID] = mu
+	}
+	return mu
+}
+
+func (s *channelGroups) addChannelGroupMembers(
+	ctx context.Context,
+	channelGroupID int64,
+	userIDs []int64,
+) (ChannelGroup, error) {
+	mu := s.memberWriteMu(channelGroupID)
+	mu.RLock()
+	defer mu.RUnlock()
+
+	group, err := s.getGroup(ctx, channelGroupID)
+	if err != nil {
+		return ChannelGroup{}, err
+	}
+	_, _, err = s.base.UpdateUserGroupMembers(ctx, group.ID).Add(userIDs).Execute()
+	if err != nil {
+		if !isAlreadyChannelGroupMemberError(err) {
+			return ChannelGroup{}, err
+		}
+		s.logger.InfoContext(ctx, "users already subscribed to channel group",
+			"channel_group_id", channelGroupID,
+			"user_group_id", group.ID,
+			"user_ids", userIDs,
+		)
+	}
+	s.bumpMemberOpGenerations(channelGroupID, userIDs)
+	return group, nil
+}
+
+func (s *channelGroups) deleteUnchangedChannelGroupMembers(
+	ctx context.Context,
+	channelGroupID int64,
+	userGroupID int64,
+	userIDs []int64,
+	startGenerations map[int64]uint64,
+) ([]int64, error) {
+	mu := s.memberWriteMu(channelGroupID)
+	mu.Lock()
+	defer mu.Unlock()
+
+	userIDsToDelete := s.memberIDsUnchangedSince(channelGroupID, userIDs, startGenerations)
+	if len(userIDsToDelete) == 0 {
+		return nil, nil
+	}
+	_, _, err := s.base.UpdateUserGroupMembers(ctx, userGroupID).Delete(userIDsToDelete).Execute()
+	return userIDsToDelete, err
 }
 
 func (s *channelGroups) bumpMemberOpGenerations(channelGroupID int64, userIDs []int64) {

@@ -387,6 +387,71 @@ func TestCreateChannelGroupRollsBackUserGroupOnError(t *testing.T) {
 	}
 }
 
+func TestDeleteChannelGroupEmptiesUserGroupBeforeDeactivating(t *testing.T) {
+	ctx := context.Background()
+	base := zulipmock.NewClient()
+	client := newTestClient(t, base)
+
+	created, _, err := client.CreateChannelGroup(ctx).
+		Name("semester group").
+		InitialSubscribers(zulip.UserIDsAsPrincipals(101, 102)).
+		Execute()
+	if err != nil {
+		t.Fatalf("CreateChannelGroup error = %v", err)
+	}
+
+	if err := client.DeleteChannelGroup(ctx, created.ChannelGroupID); err != nil {
+		t.Fatalf("DeleteChannelGroup error = %v", err)
+	}
+
+	members, _, err := base.GetUserGroupMembers(ctx, created.ChannelGroupID).Execute()
+	if err != nil {
+		t.Fatalf("GetUserGroupMembers error = %v", err)
+	}
+	if len(members.Members) != 0 {
+		t.Fatalf("user group members = %v, want empty", members.Members)
+	}
+
+	groups, _, err := base.GetUserGroups(ctx).IncludeDeactivatedGroups(true).Execute()
+	if err != nil {
+		t.Fatalf("GetUserGroups error = %v", err)
+	}
+	group, ok := findUserGroupByID(groups.UserGroups, created.ChannelGroupID)
+	if !ok || !group.Deactivated {
+		t.Fatalf("user group %d not deactivated: %+v", created.ChannelGroupID, groups.UserGroups)
+	}
+}
+
+func TestDeleteChannelGroupRestoresMembersWhenDeactivationFails(t *testing.T) {
+	ctx := context.Background()
+	base := zulipmock.NewClient()
+	client := newTestClient(t, base)
+
+	created, _, err := client.CreateChannelGroup(ctx).
+		Name("failing delete group").
+		InitialSubscribers(zulip.UserIDsAsPrincipals(101, 102)).
+		Execute()
+	if err != nil {
+		t.Fatalf("CreateChannelGroup error = %v", err)
+	}
+	base.FailNext(zulipmock.OperationDeactivateUserGroup, errors.New("deactivate failed"))
+
+	if err := client.DeleteChannelGroup(ctx, created.ChannelGroupID); err == nil {
+		t.Fatalf("DeleteChannelGroup error = nil, want failure")
+	}
+
+	members, _, err := base.GetUserGroupMembers(ctx, created.ChannelGroupID).Execute()
+	if err != nil {
+		t.Fatalf("GetUserGroupMembers error = %v", err)
+	}
+	if got, want := members.Members, []int64{101, 102}; !equalInt64s(got, want) {
+		t.Fatalf("user group members = %v, want %v", got, want)
+	}
+	if _, _, err := client.GetChannelGroup(ctx, created.ChannelGroupID).Execute(); err != nil {
+		t.Fatalf("GetChannelGroup after failed delete error = %v, want group kept for retry", err)
+	}
+}
+
 func TestChannelGroupWithChannelFolderAssignsInitialAndAddedChannels(t *testing.T) {
 	ctx := context.Background()
 	base := zulipmock.NewClient()
@@ -1219,14 +1284,6 @@ func TestConcurrentUnsubscribeAndSubscribeSameUserAddWins(t *testing.T) {
 		zulipmock.ChannelRequest(zulipmock.OperationGetChannelByID, channelIDs[0]),
 		zulipmock.SubscriptionRequest(
 			zulipmock.OperationUnsubscribe,
-			[]string{mockChannelName(1)},
-			[]int64{202},
-		),
-		zulipmock.OperationRequest(zulipmock.OperationUpdateUserGroupMembers),
-		zulipmock.OperationRequest(zulipmock.OperationUpdateUserGroupMembers),
-		zulipmock.ChannelRequest(zulipmock.OperationGetChannelByID, channelIDs[0]),
-		zulipmock.SubscriptionRequest(
-			zulipmock.OperationSubscribe,
 			[]string{mockChannelName(1)},
 			[]int64{202},
 		),
