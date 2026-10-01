@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"runtime/debug"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -37,6 +38,7 @@ const (
 
 	secondsPerMinute = 60
 	secondsPerHour   = 60 * secondsPerMinute
+	secondsPerDay    = 24 * secondsPerHour
 )
 
 // ErrBadEventQueueID is returned when Zulip rejects the stored event queue ID.
@@ -832,27 +834,46 @@ func (bot *Bot) visibleMetas(role zulip.Role) []command.Metadata {
 }
 
 func (bot *Bot) handleStatus(ctx context.Context, req command.Request) command.Result {
-	uptimeSec := int64(time.Since(bot.startedAt).Truncate(time.Second).Seconds())
-	hours := uptimeSec / secondsPerHour
-	minutes := (uptimeSec % secondsPerHour) / secondsPerMinute
-	seconds := uptimeSec % secondsPerMinute
-
 	accepting := "yes"
 	if !bot.accepting.Load() {
 		accepting = "no"
 	}
 
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "Bot status: **online**, uptime: %dh %dm %ds, accepting commands: %s",
-		hours, minutes, seconds, accepting)
+	fmt.Fprintf(&sb, "Bot status: **online**, uptime: %s, accepting commands: %s",
+		formatUptime(time.Since(bot.startedAt)), accepting)
 
 	if err := bot.Check(ctx, req.Actor, zulip.RoleAdmin); err == nil {
+		fmt.Fprintf(&sb, "\nversion: %s", buildVersion())
 		bot.writeQueueStatus(ctx, &sb)
 		bot.writeDBStatus(ctx, &sb)
 		bot.writeRestartStatus(ctx, &sb)
 	}
 
 	return command.Result{Content: sb.String()}
+}
+
+func formatUptime(d time.Duration) string {
+	sec := int64(d.Seconds())
+	hms := fmt.Sprintf("%dh %dm %ds",
+		sec%secondsPerDay/secondsPerHour, sec%secondsPerHour/secondsPerMinute, sec%secondsPerMinute)
+	if days := sec / secondsPerDay; days > 0 {
+		return fmt.Sprintf("%dd %s", days, hms)
+	}
+	return hms
+}
+
+var version string
+
+func buildVersion() string {
+	if version != "" {
+		return version
+	}
+	info, ok := debug.ReadBuildInfo()
+	if !ok || info.Main.Version == "" {
+		return "unknown"
+	}
+	return info.Main.Version
 }
 
 func (bot *Bot) writeQueueStatus(ctx context.Context, sb *strings.Builder) {

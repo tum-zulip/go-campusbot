@@ -18,7 +18,7 @@ builds:
       - CGO_ENABLED=1
       - CC=gcc
     ldflags:
-      - -s -w
+      - -s -w -X github.com/tum-zulip/go-campusbot/internal/zulipbot.version=v{{ .Version }}
 
 archives:
   - id: campusbot
