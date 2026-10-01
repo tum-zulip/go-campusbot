@@ -350,8 +350,8 @@ linters:
     rules:
       # go-zulip closes the network body in internal/clients/simple_client.go
       # and returns an in-memory io.NopCloser from its Execute methods.
-      - path: '^internal/'
-        source: '\bExecute\('
+      - path: '^internal/(channelgroup|zulipbot|zulipcache|zuliproundrobin)/'
+        source: '\bExecute\(\)'
         linters:
           - bodyclose
       - path: '_test\.go'

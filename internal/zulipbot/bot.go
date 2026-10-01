@@ -76,6 +76,7 @@ type Bot struct {
 	requested atomic.Bool
 	update    atomic.Bool
 
+	failed atomic.Bool
 	closed atomic.Bool
 }
 
@@ -214,9 +215,16 @@ func (bot *Bot) UpdateRequested() bool {
 
 // Run consumes the Zulip event queue via realtimeevents.EventQueue, recovering
 // expired queues by re-registering. Returns true if a restart was requested.
-//
-//nolint:funlen,gocognit // event-loop branching is clearer kept with the queue lifecycle it controls
 func (bot *Bot) Run(ctx context.Context) (bool, error) {
+	restart, err := bot.run(ctx)
+	if err != nil {
+		bot.failed.Store(true)
+	}
+	return restart, err
+}
+
+//nolint:funlen,gocognit // event-loop branching is clearer kept with the queue lifecycle it controls
+func (bot *Bot) run(ctx context.Context) (bool, error) {
 	if bot.queries == nil {
 		return false, errors.New("Bot.Run requires storage queries (use NewBot)")
 	}
@@ -375,7 +383,8 @@ func (bot *Bot) consumeQueue(ctx context.Context, state QueueState) (bool, bool,
 	}
 }
 
-// Close deregisters the Zulip queue unless a restart is pending.
+// Close deregisters the Zulip queue unless a restart is pending or Run failed,
+// so the next process resumes from the stored queue without missing events.
 func (bot *Bot) Close() error {
 	if bot == nil || bot.queries == nil {
 		return nil
@@ -388,7 +397,7 @@ func (bot *Bot) Close() error {
 			return err
 		}
 	}
-	if !bot.requested.Load() {
+	if !bot.requested.Load() && !bot.failed.Load() {
 		ctx, cancel := context.WithTimeout(context.Background(), closeDeregisterTimeout)
 		defer cancel()
 		if err := bot.deregisterStoredQueue(ctx); err != nil {
