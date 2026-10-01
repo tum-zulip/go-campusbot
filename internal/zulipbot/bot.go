@@ -974,20 +974,22 @@ func formatHelp(metas []command.Metadata, role zulip.Role) string {
 		if meta.OwnerUsage != "" && role <= zulip.RoleOwner {
 			usage = meta.OwnerUsage
 		}
-		lines := strings.Split(usage, "\n")
-		for i, line := range lines {
+		builder.WriteString("\n**")
+		builder.WriteString(meta.Name)
+		builder.WriteString("**")
+		if meta.Summary != "" {
+			builder.WriteString(" — ")
+			builder.WriteString(meta.Summary)
+		}
+		builder.WriteByte('\n')
+		for line := range strings.SplitSeq(usage, "\n") {
 			line = strings.TrimSpace(line)
 			if line == "" {
 				continue
 			}
 			builder.WriteString("- `")
 			builder.WriteString(line)
-			builder.WriteString("`")
-			if i == 0 && meta.Summary != "" {
-				builder.WriteString(" — ")
-				builder.WriteString(meta.Summary)
-			}
-			builder.WriteByte('\n')
+			builder.WriteString("`\n")
 		}
 	}
 	return strings.TrimSpace(builder.String())
