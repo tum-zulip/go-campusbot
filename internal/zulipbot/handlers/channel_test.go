@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"slices"
-	"strconv"
 	"strings"
 	"testing"
 
@@ -39,7 +38,7 @@ func TestChannelLsDefaultsToAllChannels(t *testing.T) {
 	if !strings.Contains(result.Content, "Channels matching `.*`:") {
 		t.Fatalf("result = %q, want default pattern header", result.Content)
 	}
-	for _, want := range []string{"#_**Algorithms|1**", "#_**Databases|2**"} {
+	for _, want := range []string{"#**Algorithms**", "#**Databases**"} {
 		if !strings.Contains(result.Content, want) {
 			t.Errorf("result = %q, want %q", result.Content, want)
 		}
@@ -59,12 +58,12 @@ func TestChannelLsMatchesRegexPattern(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Handle() failed: %v", err)
 	}
-	for _, want := range []string{"#_**IN0001|1**", "#_**IN0002|2**"} {
+	for _, want := range []string{"#**IN0001**", "#**IN0002**"} {
 		if !strings.Contains(result.Content, want) {
 			t.Errorf("result = %q, want %q", result.Content, want)
 		}
 	}
-	for _, unwanted := range []string{"#_**MA0901**", "#_**MA0901|"} {
+	for _, unwanted := range []string{"#**MA0901**"} {
 		if strings.Contains(result.Content, unwanted) {
 			t.Errorf("result = %q, did not expect MA0901 mention %q", result.Content, unwanted)
 		}
@@ -381,7 +380,7 @@ func TestChannelCreateCreatesChannelWithBotSubscribed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetChannelID: %v", err)
 	}
-	if want := "Created channel #_**IN0001|" + strconv.FormatInt(idResp.ChannelID, 10) + "**."; result.Content != want {
+	if want := "Created channel #**IN0001**."; result.Content != want {
 		t.Fatalf("result = %q, want %q", result.Content, want)
 	}
 	subs, _, err := base.GetSubscribers(ctx, idResp.ChannelID).Execute()
@@ -423,7 +422,7 @@ func TestChannelArchiveArchivesChannel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Handle() failed: %v", err)
 	}
-	if want := "Archived channel #_**IN0001|" + strconv.FormatInt(channelID, 10) + "**."; result.Content != want {
+	if want := "Archived channel #**IN0001**."; result.Content != want {
 		t.Fatalf("result = %q, want %q", result.Content, want)
 	}
 	channel, _, err := base.GetChannelByID(ctx, channelID).Execute()

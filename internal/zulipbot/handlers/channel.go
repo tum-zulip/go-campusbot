@@ -131,7 +131,7 @@ func (h *ChannelHandler) handleLs(ctx context.Context, args ChannelLsArgs) (comm
 	var b strings.Builder
 	fmt.Fprintf(&b, "Channels matching `%s`:\n", pattern)
 	for _, channel := range matches {
-		fmt.Fprintf(&b, "- %s\n", zulipChannelMention(channel.Name, channel.ChannelID))
+		fmt.Fprintf(&b, "- %s\n", zulipChannelMention(channel.Name))
 	}
 	return command.Result{Content: strings.TrimSpace(b.String())}, nil
 }
@@ -148,14 +148,14 @@ func (h *ChannelHandler) handleCreate(ctx context.Context, args ChannelCreateArg
 	if ownUser == nil || ownUser.User.UserID <= 0 {
 		return command.Result{}, errors.New("get own Zulip user: missing user ID")
 	}
-	resp, _, err := h.client.CreateChannel(ctx).Name(name).Subscribers([]int64{ownUser.User.UserID}).Execute()
+	_, _, err = h.client.CreateChannel(ctx).Name(name).Subscribers([]int64{ownUser.User.UserID}).Execute()
 	if err != nil {
 		if isDuplicateZulipChannelError(err) {
 			return command.Result{}, command.NewUserError(fmt.Sprintf("Channel %q already exists.", name))
 		}
 		return command.Result{}, fmt.Errorf("create channel %q: %w", name, err)
 	}
-	return command.Result{Content: "Created channel " + zulipChannelMention(name, resp.ID) + "."}, nil
+	return command.Result{Content: "Created channel " + zulipChannelMention(name) + "."}, nil
 }
 
 func (h *ChannelHandler) handleArchive(ctx context.Context, args ChannelArchiveArgs) (command.Result, error) {
@@ -169,7 +169,7 @@ func (h *ChannelHandler) handleArchive(ctx context.Context, args ChannelArchiveA
 	if channelResp == nil {
 		return command.Result{}, fmt.Errorf("nil channel response for channel %d", args.Channel.ChannelID)
 	}
-	mention := zulipChannelMention(channelResp.Channel.Name, args.Channel.ChannelID)
+	mention := zulipChannelMention(channelResp.Channel.Name)
 	if channelResp.Channel.IsArchived {
 		return command.Result{}, command.NewUserError(mention + " is already archived.")
 	}
@@ -204,7 +204,7 @@ func (h *ChannelHandler) handleFolderAdd(
 	if channelResp.Channel.FolderID != nil && *channelResp.Channel.FolderID != folderID && !args.Force {
 		return command.Result{}, command.NewUserError(fmt.Sprintf(
 			"%s is already in another channel folder. Use `channel folder add -f` to reassign it to %q.",
-			zulipChannelMention(channelResp.Channel.Name, args.Channel.ChannelID),
+			zulipChannelMention(channelResp.Channel.Name),
 			folderName,
 		))
 	}
@@ -220,7 +220,7 @@ func (h *ChannelHandler) handleFolderAdd(
 		Content: fmt.Sprintf(
 			"Added folder **%s** to %s.",
 			folderName,
-			zulipChannelMention(channelResp.Channel.Name, args.Channel.ChannelID),
+			zulipChannelMention(channelResp.Channel.Name),
 		),
 	}, nil
 }
@@ -250,14 +250,14 @@ func (h *ChannelHandler) handleFolderRemove(
 	if channelResp.Channel.FolderID == nil {
 		return command.Result{}, command.NewUserError(fmt.Sprintf(
 			"%s is not in channel folder %q.",
-			zulipChannelMention(channelResp.Channel.Name, args.Channel.ChannelID),
+			zulipChannelMention(channelResp.Channel.Name),
 			folderName,
 		))
 	}
 	if *channelResp.Channel.FolderID != folderID {
 		return command.Result{}, command.NewUserError(fmt.Sprintf(
 			"%s is in another channel folder.",
-			zulipChannelMention(channelResp.Channel.Name, args.Channel.ChannelID),
+			zulipChannelMention(channelResp.Channel.Name),
 		))
 	}
 	if _, _, err := h.client.UpdateChannel(ctx, args.Channel.ChannelID).FolderIDNone().Execute(); err != nil {
@@ -267,7 +267,7 @@ func (h *ChannelHandler) handleFolderRemove(
 		Content: fmt.Sprintf(
 			"Removed folder **%s** from %s.",
 			folderName,
-			zulipChannelMention(channelResp.Channel.Name, args.Channel.ChannelID),
+			zulipChannelMention(channelResp.Channel.Name),
 		),
 	}, nil
 }

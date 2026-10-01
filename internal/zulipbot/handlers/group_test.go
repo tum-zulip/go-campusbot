@@ -1474,7 +1474,7 @@ func TestGroupSubscribeStillWorksForNoneUser(t *testing.T) {
 	}
 }
 
-func TestGroupShowRendersChannelsWithIDMentions(t *testing.T) {
+func TestGroupShowRendersChannelMentions(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	env, groupID := newCourseTestEnv(t)
@@ -1489,7 +1489,7 @@ func TestGroupShowRendersChannelsWithIDMentions(t *testing.T) {
 		t.Fatalf("Handle() failed: %v", err)
 	}
 
-	want := "#_**wi-channel|" + itoa(channelID) + "**"
+	want := "#**wi-channel**"
 	if !strings.Contains(result.Content, want) {
 		t.Fatalf("expected channel mention %q, got:\n%s", want, result.Content)
 	}
