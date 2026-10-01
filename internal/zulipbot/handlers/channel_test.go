@@ -410,14 +410,14 @@ func TestChannelCreateDuplicateIsUserError(t *testing.T) {
 	}
 }
 
-func TestChannelRemoveArchivesChannel(t *testing.T) {
+func TestChannelArchiveArchivesChannel(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	client, base := newChannelGroupClient(t)
 	channelID := seedChannel(t, base, "IN0001")
 	h := handlers.NewChannelHandler(client, nil)
 
-	result, err := h.Handle(ctx, makeChannelRequest(handlers.ChannelRemoveArgs{
+	result, err := h.Handle(ctx, makeChannelRequest(handlers.ChannelArchiveArgs{
 		Channel: z.Channel{ChannelID: channelID},
 	}))
 	if err != nil {
@@ -435,7 +435,7 @@ func TestChannelRemoveArchivesChannel(t *testing.T) {
 	}
 }
 
-func TestChannelRemoveAlreadyArchivedIsUserError(t *testing.T) {
+func TestChannelArchiveAlreadyArchivedIsUserError(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	client, base := newChannelGroupClient(t)
@@ -446,7 +446,7 @@ func TestChannelRemoveAlreadyArchivedIsUserError(t *testing.T) {
 	base.FailNext(zulipmock.OperationArchiveChannel, errors.New("must not archive twice"))
 	h := handlers.NewChannelHandler(client, nil)
 
-	_, err := h.Handle(ctx, makeChannelRequest(handlers.ChannelRemoveArgs{
+	_, err := h.Handle(ctx, makeChannelRequest(handlers.ChannelArchiveArgs{
 		Channel: z.Channel{ChannelID: channelID},
 	}))
 	var userErr command.UserError
@@ -458,26 +458,37 @@ func TestChannelRemoveAlreadyArchivedIsUserError(t *testing.T) {
 	}
 }
 
-func TestChannelCreateAndRemoveSubcommandsParse(t *testing.T) {
+func TestChannelCreateAndArchiveCommandsParse(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	_, base := newChannelGroupClient(t)
 	channelID := seedChannel(t, base, "wi-channel")
 	parser := command.NewArgParser(groupArgResolver{Client: base})
+	parse := func(content string) (any, error) {
+		inv, err := command.Parse(content)
+		if err != nil {
+			return nil, err
+		}
+		return parser.Parse(ctx, handlers.ChannelArgSpec, inv.Args)
+	}
 
-	parsed, err := parser.Parse(ctx, handlers.ChannelArgSpec, []string{"create", "new channel"})
+	parsed, err := parse(`channel create "new channel"`)
 	if err != nil {
-		t.Fatalf("Parse(create) failed: %v", err)
+		t.Fatalf("parse quoted create failed: %v", err)
 	}
 	if args, ok := parsed.(handlers.ChannelCreateArgs); !ok || args.ChannelName != "new channel" {
-		t.Fatalf("Parse(create) = %#v, want ChannelCreateArgs{ChannelName: new channel}", parsed)
+		t.Fatalf("parse quoted create = %#v, want ChannelCreateArgs{ChannelName: new channel}", parsed)
 	}
 
-	parsed, err = parser.Parse(ctx, handlers.ChannelArgSpec, []string{"remove", "#**wi-channel**"})
-	if err != nil {
-		t.Fatalf("Parse(remove) failed: %v", err)
+	if _, err := parse("channel create new channel"); err == nil {
+		t.Fatal("parse unquoted multiword create succeeded, want error")
 	}
-	if args, ok := parsed.(handlers.ChannelRemoveArgs); !ok || args.Channel.ChannelID != channelID {
-		t.Fatalf("Parse(remove) = %#v, want ChannelRemoveArgs for channel %d", parsed, channelID)
+
+	parsed, err = parse("channel archive #**wi-channel**")
+	if err != nil {
+		t.Fatalf("parse archive failed: %v", err)
+	}
+	if args, ok := parsed.(handlers.ChannelArchiveArgs); !ok || args.Channel.ChannelID != channelID {
+		t.Fatalf("parse archive = %#v, want ChannelArchiveArgs for channel %d", parsed, channelID)
 	}
 }

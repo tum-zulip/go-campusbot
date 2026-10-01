@@ -28,7 +28,7 @@ type ChannelCreateArgs struct {
 	ChannelName string `arg:"channel_name" desc:"Name of the new Zulip channel"`
 }
 
-type ChannelRemoveArgs struct {
+type ChannelArchiveArgs struct {
 	Channel zulip.Channel `arg:"channel" mention_only:"true" desc:"Zulip channel mention to archive"`
 }
 
@@ -44,9 +44,9 @@ type ChannelFolderRemoveArgs struct {
 }
 
 var ChannelArgSpec = command.SubcmdSpec{ //nolint:gochecknoglobals,revive // package-level command spec shared by metadata
-	"ls":     ChannelLsArgs{},
-	"create": ChannelCreateArgs{},
-	"remove": ChannelRemoveArgs{},
+	"ls":      ChannelLsArgs{},
+	"create":  ChannelCreateArgs{},
+	"archive": ChannelArchiveArgs{},
 	"folder": command.SubcmdSpec{
 		"add":    ChannelFolderAddArgs{},
 		"remove": ChannelFolderRemoveArgs{},
@@ -64,7 +64,7 @@ func (h *ChannelHandler) Metadata() command.Metadata {
 	return command.Metadata{
 		Name:       "channel",
 		Summary:    "List, create, archive or update Zulip channels.",
-		Usage:      "channel ls [pattern]\nchannel create <channel_name>\nchannel remove <channel_mention>\nchannel folder add [-f] <channel_mention> <folder_name>\nchannel folder remove <channel_mention> <folder_name>",
+		Usage:      "channel ls [pattern]\nchannel create <channel_name>\nchannel archive <channel_mention>\nchannel folder add [-f] <channel_mention> <folder_name>\nchannel folder remove <channel_mention> <folder_name>",
 		Permission: command.PermAdmin,
 		ArgSpec:    ChannelArgSpec,
 	}
@@ -80,15 +80,15 @@ func (h *ChannelHandler) Handle(ctx context.Context, req command.Request) (comma
 		return h.handleLs(ctx, args)
 	case ChannelCreateArgs:
 		return h.handleCreate(ctx, args)
-	case ChannelRemoveArgs:
-		return h.handleRemove(ctx, args)
+	case ChannelArchiveArgs:
+		return h.handleArchive(ctx, args)
 	case ChannelFolderAddArgs:
 		return h.handleFolderAdd(ctx, args)
 	case ChannelFolderRemoveArgs:
 		return h.handleFolderRemove(ctx, args)
 	default:
 		return command.Result{}, command.NewUserError(
-			"Usage: `channel ls [pattern]`, `channel create <channel_name>`, `channel remove <channel_mention>` or `channel folder <add|remove> <channel_mention> <folder_name>`",
+			"Usage: `channel ls [pattern]`, `channel create <channel_name>`, `channel archive <channel_mention>` or `channel folder <add|remove> <channel_mention> <folder_name>`",
 		)
 	}
 }
@@ -158,7 +158,7 @@ func (h *ChannelHandler) handleCreate(ctx context.Context, args ChannelCreateArg
 	return command.Result{Content: "Created channel " + zulipChannelMention(name, resp.ID) + "."}, nil
 }
 
-func (h *ChannelHandler) handleRemove(ctx context.Context, args ChannelRemoveArgs) (command.Result, error) {
+func (h *ChannelHandler) handleArchive(ctx context.Context, args ChannelArchiveArgs) (command.Result, error) {
 	if args.Channel.ChannelID <= 0 {
 		return command.Result{}, command.NewUserError("channel_id must be a positive integer")
 	}
