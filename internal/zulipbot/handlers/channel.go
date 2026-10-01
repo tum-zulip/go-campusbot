@@ -24,6 +24,14 @@ type ChannelLsArgs struct {
 	Pattern string `arg:"pattern" optional:"true" desc:"regular expression for channel names"`
 }
 
+type ChannelCreateArgs struct {
+	ChannelName string `arg:"channel_name" desc:"Name of the new Zulip channel"`
+}
+
+type ChannelRemoveArgs struct {
+	Channel zulip.Channel `arg:"channel" mention_only:"true" desc:"Zulip channel mention to archive"`
+}
+
 type ChannelFolderAddArgs struct {
 	Force      bool          `arg:"-f"          desc:"Reassign the channel if it is already in another folder"`
 	Channel    zulip.Channel `arg:"channel"     desc:"Zulip channel mention"                                   mention_only:"true"`
@@ -36,7 +44,9 @@ type ChannelFolderRemoveArgs struct {
 }
 
 var ChannelArgSpec = command.SubcmdSpec{ //nolint:gochecknoglobals,revive // package-level command spec shared by metadata
-	"ls": ChannelLsArgs{},
+	"ls":     ChannelLsArgs{},
+	"create": ChannelCreateArgs{},
+	"remove": ChannelRemoveArgs{},
 	"folder": command.SubcmdSpec{
 		"add":    ChannelFolderAddArgs{},
 		"remove": ChannelFolderRemoveArgs{},
@@ -53,8 +63,8 @@ func NewChannelHandler(client zulipclient.Client, logger *slog.Logger) *ChannelH
 func (h *ChannelHandler) Metadata() command.Metadata {
 	return command.Metadata{
 		Name:       "channel",
-		Summary:    "List or update Zulip channels.",
-		Usage:      "channel ls [pattern]\nchannel folder add [-f] <channel_mention> <folder_name>\nchannel folder remove <channel_mention> <folder_name>",
+		Summary:    "List, create, archive or update Zulip channels.",
+		Usage:      "channel ls [pattern]\nchannel create <channel_name>\nchannel remove <channel_mention>\nchannel folder add [-f] <channel_mention> <folder_name>\nchannel folder remove <channel_mention> <folder_name>",
 		Permission: command.PermAdmin,
 		ArgSpec:    ChannelArgSpec,
 	}
@@ -68,13 +78,17 @@ func (h *ChannelHandler) Handle(ctx context.Context, req command.Request) (comma
 	switch args := req.ParsedArgs.(type) {
 	case ChannelLsArgs:
 		return h.handleLs(ctx, args)
+	case ChannelCreateArgs:
+		return h.handleCreate(ctx, args)
+	case ChannelRemoveArgs:
+		return h.handleRemove(ctx, args)
 	case ChannelFolderAddArgs:
 		return h.handleFolderAdd(ctx, args)
 	case ChannelFolderRemoveArgs:
 		return h.handleFolderRemove(ctx, args)
 	default:
 		return command.Result{}, command.NewUserError(
-			"Usage: `channel ls [pattern]` or `channel folder <add|remove> <channel_mention> <folder_name>`",
+			"Usage: `channel ls [pattern]`, `channel create <channel_name>`, `channel remove <channel_mention>` or `channel folder <add|remove> <channel_mention> <folder_name>`",
 		)
 	}
 }
@@ -120,6 +134,49 @@ func (h *ChannelHandler) handleLs(ctx context.Context, args ChannelLsArgs) (comm
 		fmt.Fprintf(&b, "- %s\n", zulipChannelMention(channel.Name, channel.ChannelID))
 	}
 	return command.Result{Content: strings.TrimSpace(b.String())}, nil
+}
+
+func (h *ChannelHandler) handleCreate(ctx context.Context, args ChannelCreateArgs) (command.Result, error) {
+	name := strings.TrimSpace(args.ChannelName)
+	if name == "" {
+		return command.Result{}, command.NewUserError("channel_name must not be empty")
+	}
+	ownUser, _, err := h.client.GetOwnUser(ctx).Execute()
+	if err != nil {
+		return command.Result{}, fmt.Errorf("get own Zulip user: %w", err)
+	}
+	if ownUser == nil || ownUser.User.UserID <= 0 {
+		return command.Result{}, errors.New("get own Zulip user: missing user ID")
+	}
+	resp, _, err := h.client.CreateChannel(ctx).Name(name).Subscribers([]int64{ownUser.User.UserID}).Execute()
+	if err != nil {
+		if isDuplicateZulipChannelError(err) {
+			return command.Result{}, command.NewUserError(fmt.Sprintf("Channel %q already exists.", name))
+		}
+		return command.Result{}, fmt.Errorf("create channel %q: %w", name, err)
+	}
+	return command.Result{Content: "Created channel " + zulipChannelMention(name, resp.ID) + "."}, nil
+}
+
+func (h *ChannelHandler) handleRemove(ctx context.Context, args ChannelRemoveArgs) (command.Result, error) {
+	if args.Channel.ChannelID <= 0 {
+		return command.Result{}, command.NewUserError("channel_id must be a positive integer")
+	}
+	channelResp, _, err := h.client.GetChannelByID(ctx, args.Channel.ChannelID).Execute()
+	if err != nil {
+		return command.Result{}, fmt.Errorf("get channel %d: %w", args.Channel.ChannelID, err)
+	}
+	if channelResp == nil {
+		return command.Result{}, fmt.Errorf("nil channel response for channel %d", args.Channel.ChannelID)
+	}
+	mention := zulipChannelMention(channelResp.Channel.Name, args.Channel.ChannelID)
+	if channelResp.Channel.IsArchived {
+		return command.Result{}, command.NewUserError(mention + " is already archived.")
+	}
+	if _, _, err := h.client.ArchiveChannel(ctx, args.Channel.ChannelID).Execute(); err != nil {
+		return command.Result{}, fmt.Errorf("archive channel %d: %w", args.Channel.ChannelID, err)
+	}
+	return command.Result{Content: "Archived channel " + mention + "."}, nil
 }
 
 func (h *ChannelHandler) handleFolderAdd(

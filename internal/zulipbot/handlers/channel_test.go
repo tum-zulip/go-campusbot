@@ -3,6 +3,8 @@ package handlers_test
 import (
 	"context"
 	"errors"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -362,5 +364,120 @@ func TestChannelFolderAddForceFlagParses(t *testing.T) {
 	}
 	if args.FolderName != "manual folder" {
 		t.Fatalf("FolderName = %q, want manual folder", args.FolderName)
+	}
+}
+
+func TestChannelCreateCreatesChannelWithBotSubscribed(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	client, base := newChannelGroupClient(t)
+	h := handlers.NewChannelHandler(client, nil)
+
+	result, err := h.Handle(ctx, makeChannelRequest(handlers.ChannelCreateArgs{ChannelName: "IN0001"}))
+	if err != nil {
+		t.Fatalf("Handle() failed: %v", err)
+	}
+	idResp, _, err := base.GetChannelID(ctx).Channel("IN0001").Execute()
+	if err != nil {
+		t.Fatalf("GetChannelID: %v", err)
+	}
+	if want := "Created channel #_**IN0001|" + strconv.FormatInt(idResp.ChannelID, 10) + "**."; result.Content != want {
+		t.Fatalf("result = %q, want %q", result.Content, want)
+	}
+	subs, _, err := base.GetSubscribers(ctx, idResp.ChannelID).Execute()
+	if err != nil {
+		t.Fatalf("GetSubscribers: %v", err)
+	}
+	if !slices.Equal(subs.Subscribers, []int64{77}) {
+		t.Fatalf("subscribers = %v, want [77]", subs.Subscribers)
+	}
+}
+
+func TestChannelCreateDuplicateIsUserError(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	client, base := newChannelGroupClient(t)
+	seedChannel(t, base, "IN0001")
+	h := handlers.NewChannelHandler(client, nil)
+
+	_, err := h.Handle(ctx, makeChannelRequest(handlers.ChannelCreateArgs{ChannelName: "IN0001"}))
+	var userErr command.UserError
+	if !errors.As(err, &userErr) {
+		t.Fatalf("Handle() error = %v, want command.UserError", err)
+	}
+	if !strings.Contains(userErr.Message, `"IN0001" already exists`) {
+		t.Fatalf("user error = %q, want duplicate message", userErr.Message)
+	}
+}
+
+func TestChannelRemoveArchivesChannel(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	client, base := newChannelGroupClient(t)
+	channelID := seedChannel(t, base, "IN0001")
+	h := handlers.NewChannelHandler(client, nil)
+
+	result, err := h.Handle(ctx, makeChannelRequest(handlers.ChannelRemoveArgs{
+		Channel: z.Channel{ChannelID: channelID},
+	}))
+	if err != nil {
+		t.Fatalf("Handle() failed: %v", err)
+	}
+	if want := "Archived channel #_**IN0001|" + strconv.FormatInt(channelID, 10) + "**."; result.Content != want {
+		t.Fatalf("result = %q, want %q", result.Content, want)
+	}
+	channel, _, err := base.GetChannelByID(ctx, channelID).Execute()
+	if err != nil {
+		t.Fatalf("GetChannelByID: %v", err)
+	}
+	if !channel.Channel.IsArchived {
+		t.Fatal("channel is not archived")
+	}
+}
+
+func TestChannelRemoveAlreadyArchivedIsUserError(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	client, base := newChannelGroupClient(t)
+	channelID := seedChannel(t, base, "IN0001")
+	if _, _, err := base.ArchiveChannel(ctx, channelID).Execute(); err != nil {
+		t.Fatalf("ArchiveChannel: %v", err)
+	}
+	base.FailNext(zulipmock.OperationArchiveChannel, errors.New("must not archive twice"))
+	h := handlers.NewChannelHandler(client, nil)
+
+	_, err := h.Handle(ctx, makeChannelRequest(handlers.ChannelRemoveArgs{
+		Channel: z.Channel{ChannelID: channelID},
+	}))
+	var userErr command.UserError
+	if !errors.As(err, &userErr) {
+		t.Fatalf("Handle() error = %v, want command.UserError", err)
+	}
+	if !strings.Contains(userErr.Message, "already archived") {
+		t.Fatalf("user error = %q, want already archived message", userErr.Message)
+	}
+}
+
+func TestChannelCreateAndRemoveSubcommandsParse(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	_, base := newChannelGroupClient(t)
+	channelID := seedChannel(t, base, "wi-channel")
+	parser := command.NewArgParser(groupArgResolver{Client: base})
+
+	parsed, err := parser.Parse(ctx, handlers.ChannelArgSpec, []string{"create", "new channel"})
+	if err != nil {
+		t.Fatalf("Parse(create) failed: %v", err)
+	}
+	if args, ok := parsed.(handlers.ChannelCreateArgs); !ok || args.ChannelName != "new channel" {
+		t.Fatalf("Parse(create) = %#v, want ChannelCreateArgs{ChannelName: new channel}", parsed)
+	}
+
+	parsed, err = parser.Parse(ctx, handlers.ChannelArgSpec, []string{"remove", "#**wi-channel**"})
+	if err != nil {
+		t.Fatalf("Parse(remove) failed: %v", err)
+	}
+	if args, ok := parsed.(handlers.ChannelRemoveArgs); !ok || args.Channel.ChannelID != channelID {
+		t.Fatalf("Parse(remove) = %#v, want ChannelRemoveArgs for channel %d", parsed, channelID)
 	}
 }
