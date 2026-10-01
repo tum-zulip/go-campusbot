@@ -863,7 +863,12 @@ func formatUptime(d time.Duration) string {
 	return hms
 }
 
+var version string
+
 func buildVersion() string {
+	if version != "" {
+		return version
+	}
 	info, ok := debug.ReadBuildInfo()
 	if !ok || info.Main.Version == "" {
 		return "unknown"
