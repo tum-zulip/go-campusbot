@@ -51,12 +51,20 @@ func TestUserGroupsTransportClearsStaleCache(t *testing.T) {
 		return jsonResponse(`{"result":"success","msg":"","user_groups":[]}`), nil
 	}))}
 
-	if _, err := client.Get("https://zulip.example/api/v1/user_groups?include_deactivated_groups=false"); err != nil {
-		t.Fatalf("first GET user groups: %v", err)
+	firstResp, firstErr := client.Get("https://zulip.example/api/v1/user_groups?include_deactivated_groups=false")
+	if firstErr != nil {
+		t.Fatalf("first GET user groups: %v", firstErr)
+	}
+	if err := firstResp.Body.Close(); err != nil {
+		t.Fatalf("close first response: %v", err)
 	}
 	time.Sleep(time.Millisecond)
-	if _, err := client.Get("https://zulip.example/api/v1/user_groups?include_deactivated_groups=false"); err != nil {
-		t.Fatalf("second GET user groups: %v", err)
+	secondResp, secondErr := client.Get("https://zulip.example/api/v1/user_groups?include_deactivated_groups=false")
+	if secondErr != nil {
+		t.Fatalf("second GET user groups: %v", secondErr)
+	}
+	if err := secondResp.Body.Close(); err != nil {
+		t.Fatalf("close second response: %v", err)
 	}
 
 	if got := calls.Load(); got != 2 {
@@ -69,8 +77,12 @@ func TestUserGroupsHandleEventUpdatesCachedBody(t *testing.T) {
 	client := &http.Client{Transport: cache.RoundTripper(roundTripFunc(func(*http.Request) (*http.Response, error) {
 		return jsonResponse(`{"result":"success","msg":"","user_groups":[{"id":1,"name":"one"}]}`), nil
 	}))}
-	if _, err := client.Get("https://zulip.example/api/v1/user_groups?include_deactivated_groups=false"); err != nil {
-		t.Fatalf("prime cache: %v", err)
+	primeResp, primeErr := client.Get("https://zulip.example/api/v1/user_groups?include_deactivated_groups=false")
+	if primeErr != nil {
+		t.Fatalf("prime cache: %v", primeErr)
+	}
+	if err := primeResp.Body.Close(); err != nil {
+		t.Fatalf("close prime response: %v", err)
 	}
 
 	renamed := "renamed"

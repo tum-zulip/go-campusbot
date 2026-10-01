@@ -3,10 +3,14 @@ repos:
     rev: v6.0.0
     hooks:
       - id: check-yaml
+      - id: check-merge-conflict
+      - id: check-case-conflict
+      - id: check-added-large-files
+      - id: check-toml
       - id: end-of-file-fixer
       - id: trailing-whitespace
   - repo: https://github.com/golangci/golangci-lint
-    rev: v2.5.0 # use the latest stable version
+    rev: v2.13.2
     hooks:
       - id: golangci-lint
       - id: golangci-lint-fmt

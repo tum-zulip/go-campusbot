@@ -1,11 +1,18 @@
 # from https://gist.github.com/maratori/47a4d00457a92aa426dbd48a18776322
 version: "2"
 
+run:
+  timeout: 5m
+  modules-download-mode: readonly
+  build-tags:
+    - integration
+
 issues:
   # Maximum count of issues with the same text.
   # Set to 0 to disable.
   # Default: 3
-  max-same-issues: 50
+  max-same-issues: 0
+  max-issues-per-linter: 0
 
 formatters:
   enable:
@@ -34,6 +41,7 @@ linters:
     - asasalint # checks for pass []any as any in variadic func(...any)
     - asciicheck # checks that your code does not contain non-ASCII identifiers
     - bidichk # checks for dangerous unicode character sequences
+    - bodyclose # checks that HTTP response bodies are closed
     - canonicalheader # checks whether net/http.Header uses canonical header
     - copyloopvar # detects places where loop variables are copied (Go 1.22+)
     - cyclop # checks function and package cyclomatic complexity
@@ -41,6 +49,7 @@ linters:
     - dupl # tool for code clone detection
     - durationcheck # checks for two durations multiplied together
     - embeddedstructfieldcheck # checks embedded types in structs
+    - errchkjson # checks JSON encoding arguments
     - errcheck # checking for unchecked errors, these unchecked errors can be critical bugs in some cases
     - errname # checks that sentinel errors are prefixed with the Err and error types are suffixed with the Error
     - errorlint # finds code that will cause problems with the error wrapping scheme introduced in Go 1.13
@@ -94,6 +103,7 @@ linters:
     - spancheck # checks for mistakes with OpenTelemetry/Census spans
     - sqlclosecheck # checks that sql.Rows and sql.Stmt are closed
     - staticcheck # is a go vet on steroids, applying a ton of static analysis checks
+    - thelper # ensures test helpers report failures at the caller
     - testableexamples # checks if examples are testable (have an expected output)
     - testifylint # checks usage of github.com/stretchr/testify
     - testpackage # makes you use a separate _test package
@@ -186,6 +196,12 @@ linters:
       # Minimal code complexity to report.
       # Default: 30 (but we recommend 10-20)
       min-complexity: 20
+
+    goconst:
+      ignore-tests: true
+      # Command names and wire-format tokens are clearer at their call sites.
+      ignore-string-values:
+        - "^(add|remove|create|status|true|success)$"
 
     gocritic:
       # Settings passed to gocritic.
@@ -332,6 +348,12 @@ linters:
       - common-false-positives
     # Excluding configuration per-path, per-linter, per-text and per-source.
     rules:
+      # go-zulip closes the network body in internal/clients/simple_client.go
+      # and returns an in-memory io.NopCloser from its Execute methods.
+      - path: '^internal/(channelgroup|zulipbot|zulipcache|zuliproundrobin)/'
+        source: '\bExecute\(\)'
+        linters:
+          - bodyclose
       - path: '_test\.go'
         linters:
           - errcheck

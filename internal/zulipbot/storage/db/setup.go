@@ -5,12 +5,19 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"time"
 
 	_ "embed"
 
 	// Import the SQLite driver for callers that initialize storage through this package.
 	_ "github.com/mattn/go-sqlite3"
 )
+
+// FormatTime renders a timestamp in the canonical format used for all
+// timestamp columns in this storage schema.
+func FormatTime(value time.Time) string {
+	return value.UTC().Format(time.RFC3339Nano)
+}
 
 //go:embed sql/schema.sql
 var schemaSQL string

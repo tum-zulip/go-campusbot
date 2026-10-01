@@ -32,7 +32,6 @@ import (
 )
 
 const (
-	exitSuccess = 0
 	exitFailure = 1
 
 	defaultRCPath = "zuliprc"
@@ -78,7 +77,6 @@ func init() {
 	}
 }
 
-//nolint:gocognit // Startup and restart wiring is intentionally kept in process order.
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "run" {
 		os.Args = append([]string{os.Args[0]}, os.Args[2:]...)
@@ -88,12 +86,12 @@ func main() {
 	logConfig, err := parseLogLevel(logLevel)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		os.Exit(exitFailure)
 	}
 	parsedLogFormat, err := parseLogFormat(logFormat)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		os.Exit(exitFailure)
 	}
 	logger := setupLogger(os.Stderr, logConfig.BotLevel, parsedLogFormat)
 	zulipLogger := newLogger(os.Stderr, logConfig.ZulipClientLevel, parsedLogFormat)
@@ -101,7 +99,20 @@ func main() {
 	runCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	if err := run(runCtx, logger, zulipLogger); err != nil {
+		logger.ErrorContext(runCtx, "campusbot failed", "error", err)
+		stop()
+		os.Exit(exitFailure)
+	}
+}
+
+// run wires up all components, runs the bot until shutdown or restart, and
+// releases resources via defers (which do not run when a restart replaces the
+// process image via exec).
+func run(runCtx context.Context, logger, zulipLogger *slog.Logger) error {
 	startupCtx, cancelStartup := context.WithTimeout(runCtx, startupTimeout)
+	defer cancelStartup()
+
 	userGroupsCache := zulipcache.NewUserGroups(zulipcache.DefaultUserGroupsTTL)
 	streamsCache := zulipcache.NewStreams(zulipcache.DefaultStreamsTTL)
 	baseClient, err := newZulipClient(
@@ -111,92 +122,41 @@ func main() {
 		streamsCache,
 	)
 	if err != nil {
-		cancelStartup()
-		logger.ErrorContext(runCtx, "failed to create Zulip client", "error", err)
-		os.Exit(exitFailure)
+		return fmt.Errorf("create Zulip client: %w", err)
 	}
 	botClient, err := newClientWithWorkers(baseClient, workerRCDir, logger, zulipLogger)
 	if err != nil {
-		cancelStartup()
-		logger.ErrorContext(runCtx, "failed to create Zulip worker client", "error", err)
-		os.Exit(exitFailure)
+		return fmt.Errorf("create Zulip worker client: %w", err)
 	}
 	if err := userGroupsCache.Start(runCtx, baseClient, logger); err != nil {
-		cancelStartup()
-		logger.ErrorContext(runCtx, "failed to start user-groups cache", "error", err)
-		os.Exit(exitFailure)
+		return fmt.Errorf("start user-groups cache: %w", err)
 	}
+	defer warnOnCloseError(logger, "user-groups cache", userGroupsCache.Close)
 	if err := streamsCache.Start(runCtx, baseClient, logger); err != nil {
-		cancelStartup()
-		_ = userGroupsCache.Close()
-		logger.ErrorContext(runCtx, "failed to start streams cache", "error", err)
-		os.Exit(exitFailure)
+		return fmt.Errorf("start streams cache: %w", err)
 	}
+	defer warnOnCloseError(logger, "streams cache", streamsCache.Close)
+
 	publicSync, err := zuliproundrobin.SyncPublicChannelSubscriptions(startupCtx, baseClient)
 	if err != nil {
-		cancelStartup()
-		_ = streamsCache.Close()
-		_ = userGroupsCache.Close()
-		logger.ErrorContext(runCtx, "failed to sync public Zulip channel subscriptions", "error", err)
-		os.Exit(exitFailure)
+		return fmt.Errorf("sync public Zulip channel subscriptions: %w", err)
 	}
 	logger.InfoContext(runCtx, "synced main Zulip client public channel subscriptions",
 		"checked_channels", publicSync.CheckedChannels,
 		"existing_channels", publicSync.ExistingChannels,
 		"subscribed_channels", publicSync.SubscribedChannels,
 	)
-	if syncer, ok := botClient.(interface {
-		SyncWorkerSubscriptions(context.Context) (zuliproundrobin.WorkerSubscriptionSyncResult, error)
-		StartWorkerSubscriptionSyncQueue(context.Context, *slog.Logger) error
-	}); ok {
-		workerSync, syncErr := syncer.SyncWorkerSubscriptions(startupCtx)
-		if syncErr != nil {
-			cancelStartup()
-			_ = streamsCache.Close()
-			_ = userGroupsCache.Close()
-			logger.ErrorContext(runCtx, "failed to sync Zulip worker subscriptions", "error", syncErr)
-			os.Exit(exitFailure)
-		}
-		logger.InfoContext(runCtx, "synced Zulip worker subscriptions",
-			"workers", workerSync.WorkerCount,
-			"main_subscribed_channels", workerSync.MainSubscribedChannels,
-			"subscribed_worker_channels", workerSync.SubscribedWorkerChannels,
-			"already_subscribed_worker_channels", workerSync.AlreadySubscribedWorkerChannels,
-			"unauthorized_channels", len(workerSync.UnauthorizedChannelNames),
-		)
-		if startErr := syncer.StartWorkerSubscriptionSyncQueue(runCtx, logger); startErr != nil {
-			cancelStartup()
-			_ = streamsCache.Close()
-			_ = userGroupsCache.Close()
-			logger.ErrorContext(runCtx, "failed to start Zulip worker subscription sync event queue", "error", startErr)
-			os.Exit(exitFailure)
-		}
+	if err := syncWorkerSubscriptions(runCtx, startupCtx, botClient, logger); err != nil {
+		return err
 	}
-	db, err := openDatabase(dbPath)
+
+	db, err := openStorage(startupCtx, dbPath)
 	if err != nil {
-		cancelStartup()
-		_ = streamsCache.Close()
-		_ = userGroupsCache.Close()
-		logger.ErrorContext(runCtx, "failed to open database", "error", err)
-		os.Exit(exitFailure)
+		return err
 	}
-	if err := storagedb.ConfigureSQLite(startupCtx, db); err != nil {
-		cancelStartup()
-		_ = streamsCache.Close()
-		_ = userGroupsCache.Close()
-		_ = db.Close()
-		logger.ErrorContext(runCtx, "failed to configure database", "error", err)
-		os.Exit(exitFailure)
-	}
-	if err := storagedb.InitSchema(startupCtx, db); err != nil {
-		cancelStartup()
-		_ = streamsCache.Close()
-		_ = userGroupsCache.Close()
-		_ = db.Close()
-		logger.ErrorContext(runCtx, "failed to initialize database schema", "error", err)
-		os.Exit(exitFailure)
-	}
+	defer warnOnCloseError(logger, "database", db.Close)
 	queries := storagedb.New(db)
+
 	bot, err := zulipbot.NewBot(
 		startupCtx,
 		zulipbot.RuntimeConfig{
@@ -207,28 +167,10 @@ func main() {
 		db,
 		queries,
 	)
-	cancelStartup()
 	if err != nil {
-		_ = streamsCache.Close()
-		_ = userGroupsCache.Close()
-		_ = db.Close()
-		logger.ErrorContext(runCtx, "failed to initialize Zulip bot", "error", err)
-		os.Exit(exitFailure)
+		return fmt.Errorf("initialize Zulip bot: %w", err)
 	}
-	defer func() {
-		if err := streamsCache.Close(); err != nil {
-			logger.Warn("failed to close streams cache", "error", err)
-		}
-		if err := userGroupsCache.Close(); err != nil {
-			logger.Warn("failed to close user-groups cache", "error", err)
-		}
-		if err := bot.Close(); err != nil {
-			logger.Warn("failed to close bot", "error", err)
-		}
-		if err := db.Close(); err != nil {
-			logger.Warn("failed to close database", "error", err)
-		}
-	}()
+	defer warnOnCloseError(logger, "bot", bot.Close)
 
 	ownUser := bot.OwnUser()
 	logger.InfoContext(runCtx, "zulip bot initialized",
@@ -239,29 +181,84 @@ func main() {
 
 	restartRequested, err := bot.Run(runCtx)
 	if err != nil {
-		logger.ErrorContext(runCtx, "bot stopped with error", "error", err)
-		os.Exit(exitFailure)
+		return fmt.Errorf("bot stopped with error: %w", err)
 	}
 	if !restartRequested {
-		os.Exit(exitSuccess)
+		return nil
 	}
 
+	return executeRestart(runCtx, bot, logger)
+}
+
+// executeRestart optionally swaps in the latest release binary and then
+// re-execs the current process. It only returns on failure or in dry-run mode.
+func executeRestart(runCtx context.Context, bot *zulipbot.Bot, logger *slog.Logger) error {
 	logger.InfoContext(runCtx, "executing requested restart")
 	if bot.UpdateRequested() {
 		repo, cfgErr := bot.ConfigString(runCtx, zulipbot.KeyUpdateReleaseRepo)
 		if cfgErr != nil {
-			logger.ErrorContext(runCtx, "failed to read update release repo", "error", cfgErr)
-			os.Exit(exitFailure)
+			return fmt.Errorf("read update release repo: %w", cfgErr)
 		}
 		if updateErr := updateExecutableFromGitHubRelease(runCtx, repo, http.DefaultClient); updateErr != nil {
-			logger.ErrorContext(runCtx, "failed to update executable", "error", updateErr)
-			os.Exit(exitFailure)
+			return fmt.Errorf("update executable: %w", updateErr)
 		}
 	}
 	if restartErr := restartProcess(runCtx, bot, restartExec(dryRunRestart)); restartErr != nil {
-		logger.ErrorContext(runCtx, "failed to restart process", "error", restartErr)
-		os.Exit(exitFailure)
+		return fmt.Errorf("restart process: %w", restartErr)
 	}
+	return nil
+}
+
+func openStorage(ctx context.Context, path string) (*sql.DB, error) {
+	db, err := openDatabase(path)
+	if err != nil {
+		return nil, fmt.Errorf("open database: %w", err)
+	}
+	if err := storagedb.ConfigureSQLite(ctx, db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("configure database: %w", err)
+	}
+	if err := storagedb.InitSchema(ctx, db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("initialize database schema: %w", err)
+	}
+	return db, nil
+}
+
+func warnOnCloseError(logger *slog.Logger, what string, closeFn func() error) {
+	if err := closeFn(); err != nil {
+		logger.Warn("failed to close "+what, "error", err)
+	}
+}
+
+func syncWorkerSubscriptions(
+	runCtx context.Context,
+	startupCtx context.Context,
+	botClient zulipclient.Client,
+	logger *slog.Logger,
+) error {
+	syncer, ok := botClient.(interface {
+		SyncWorkerSubscriptions(context.Context) (zuliproundrobin.WorkerSubscriptionSyncResult, error)
+		StartWorkerSubscriptionSyncQueue(context.Context, *slog.Logger) error
+	})
+	if !ok {
+		return nil
+	}
+	workerSync, err := syncer.SyncWorkerSubscriptions(startupCtx)
+	if err != nil {
+		return fmt.Errorf("sync Zulip worker subscriptions: %w", err)
+	}
+	logger.InfoContext(runCtx, "synced Zulip worker subscriptions",
+		"workers", workerSync.WorkerCount,
+		"main_subscribed_channels", workerSync.MainSubscribedChannels,
+		"subscribed_worker_channels", workerSync.SubscribedWorkerChannels,
+		"already_subscribed_worker_channels", workerSync.AlreadySubscribedWorkerChannels,
+		"unauthorized_channels", len(workerSync.UnauthorizedChannelNames),
+	)
+	if err := syncer.StartWorkerSubscriptionSyncQueue(runCtx, logger); err != nil {
+		return fmt.Errorf("start Zulip worker subscription sync event queue: %w", err)
+	}
+	return nil
 }
 
 func newZulipClient(

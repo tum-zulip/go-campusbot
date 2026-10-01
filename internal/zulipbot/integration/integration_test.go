@@ -37,7 +37,7 @@ func requireZulipRC(t *testing.T) string {
 	return rcPath
 }
 
-// TestIntegration_QueueRegistrationAndCleanup verifies that NewApp succeeds and
+// TestIntegration_QueueRegistrationAndCleanup verifies that NewBot succeeds and
 // the bot user info is populated.
 func TestIntegration_QueueRegistrationAndCleanup(t *testing.T) {
 	rcPath := requireZulipRC(t)
@@ -91,34 +91,32 @@ func TestIntegration_EventQueueRegisterAndCheck(t *testing.T) {
 	defer cancel()
 
 	client := newIntegrationClient(t, rcPath)
-	bot, err := zulipbot.New(ctx, client)
+	state, _, err := client.RegisterQueue(ctx).Execute()
 	if err != nil {
-		t.Fatalf("New bot failed: %v", err)
+		t.Fatalf("RegisterQueue failed: %v", err)
 	}
-
-	source := zulipbot.NewZulipSource(bot.Client())
-
-	state, err := source.Register(ctx, zulipbot.RegisterOptions{})
-	if err != nil {
-		t.Fatalf("Register failed: %v", err)
-	}
-	t.Logf("registered queue: %s last_event_id=%d", state.QueueID, state.LastEventID)
-
-	if state.QueueID == "" {
+	if state == nil || state.QueueID == nil || *state.QueueID == "" {
 		t.Fatal("expected non-empty queue ID")
 	}
+	queueID := *state.QueueID
+	// Clean up even when validation fails, using a fresh bounded context.
+	t.Cleanup(func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cleanupCancel()
+		if _, _, err := client.DeleteQueue(cleanupCtx).QueueID(queueID).Execute(); err != nil {
+			t.Errorf("DeleteQueue failed: %v", err)
+		}
+	})
+	t.Logf("registered queue: %s last_event_id=%d", queueID, state.LastEventID)
 
-	// Check (non-blocking) to verify queue is live.
-	if err := source.Check(ctx, state); err != nil {
-		t.Fatalf("Check failed: %v", err)
+	if _, _, err := client.GetEvents(ctx).
+		QueueID(queueID).
+		LastEventID(state.LastEventID).
+		DontBlock(true).
+		Execute(); err != nil {
+		t.Fatalf("GetEvents failed: %v", err)
 	}
 	t.Log("queue check passed")
-
-	// Delete the queue to clean up.
-	if err := source.Delete(ctx, state.QueueID); err != nil {
-		t.Fatalf("Delete failed: %v", err)
-	}
-	t.Log("queue deleted successfully")
 }
 
 func newIntegrationClient(t *testing.T, rcPath string) zulipclient.Client {

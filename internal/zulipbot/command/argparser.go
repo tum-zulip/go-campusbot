@@ -1,4 +1,3 @@
-//nolint:goconst // Struct tag values are clearer at the call sites in this parser.
 package command
 
 import (
@@ -94,7 +93,7 @@ var (
 
 func (p *ArgParser) parseStruct(ctx context.Context, spec any, rawArgs []string) (any, error) {
 	t := reflect.TypeOf(spec)
-	if t.Kind() == reflect.Ptr {
+	if t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
 	if t.Kind() != reflect.Struct {

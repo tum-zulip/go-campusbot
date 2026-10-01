@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"sync"
@@ -107,7 +106,7 @@ func newTestClient(t *testing.T, base zulipmock.Client) channelgroup.Client {
 		context.Background(),
 		base,
 		database,
-		channelgroup.WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
+		channelgroup.WithLogger(slog.New(slog.DiscardHandler)),
 	)
 	if err != nil {
 		t.Fatalf("NewClient error = %v", err)
@@ -197,7 +196,7 @@ func TestCreateChannelGroupRollsBackLocalDBWritesOnChannelInsertFailure(t *testi
 		ctx,
 		base,
 		database,
-		channelgroup.WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
+		channelgroup.WithLogger(slog.New(slog.DiscardHandler)),
 	)
 	if err != nil {
 		t.Fatalf("NewClient error = %v", err)
@@ -233,7 +232,7 @@ func TestNewClientPersistsChannelGroupEventQueue(t *testing.T) {
 		base,
 		database,
 		channelgroup.WithRunContext(runCtx),
-		channelgroup.WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
+		channelgroup.WithLogger(slog.New(slog.DiscardHandler)),
 	)
 	if err != nil {
 		t.Fatalf("NewClient error = %v", err)
@@ -268,7 +267,7 @@ func TestNewClientResumesStoredChannelGroupEventQueue(t *testing.T) {
 		base,
 		database,
 		channelgroup.WithRunContext(runCtx),
-		channelgroup.WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
+		channelgroup.WithLogger(slog.New(slog.DiscardHandler)),
 	)
 	if err != nil {
 		t.Fatalf("NewClient error = %v", err)
@@ -292,7 +291,7 @@ func TestClientCloseWaitsForChannelGroupEventListener(t *testing.T) {
 		ctx,
 		base,
 		database,
-		channelgroup.WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
+		channelgroup.WithLogger(slog.New(slog.DiscardHandler)),
 	)
 	if err != nil {
 		t.Fatalf("NewClient error = %v", err)
@@ -816,7 +815,7 @@ func TestInitializeChannelGroupsRemovesChannelsMissingFromBotSubscriptions(t *te
 		context.Background(),
 		base,
 		database,
-		channelgroup.WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
+		channelgroup.WithLogger(slog.New(slog.DiscardHandler)),
 	)
 	if err != nil {
 		t.Fatalf("NewClient error = %v", err)
@@ -845,7 +844,7 @@ func TestInitializeChannelGroupsRemovesChannelsMissingFromBotSubscriptions(t *te
 		errors.New("initialization must not unsubscribe users"),
 	)
 	client, err = channelgroup.NewClient(ctx, base, database,
-		channelgroup.WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
+		channelgroup.WithLogger(slog.New(slog.DiscardHandler)),
 	)
 	if err != nil {
 		t.Fatalf("NewClient (re-init) error = %v", err)
@@ -874,7 +873,7 @@ func TestInitializeChannelGroupsRemovesGroupWhenBackingUserGroupMissing(t *testi
 		context.Background(),
 		base,
 		database,
-		channelgroup.WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
+		channelgroup.WithLogger(slog.New(slog.DiscardHandler)),
 	)
 	if err != nil {
 		t.Fatalf("NewClient error = %v", err)
@@ -896,7 +895,7 @@ func TestInitializeChannelGroupsRemovesGroupWhenBackingUserGroupMissing(t *testi
 		errors.New("initialization must not unsubscribe users"),
 	)
 	client, err = channelgroup.NewClient(ctx, base, database,
-		channelgroup.WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
+		channelgroup.WithLogger(slog.New(slog.DiscardHandler)),
 	)
 	if err != nil {
 		t.Fatalf("NewClient (re-init) error = %v", err)
