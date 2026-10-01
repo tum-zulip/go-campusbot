@@ -109,6 +109,17 @@ func TestDispatchHelpListsCommands(t *testing.T) {
 	}
 }
 
+func TestDispatchHelpGroupsUsageUnderCommandSummary(t *testing.T) {
+	t.Parallel()
+
+	bot := newDispatchTestBot(t)
+	result := bot.Dispatch(context.Background(), memberRequest("help", "status"))
+	want := "**status** — Show bot status and health information.\n- `status`"
+	if !strings.Contains(result.Content, want) {
+		t.Fatalf("help output = %q, want it to contain %q", result.Content, want)
+	}
+}
+
 func TestDispatchStatusIncludesUptime(t *testing.T) {
 	t.Parallel()
 
