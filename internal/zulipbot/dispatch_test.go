@@ -120,8 +120,29 @@ func TestDispatchStatusIncludesUptime(t *testing.T) {
 	if !strings.Contains(result.Content, "accepting commands: yes") {
 		t.Fatalf("status should report accepting=yes: %q", result.Content)
 	}
-	if strings.Contains(result.Content, "queue_id") {
+	if strings.Contains(result.Content, "queue_id") || strings.Contains(result.Content, "version:") {
 		t.Fatalf("member must not see admin status fields: %q", result.Content)
+	}
+}
+
+func TestDispatchStatusShowsUptimeDays(t *testing.T) {
+	t.Parallel()
+
+	bot := newDispatchTestBot(t)
+	bot.SetStartedAtForTest(time.Now().Add(-(2948*time.Hour + 9*time.Minute)))
+	result := bot.Dispatch(context.Background(), memberRequest("status"))
+	if !strings.Contains(result.Content, "uptime: 122d 20h 9m") {
+		t.Fatalf("status should report uptime in days: %q", result.Content)
+	}
+}
+
+func TestDispatchStatusShowsVersionToAdmin(t *testing.T) {
+	t.Parallel()
+
+	bot := newDispatchTestBot(t)
+	result := bot.Dispatch(context.Background(), ownerRequest("status"))
+	if !strings.Contains(result.Content, "\nversion: ") {
+		t.Fatalf("admin status should report version: %q", result.Content)
 	}
 }
 
