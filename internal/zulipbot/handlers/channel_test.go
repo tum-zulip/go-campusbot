@@ -413,7 +413,7 @@ func TestChannelArchiveArchivesChannel(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	client, base := newChannelGroupClient(t)
-	channelID := seedChannel(t, base, "IN0001")
+	channelID := seedSubscribedChannel(t, base, "IN0001", 77, 101)
 	h := handlers.NewChannelHandler(client, nil)
 
 	result, err := h.Handle(ctx, makeChannelRequest(handlers.ChannelArchiveArgs{
@@ -432,6 +432,7 @@ func TestChannelArchiveArchivesChannel(t *testing.T) {
 	if !channel.Channel.IsArchived {
 		t.Fatal("channel is not archived")
 	}
+	assertNoSubscribers(t, base, channelID)
 }
 
 func TestChannelArchiveAlreadyArchivedIsUserError(t *testing.T) {
