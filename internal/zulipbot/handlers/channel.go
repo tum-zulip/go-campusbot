@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/tum-zulip/go-zulip/zulip"
 	"github.com/tum-zulip/go-zulip/zulip/api/channels"
@@ -180,6 +181,8 @@ func (h *ChannelHandler) handleArchive(ctx context.Context, args ChannelArchiveA
 	return command.Result{Content: "Archived channel " + mention + "."}, nil
 }
 
+const restoreSubscribersTimeout = 30 * time.Second
+
 // Archived channels are revived empty, so their subscribers are dropped on archive.
 func unsubscribeAllAndArchive(ctx context.Context, client zulipclient.Client, channelID int64, name string) error {
 	subscribersResp, _, err := client.GetSubscribers(ctx, channelID).Execute()
@@ -200,7 +203,9 @@ func unsubscribeAllAndArchive(ctx context.Context, client zulipclient.Client, ch
 		if len(subscribersResp.Subscribers) == 0 {
 			return err
 		}
-		if _, _, restoreErr := client.Subscribe(ctx).
+		restoreCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), restoreSubscribersTimeout)
+		defer cancel()
+		if _, _, restoreErr := client.Subscribe(restoreCtx).
 			Subscriptions([]channels.SubscriptionRequest{{Name: name}}).
 			Principals(subscribers).
 			SendNewSubscriptionMessages(false).
