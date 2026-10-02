@@ -8,8 +8,10 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/tum-zulip/go-zulip/zulip"
+	"github.com/tum-zulip/go-zulip/zulip/api/channels"
 	zulipclient "github.com/tum-zulip/go-zulip/zulip/client"
 
 	"github.com/tum-zulip/go-campusbot/internal/zulipbot/command"
@@ -173,10 +175,46 @@ func (h *ChannelHandler) handleArchive(ctx context.Context, args ChannelArchiveA
 	if channelResp.Channel.IsArchived {
 		return command.Result{}, command.NewUserError(mention + " is already archived.")
 	}
-	if _, _, err := h.client.ArchiveChannel(ctx, args.Channel.ChannelID).Execute(); err != nil {
-		return command.Result{}, fmt.Errorf("archive channel %d: %w", args.Channel.ChannelID, err)
+	if err := unsubscribeAllAndArchive(ctx, h.client, args.Channel.ChannelID, channelResp.Channel.Name); err != nil {
+		return command.Result{}, err
 	}
 	return command.Result{Content: "Archived channel " + mention + "."}, nil
+}
+
+const restoreSubscribersTimeout = 30 * time.Second
+
+// Archived channels are revived empty, so their subscribers are dropped on archive.
+func unsubscribeAllAndArchive(ctx context.Context, client zulipclient.Client, channelID int64, name string) error {
+	subscribersResp, _, err := client.GetSubscribers(ctx, channelID).Execute()
+	if err != nil {
+		return fmt.Errorf("get subscribers of channel %d: %w", channelID, err)
+	}
+	subscribers := zulip.UserIDsAsPrincipals(subscribersResp.Subscribers...)
+	if len(subscribersResp.Subscribers) > 0 {
+		if _, _, err := client.Unsubscribe(ctx).
+			Subscriptions([]string{name}).
+			Principals(subscribers).
+			Execute(); err != nil {
+			return fmt.Errorf("unsubscribe all from channel %d: %w", channelID, err)
+		}
+	}
+	if _, _, err := client.ArchiveChannel(ctx, channelID).Execute(); err != nil {
+		err = fmt.Errorf("archive channel %d: %w", channelID, err)
+		if len(subscribersResp.Subscribers) == 0 {
+			return err
+		}
+		restoreCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), restoreSubscribersTimeout)
+		defer cancel()
+		if _, _, restoreErr := client.Subscribe(restoreCtx).
+			Subscriptions([]channels.SubscriptionRequest{{Name: name}}).
+			Principals(subscribers).
+			SendNewSubscriptionMessages(false).
+			Execute(); restoreErr != nil {
+			return fmt.Errorf("%w (restore subscribers: %w)", err, restoreErr)
+		}
+		return err
+	}
+	return nil
 }
 
 func (h *ChannelHandler) handleFolderAdd(

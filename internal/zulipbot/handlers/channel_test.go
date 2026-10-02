@@ -413,7 +413,7 @@ func TestChannelArchiveArchivesChannel(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	client, base := newChannelGroupClient(t)
-	channelID := seedChannel(t, base, "IN0001")
+	channelID := seedSubscribedChannel(t, base, "IN0001", 77, 101)
 	h := handlers.NewChannelHandler(client, nil)
 
 	result, err := h.Handle(ctx, makeChannelRequest(handlers.ChannelArchiveArgs{
@@ -431,6 +431,29 @@ func TestChannelArchiveArchivesChannel(t *testing.T) {
 	}
 	if !channel.Channel.IsArchived {
 		t.Fatal("channel is not archived")
+	}
+	assertNoSubscribers(t, base, channelID)
+}
+
+func TestChannelArchiveFailureRestoresSubscribers(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	client, base := newChannelGroupClient(t)
+	channelID := seedSubscribedChannel(t, base, "IN0001", 77, 101)
+	base.FailNext(zulipmock.OperationArchiveChannel, errors.New("archive failed"))
+	h := handlers.NewChannelHandler(client, nil)
+
+	if _, err := h.Handle(ctx, makeChannelRequest(handlers.ChannelArchiveArgs{
+		Channel: z.Channel{ChannelID: channelID},
+	})); err == nil {
+		t.Fatal("Handle() succeeded, want archive error")
+	}
+	resp, _, err := base.GetSubscribers(ctx, channelID).Execute()
+	if err != nil {
+		t.Fatalf("GetSubscribers: %v", err)
+	}
+	if !slices.Equal(resp.Subscribers, []int64{77, 101}) {
+		t.Fatalf("subscribers = %v, want [77 101]", resp.Subscribers)
 	}
 }
 

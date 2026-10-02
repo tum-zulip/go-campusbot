@@ -661,6 +661,22 @@ func TestGroupRemoveForceArchivesChannelsAndFolder(t *testing.T) {
 	t.Fatalf("folder %d not found", folderID)
 }
 
+func TestGroupRemoveForceUnsubscribesArchivedChannels(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env, groupID := newCourseTestEnv(t)
+	channelID := seedSubscribedChannel(t, env.base, "wi-channel", 77, 101)
+	if _, _, err := env.client.UpdateChannelGroupChannels(ctx, groupID).Add([]int64{channelID}).Execute(); err != nil {
+		t.Fatalf("pre-add channel %d to group %d: %v", channelID, groupID, err)
+	}
+
+	h := env.handler(allowAll{})
+	if _, err := h.Handle(ctx, makeGroupRequest(handlers.GroupRemoveArgs{Force: true, ShortName: "WI"})); err != nil {
+		t.Fatalf("Handle() failed: %v", err)
+	}
+	assertNoSubscribers(t, env.base, channelID)
+}
+
 func TestGroupRemoveForceDoesNotArchiveChannelsSharedWithOtherGroups(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -1538,6 +1554,26 @@ func seedChannel(t *testing.T, base zulipmock.Client, name string) int64 {
 		t.Fatalf("CreateChannel(%q): %v", name, err)
 	}
 	return resp.ID
+}
+
+func seedSubscribedChannel(t *testing.T, base zulipmock.Client, name string, userIDs ...int64) int64 {
+	t.Helper()
+	resp, _, err := base.CreateChannel(context.Background()).Name(name).Subscribers(userIDs).Execute()
+	if err != nil {
+		t.Fatalf("CreateChannel(%q): %v", name, err)
+	}
+	return resp.ID
+}
+
+func assertNoSubscribers(t *testing.T, base zulipmock.Client, channelID int64) {
+	t.Helper()
+	resp, _, err := base.GetSubscribers(context.Background(), channelID).Execute()
+	if err != nil {
+		t.Fatalf("GetSubscribers(%d): %v", channelID, err)
+	}
+	if len(resp.Subscribers) != 0 {
+		t.Fatalf("channel %d subscribers = %v, want none", channelID, resp.Subscribers)
+	}
 }
 
 func TestGroupCourseAdd(t *testing.T) {

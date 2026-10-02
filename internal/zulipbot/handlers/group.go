@@ -535,8 +535,12 @@ func (h *GroupHandler) archiveGroupChannelsAndFolder(
 		"exclusive_channel_count", len(exclusiveChannelIDs),
 	)
 	for _, channelID := range exclusiveChannelIDs {
-		if _, _, err := h.client.ArchiveChannel(ctx, channelID).Execute(); err != nil {
-			return 0, fmt.Errorf("archive channel %d: %w", channelID, err)
+		channelResp, _, err := h.client.GetChannelByID(ctx, channelID).Execute()
+		if err != nil {
+			return 0, fmt.Errorf("get channel %d: %w", channelID, err)
+		}
+		if err := unsubscribeAllAndArchive(ctx, h.client, channelID, channelResp.Channel.Name); err != nil {
+			return 0, err
 		}
 		h.logger.DebugContext(ctx, "archived exclusive channel group channel",
 			"channel_group_id", group.ID,
