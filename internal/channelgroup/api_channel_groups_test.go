@@ -369,7 +369,7 @@ func TestCreateChannelGroupRollsBackUserGroupOnError(t *testing.T) {
 		t.Fatalf("CreateChannelGroup error = nil, want failure")
 	}
 
-	groups, _, err := base.GetUserGroups(ctx).Execute()
+	groups, _, err := base.GetUserGroups(ctx).IncludeDeactivatedGroups(true).Execute()
 	if err != nil {
 		t.Fatalf("GetUserGroups error = %v", err)
 	}
@@ -2593,5 +2593,80 @@ func TestUnsubscribeFromChannelGroupKeepsSharedChannelWhenUserStillInOtherGroup(
 		want,
 	) {
 		t.Errorf("exclusive channel B subscribers after full unsubscribe = %v, want %v", got, want)
+	}
+}
+
+func TestGetChannelGroupsResolvesActiveNamesWithoutListingDeactivatedGroups(t *testing.T) {
+	ctx := context.Background()
+	base := zulipmock.NewClient()
+	client := newTestClient(t, base)
+	for _, name := range []string{"first", "second"} {
+		if _, _, err := client.CreateChannelGroup(ctx).
+			Name(name).
+			InitialSubscribers(zulip.UserIDsAsPrincipals(101)).
+			Execute(); err != nil {
+			t.Fatalf("CreateChannelGroup(%q) error = %v", name, err)
+		}
+	}
+
+	before := base.DeactivatedUserGroupsFetchCount()
+	resp, _, err := client.GetChannelGroups(ctx).Execute()
+	if err != nil {
+		t.Fatalf("GetChannelGroups error = %v", err)
+	}
+	if len(resp.ChannelGroups) != 2 ||
+		resp.ChannelGroups[0].Name != "first" ||
+		resp.ChannelGroups[1].Name != "second" {
+		t.Fatalf("channel groups = %+v, want first and second", resp.ChannelGroups)
+	}
+	if _, _, err := client.GetChannelGroup(ctx, resp.ChannelGroups[0].ID).Execute(); err != nil {
+		t.Fatalf("GetChannelGroup error = %v", err)
+	}
+	if got := base.DeactivatedUserGroupsFetchCount() - before; got != 0 {
+		t.Fatalf("listed deactivated user groups %d time(s), want 0", got)
+	}
+}
+
+func TestExternallyDeactivatedUserGroupResolvesUntilChannelGroupIsRemoved(t *testing.T) {
+	ctx := context.Background()
+	base := zulipmock.NewClient()
+	database := newTestDatabase(t)
+	client, err := channelgroup.NewClient(ctx, base, database,
+		channelgroup.WithLogger(slog.New(slog.DiscardHandler)),
+	)
+	if err != nil {
+		t.Fatalf("NewClient error = %v", err)
+	}
+	created, _, err := client.CreateChannelGroup(ctx).
+		Name("archived outside the bot").
+		InitialSubscribers(zulip.UserIDsAsPrincipals(101)).
+		Execute()
+	if err != nil {
+		t.Fatalf("CreateChannelGroup error = %v", err)
+	}
+
+	if _, _, err = base.DeactivateUserGroup(ctx, created.ChannelGroupID).Execute(); err != nil {
+		t.Fatalf("DeactivateUserGroup error = %v", err)
+	}
+
+	// Until the deactivation event is processed the channel group still exists
+	// locally; its name must resolve from the deactivated user group.
+	resp, _, err := client.GetChannelGroups(ctx).Execute()
+	if err != nil {
+		t.Fatalf("GetChannelGroups error = %v", err)
+	}
+	if len(resp.ChannelGroups) != 1 || resp.ChannelGroups[0].Name != "archived outside the bot" {
+		t.Fatalf("channel groups = %+v, want the deactivated group by name", resp.ChannelGroups)
+	}
+
+	client, err = channelgroup.NewClient(ctx, base, database,
+		channelgroup.WithLogger(slog.New(slog.DiscardHandler)),
+	)
+	if err != nil {
+		t.Fatalf("NewClient (re-init) error = %v", err)
+	}
+	_, _, err = client.GetChannelGroup(ctx, created.ChannelGroupID).Execute()
+	if !errors.Is(err, channelgroup.ErrChannelGroupNotFound) {
+		t.Fatalf("GetChannelGroup error = %v, want ErrChannelGroupNotFound", err)
 	}
 }

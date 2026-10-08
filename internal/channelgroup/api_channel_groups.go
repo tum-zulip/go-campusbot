@@ -699,9 +699,16 @@ func (s *channelGroups) removeDeletedUserGroupChannelGroup(
 	ctx context.Context,
 	userGroupID int64,
 ) error {
-	userGroups, err := s.userGroupsByID(ctx)
+	// Bypass the user-groups cache: it consumes its own event queue and may
+	// not have applied this deactivation yet, which would make the group look
+	// active and the event stale.
+	resp, _, err := s.base.GetUserGroups(ctx).IncludeDeactivatedGroups(true).Execute()
 	if err != nil {
 		return fmt.Errorf("verify deleted user group %d is still missing: %w", userGroupID, err)
+	}
+	userGroups := make(map[int64]zulip.UserGroup, len(resp.UserGroups))
+	for _, group := range resp.UserGroups {
+		userGroups[group.ID] = group
 	}
 	if group, ok := userGroups[userGroupID]; ok && !group.Deactivated {
 		s.logger.WarnContext(
@@ -2065,13 +2072,22 @@ func (s *channelGroups) withUserGroupNames(
 	if len(groups) == 0 {
 		return groups, nil
 	}
-	resp, _, err := s.base.GetUserGroups(ctx).IncludeDeactivatedGroups(true).Execute()
+	// The active user-group list is served by the user-groups cache; listing
+	// deactivated groups is not, and returns every group the realm ever had.
+	// Only fall back to it when a channel group's user group is not active,
+	// e.g. while a deactivation event has not been processed yet.
+	names, err := s.userGroupNames(ctx, false)
 	if err != nil {
 		return nil, err
 	}
-	names := make(map[int64]string, len(resp.UserGroups))
-	for _, userGroup := range resp.UserGroups {
-		names[userGroup.ID] = userGroup.Name
+	for _, group := range groups {
+		if _, ok := names[group.ID]; !ok {
+			names, err = s.userGroupNames(ctx, true)
+			if err != nil {
+				return nil, err
+			}
+			break
+		}
 	}
 	hydrated := make([]ChannelGroup, 0, len(groups))
 	for _, group := range groups {
@@ -2084,6 +2100,21 @@ func (s *channelGroups) withUserGroupNames(
 		hydrated = append(hydrated, group)
 	}
 	return hydrated, nil
+}
+
+func (s *channelGroups) userGroupNames(
+	ctx context.Context,
+	includeDeactivated bool,
+) (map[int64]string, error) {
+	resp, _, err := s.base.GetUserGroups(ctx).IncludeDeactivatedGroups(includeDeactivated).Execute()
+	if err != nil {
+		return nil, err
+	}
+	names := make(map[int64]string, len(resp.UserGroups))
+	for _, userGroup := range resp.UserGroups {
+		names[userGroup.ID] = userGroup.Name
+	}
+	return names, nil
 }
 
 func channelGroupFromDB(dbGroup channelgroupdb.ChannelGroup, channelIDs []int64) ChannelGroup {

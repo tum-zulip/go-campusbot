@@ -77,7 +77,10 @@ type state struct {
 	userGroups         map[int64]userGroupState
 	failures           map[Operation][]error
 	calls              map[Operation]int
-	serialization      *RequestSerialization
+	// deactivatedUserGroupsFetches counts GetUserGroups calls with
+	// include_deactivated_groups=true, which the user-groups cache cannot serve.
+	deactivatedUserGroupsFetches int
+	serialization                *RequestSerialization
 }
 
 type RequestSerialization struct {
@@ -348,6 +351,17 @@ func (c Client) CallCount(op Operation) int {
 	defer state.mu.Unlock()
 
 	return state.calls[op]
+}
+
+// DeactivatedUserGroupsFetchCount reports how many GetUserGroups calls asked
+// for deactivated groups too. Unlike other user-group listings, production
+// cannot serve these from the user-groups cache.
+func (c Client) DeactivatedUserGroupsFetchCount() int {
+	state := c.ensureState()
+	state.mu.Lock()
+	defer state.mu.Unlock()
+
+	return state.deactivatedUserGroupsFetches
 }
 
 func (c Client) SetOwnUser(user zulip.User) {
@@ -1679,8 +1693,15 @@ func (c Client) GetUserGroupsExecute(r users.GetUserGroupsRequest) (*users.GetUs
 		return nil, nil, err
 	}
 
+	includeDeactivated := requestBoolValue(r, "includeDeactivatedGroups")
+	if includeDeactivated {
+		state.deactivatedUserGroupsFetches++
+	}
 	groups := make([]zulip.UserGroup, 0, len(state.userGroups))
 	for _, group := range state.userGroups {
+		if group.group.Deactivated && !includeDeactivated {
+			continue
+		}
 		groups = append(groups, group.group)
 	}
 	sort.Slice(groups, func(i, j int) bool { return groups[i].ID < groups[j].ID })

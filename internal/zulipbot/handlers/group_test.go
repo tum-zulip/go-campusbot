@@ -173,6 +173,12 @@ func hasReaction(reactions []z.EmojiReaction, emojiName string, userID int64) bo
 // bot's own user, or inject failures (FailNext).
 func newChannelGroupClient(t *testing.T) (channelgroup.Client, zulipmock.Client) {
 	t.Helper()
+	client, base, _ := newChannelGroupClientWithDB(t)
+	return client, base
+}
+
+func newChannelGroupClientWithDB(t *testing.T) (channelgroup.Client, zulipmock.Client, *sql.DB) {
+	t.Helper()
 	db, err := sql.Open("sqlite3", ":memory:")
 	if err != nil {
 		t.Fatalf("open in-memory sqlite database: %v", err)
@@ -184,6 +190,14 @@ func newChannelGroupClient(t *testing.T) (channelgroup.Client, zulipmock.Client)
 	}
 	base := zulipmock.NewClient()
 	base.SetOwnUser(z.User{UserID: 77, Email: "bot@example.com", FullName: "Bot", IsBot: true})
+	return openChannelGroupClient(t, base, db), base, db
+}
+
+// openChannelGroupClient builds a channelgroup.Client on an existing database.
+// Opening a second client on the same database simulates a bot restart, which
+// reconciles local channel groups against Zulip.
+func openChannelGroupClient(t *testing.T, base zulipmock.Client, db *sql.DB) channelgroup.Client {
+	t.Helper()
 	client, err := channelgroup.NewClient(
 		context.Background(),
 		base,
@@ -193,7 +207,7 @@ func newChannelGroupClient(t *testing.T) (channelgroup.Client, zulipmock.Client)
 	if err != nil {
 		t.Fatalf("channelgroup.NewClient: %v", err)
 	}
-	return client, base
+	return client
 }
 
 // seedChannelGroup creates a Zulip user group and imports it locally so the
@@ -1369,8 +1383,9 @@ func TestGroupLsReportsGroupsMissingInZulip(t *testing.T) {
 
 // userGroupFetchesFor runs args against an environment with groupCount
 // mapped channel groups and returns how many times the Zulip user-group list
-// was fetched while handling it.
-func userGroupFetchesFor(t *testing.T, groupCount int, args any) int {
+// was fetched while handling it, and how many of those fetches included
+// deactivated groups (which the user-groups cache cannot serve).
+func userGroupFetchesFor(t *testing.T, groupCount int, args any) (int, int) {
 	t.Helper()
 	ctx := context.Background()
 	env, _ := newCourseTestEnv(t)
@@ -1382,10 +1397,12 @@ func userGroupFetchesFor(t *testing.T, groupCount int, args any) int {
 	setAnnouncementConfig(t, env.queries, seedChannel(t, env.base, "announcements"), "groups")
 
 	before := env.base.CallCount(zulipmock.OperationGetUserGroups)
+	beforeDeactivated := env.base.DeactivatedUserGroupsFetchCount()
 	if _, err := env.handler(allowAll{}).Handle(ctx, makeGroupRequest(args)); err != nil {
 		t.Fatalf("Handle(%T) failed: %v", args, err)
 	}
-	return env.base.CallCount(zulipmock.OperationGetUserGroups) - before
+	return env.base.CallCount(zulipmock.OperationGetUserGroups) - before,
+		env.base.DeactivatedUserGroupsFetchCount() - beforeDeactivated
 }
 
 func TestGroupCommandsDoNotFetchUserGroupsPerMapping(t *testing.T) {
@@ -1401,10 +1418,13 @@ func TestGroupCommandsDoNotFetchUserGroupsPerMapping(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			few := userGroupFetchesFor(t, 2, tc.args)
-			many := userGroupFetchesFor(t, 10, tc.args)
+			few, _ := userGroupFetchesFor(t, 2, tc.args)
+			many, uncached := userGroupFetchesFor(t, 10, tc.args)
 			if few != many {
 				t.Errorf("user-group fetches grew with mapping count: %d for 2 groups, %d for 10", few, many)
+			}
+			if uncached != 0 {
+				t.Errorf("listed deactivated user groups %d time(s), want 0", uncached)
 			}
 		})
 	}
