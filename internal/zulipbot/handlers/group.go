@@ -100,6 +100,34 @@ func (h *GroupHandler) emojiGroupMappingByShortName(
 	return namedEmojiGroupMapping{EmojiGroupMapping: row, ShortName: shortName}, true, nil
 }
 
+// archivedEmojiGroupMappingsByShortName returns the mappings of channel groups
+// whose Zulip user group named shortName was archived outside the bot. Names of
+// archived groups need not be unique, so there may be several.
+func (h *GroupHandler) archivedEmojiGroupMappingsByShortName(
+	ctx context.Context,
+	shortName string,
+) ([]namedEmojiGroupMapping, error) {
+	resp, _, err := h.client.GetUserGroups(ctx).IncludeDeactivatedGroups(true).Execute()
+	if err != nil {
+		return nil, fmt.Errorf("list Zulip user groups: %w", err)
+	}
+	var mappings []namedEmojiGroupMapping
+	for _, group := range resp.UserGroups {
+		if group.Name != shortName || !group.Deactivated || group.IsSystemGroup {
+			continue
+		}
+		row, err := h.queries.GetEmojiGroupMappingByChannelGroupID(ctx, group.ID)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("get emoji group mapping by channel group %d: %w", group.ID, err)
+		}
+		mappings = append(mappings, namedEmojiGroupMapping{EmojiGroupMapping: row, ShortName: shortName})
+	}
+	return mappings, nil
+}
+
 func (h *GroupHandler) channelGroupIDByUserGroupName(
 	ctx context.Context,
 	name string,
@@ -114,20 +142,6 @@ func (h *GroupHandler) channelGroupIDByUserGroupName(
 		}
 	}
 	return 0, false, nil
-}
-
-func (h *GroupHandler) shortNameForChannelGroup(
-	ctx context.Context,
-	channelGroupID int64,
-) (string, error) {
-	resp, _, err := h.client.GetChannelGroup(ctx, channelGroupID).Execute()
-	if err != nil {
-		if errors.Is(err, channelgroup.ErrChannelGroupNotFound) {
-			return "missing channel group", nil
-		}
-		return "", fmt.Errorf("get channel group %d: %w", channelGroupID, err)
-	}
-	return resp.ChannelGroup.Name, nil
 }
 
 func (h *GroupHandler) zulipUserGroupMention(ctx context.Context, groupID int64) (string, error) {
@@ -162,7 +176,7 @@ func (h *GroupHandler) namedEmojiGroupMappings(
 	if err != nil {
 		return nil, err
 	}
-	return nameEmojiGroupMappings(mappings, groups), nil
+	return nameEmojiGroupMappings(mappings, groups, nil), nil
 }
 
 // channelGroupsForMappings loads the channel groups referenced by mappings,
@@ -207,15 +221,21 @@ func (h *GroupHandler) channelGroupsForMappings(
 	return groups, nil
 }
 
+// nameEmojiGroupMappings names mappings after their channel group, or after
+// the archived Zulip user group backing it once the channel group is gone.
+// archived may be nil.
 func nameEmojiGroupMappings(
 	mappings []storagedb.EmojiGroupMapping,
 	groups map[int64]channelgroup.ChannelGroup,
+	archived map[int64]zulip.UserGroup,
 ) []namedEmojiGroupMapping {
 	named := make([]namedEmojiGroupMapping, 0, len(mappings))
 	for _, mapping := range mappings {
 		shortName := "missing channel group"
 		if group, ok := groups[mapping.ChannelGroupID]; ok {
 			shortName = group.Name
+		} else if userGroup, ok := archived[mapping.ChannelGroupID]; ok {
+			shortName = userGroup.Name
 		}
 		named = append(named, namedEmojiGroupMapping{
 			EmojiGroupMapping: mapping,
@@ -224,6 +244,45 @@ func nameEmojiGroupMappings(
 	}
 	sort.Slice(named, func(i, j int) bool { return named[i].ShortName < named[j].ShortName })
 	return named
+}
+
+// archivedUserGroups returns the archived Zulip user groups backing mappings
+// whose channel group no longer exists. A channel group shares its ID with its
+// user group, and archived user groups keep their name, so admin views can
+// still name such mappings. This lists deactivated user groups, which is not
+// cached, so it only runs when such mappings exist.
+func (h *GroupHandler) archivedUserGroups(
+	ctx context.Context,
+	mappings []storagedb.EmojiGroupMapping,
+	groups map[int64]channelgroup.ChannelGroup,
+) (map[int64]zulip.UserGroup, error) {
+	missing := make(map[int64]struct{})
+	for _, m := range mappings {
+		if _, ok := groups[m.ChannelGroupID]; !ok {
+			missing[m.ChannelGroupID] = struct{}{}
+		}
+	}
+	archived := make(map[int64]zulip.UserGroup)
+	if len(missing) == 0 {
+		return archived, nil
+	}
+	resp, _, err := h.client.GetUserGroups(ctx).IncludeDeactivatedGroups(true).Execute()
+	if err != nil {
+		return nil, fmt.Errorf("list Zulip user groups: %w", err)
+	}
+	for _, group := range resp.UserGroups {
+		if _, ok := missing[group.ID]; ok && group.Deactivated {
+			archived[group.ID] = group
+		}
+	}
+	return archived, nil
+}
+
+// channelGroupAvailable reports whether users can subscribe to the channel
+// group: it exists and its Zulip user group was not archived outside the bot.
+func channelGroupAvailable(groups map[int64]channelgroup.ChannelGroup, channelGroupID int64) bool {
+	group, ok := groups[channelGroupID]
+	return ok && !group.Archived
 }
 
 func announcementMappings(mappings []namedEmojiGroupMapping) []AnnouncementMapping {
@@ -491,9 +550,7 @@ func (h *GroupHandler) handleRemove(
 		return command.Result{}, err
 	}
 	if !found {
-		return command.Result{}, command.NewUserError(
-			fmt.Sprintf("Unknown channel group %q.", shortName),
-		)
+		return h.removeArchivedGroupMappings(ctx, shortName)
 	}
 
 	groupResp, _, err := h.client.GetChannelGroup(ctx, mapping.ChannelGroupID).Execute()
@@ -553,6 +610,41 @@ func (h *GroupHandler) handleRemove(
 		}, nil
 	}
 	return command.Result{Content: fmt.Sprintf("Removed channel group **%s**.", shortName)}, nil
+}
+
+// removeArchivedGroupMappings removes the mappings of channel groups whose
+// Zulip user group named shortName was archived outside the bot. The user
+// group is already archived and the channel group is removed by the
+// channel-group client, so only the mappings are left to clean up.
+func (h *GroupHandler) removeArchivedGroupMappings(
+	ctx context.Context,
+	shortName string,
+) (command.Result, error) {
+	archived, err := h.archivedEmojiGroupMappingsByShortName(ctx, shortName)
+	if err != nil {
+		return command.Result{}, err
+	}
+	if len(archived) == 0 {
+		return command.Result{}, command.NewUserError(
+			fmt.Sprintf("Unknown channel group %q.", shortName),
+		)
+	}
+	for _, m := range archived {
+		if err := h.queries.DeleteEmojiGroupMappingsByChannelGroupID(ctx, m.ChannelGroupID); err != nil {
+			return command.Result{}, fmt.Errorf(
+				"delete emoji group mapping(s) for channel group %d: %w",
+				m.ChannelGroupID,
+				err,
+			)
+		}
+	}
+
+	h.triggerAnnouncementUpdate(ctx)
+
+	return command.Result{Content: fmt.Sprintf(
+		"Removed the mapping for **%s**. Its Zulip user group was already archived, so its channels were left as they are.",
+		shortName,
+	)}, nil
 }
 
 func (h *GroupHandler) archiveGroupChannelsAndFolder(
@@ -990,16 +1082,21 @@ func (h *GroupHandler) handleLs(ctx context.Context) (command.Result, error) {
 	if err != nil {
 		return command.Result{}, err
 	}
-	named := nameEmojiGroupMappings(mappings, groups)
+	var available []storagedb.EmojiGroupMapping
+	for _, m := range mappings {
+		if channelGroupAvailable(groups, m.ChannelGroupID) {
+			available = append(available, m)
+		}
+	}
+	if len(available) == 0 {
+		return command.Result{Content: "No channel groups available."}, nil
+	}
 
 	var b strings.Builder
 	b.WriteString("Available channel groups:\n")
-	for _, m := range named {
-		if group, ok := groups[m.ChannelGroupID]; ok {
-			fmt.Fprintf(&b, "- `%s` :%s: (%d channel(s))\n", m.ShortName, m.EmojiName, len(group.ChannelIDs))
-		} else {
-			fmt.Fprintf(&b, "- `%s` :%s:\n", m.ShortName, m.EmojiName)
-		}
+	for _, m := range nameEmojiGroupMappings(available, groups, nil) {
+		channelCount := len(groups[m.ChannelGroupID].ChannelIDs)
+		fmt.Fprintf(&b, "- `%s` :%s: (%d channel(s))\n", m.ShortName, m.EmojiName, channelCount)
 	}
 	b.WriteString("\nSubscribe with `group subscribe <short_name>`.")
 	return command.Result{Content: strings.TrimSpace(b.String())}, nil
@@ -1099,7 +1196,11 @@ func (h *GroupHandler) handleMappingList(
 	if err != nil {
 		return command.Result{}, err
 	}
-	named := nameEmojiGroupMappings(mappings, groups)
+	archived, err := h.archivedUserGroups(ctx, mappings, groups)
+	if err != nil {
+		return command.Result{}, err
+	}
+	named := nameEmojiGroupMappings(mappings, groups, archived)
 
 	var b strings.Builder
 	b.WriteString("Emoji→group mappings:\n")
@@ -1109,40 +1210,22 @@ func (h *GroupHandler) handleMappingList(
 			status = "disabled"
 		}
 		annotation := ""
-		_, exists := groups[m.ChannelGroupID]
-		if !exists {
+		group, exists := groups[m.ChannelGroupID]
+		_, archivedUserGroup := archived[m.ChannelGroupID]
+		switch {
+		case exists && group.Archived, !exists && archivedUserGroup:
+			annotation = " [archived in Zulip]"
+		case !exists:
 			annotation = " [missing channel group]"
 		}
 		groupRef := fmt.Sprintf("`%s`", m.ShortName)
-		if exists {
+		if channelGroupAvailable(groups, m.ChannelGroupID) {
 			groupRef = silentZulipUserGroupMention(m.ShortName)
 		}
 		fmt.Fprintf(&b, "- `%s`: :%s: → %s [%s]%s\n",
 			m.ShortName, m.EmojiName, groupRef, status, annotation)
 	}
 	return command.Result{Content: strings.TrimSpace(b.String())}, nil
-}
-
-// validateEnabledMappings returns the list of enabled mappings that reference a
-// missing channel group.
-func (h *GroupHandler) validateEnabledMappings(
-	ctx context.Context,
-) ([]storagedb.EmojiGroupMapping, error) {
-	mappings, err := h.queries.ListEnabledEmojiGroupMappings(ctx)
-	if err != nil {
-		return nil, err
-	}
-	groups, err := h.channelGroupsForMappings(ctx, mappings)
-	if err != nil {
-		return nil, err
-	}
-	var invalid []storagedb.EmojiGroupMapping
-	for _, m := range mappings {
-		if _, ok := groups[m.ChannelGroupID]; !ok {
-			invalid = append(invalid, m)
-		}
-	}
-	return invalid, nil
 }
 
 func (h *GroupHandler) handleMappingSet(
@@ -1315,16 +1398,29 @@ func (h *GroupHandler) handleMappingDisable(
 	if err != nil {
 		return command.Result{}, err
 	}
+	channelGroupIDs := []int64{channelGroupID}
 	if !found {
-		return command.Result{}, command.NewUserError(fmt.Sprintf("Unknown channel group %q.", shortName))
+		archived, err := h.archivedEmojiGroupMappingsByShortName(ctx, shortName)
+		if err != nil {
+			return command.Result{}, err
+		}
+		if len(archived) == 0 {
+			return command.Result{}, command.NewUserError(fmt.Sprintf("Unknown channel group %q.", shortName))
+		}
+		channelGroupIDs = channelGroupIDs[:0]
+		for _, m := range archived {
+			channelGroupIDs = append(channelGroupIDs, m.ChannelGroupID)
+		}
 	}
 
-	if err := h.queries.SetEmojiGroupMappingEnabled(ctx, storagedb.SetEmojiGroupMappingEnabledParams{
-		Enabled:        0,
-		UpdatedAt:      storagedb.FormatTime(time.Now()),
-		ChannelGroupID: channelGroupID,
-	}); err != nil {
-		return command.Result{}, fmt.Errorf("disable emoji group mapping: %w", err)
+	for _, channelGroupID := range channelGroupIDs {
+		if err := h.queries.SetEmojiGroupMappingEnabled(ctx, storagedb.SetEmojiGroupMappingEnabledParams{
+			Enabled:        0,
+			UpdatedAt:      storagedb.FormatTime(time.Now()),
+			ChannelGroupID: channelGroupID,
+		}); err != nil {
+			return command.Result{}, fmt.Errorf("disable emoji group mapping: %w", err)
+		}
 	}
 
 	h.triggerAnnouncementUpdate(ctx)
@@ -1342,29 +1438,6 @@ func (h *GroupHandler) runAnnounce(
 	if err := h.auth.Check(ctx, req.Actor, command.PermAdmin); err != nil {
 		return command.Result{}, command.NewUserError("permission denied")
 	}
-	invalid, err := h.validateEnabledMappings(ctx)
-	if err != nil {
-		return command.Result{}, fmt.Errorf("validate emoji mappings: %w", err)
-	}
-	if len(invalid) > 0 {
-		var refs []string
-		for _, m := range invalid {
-			shortName, nameErr := h.shortNameForChannelGroup(ctx, m.ChannelGroupID)
-			if nameErr != nil {
-				shortName = "unknown-name"
-			}
-			refs = append(
-				refs,
-				shortName,
-			)
-		}
-		return command.Result{}, command.NewUserError(fmt.Sprintf(
-			"Cannot update announcement: enabled mapping(s) reference missing channel group(s): %s. "+
-				"Disable or fix the mapping, or create/import the channel group first.",
-			strings.Join(refs, "; "),
-		))
-	}
-
 	state, ok, err := h.announcementState(ctx)
 	if err != nil {
 		return command.Result{}, fmt.Errorf("read announcement state: %w", err)
@@ -1395,11 +1468,31 @@ func (h *GroupHandler) runAnnounce(
 		target = &announceTarget{channelID: channelID, topic: topic}
 	}
 
-	if err := h.ensureAnnouncement(ctx, target); err != nil {
+	skipped, err := h.ensureAnnouncement(ctx, target)
+	if err != nil {
 		return command.Result{}, fmt.Errorf("send/update announcement: %w", err)
 	}
+	if len(skipped) == 0 {
+		return command.Result{Content: "Announcement updated."}, nil
+	}
 
-	return command.Result{Content: "Announcement updated."}, nil
+	skippedMappings := make([]storagedb.EmojiGroupMapping, 0, len(skipped))
+	for _, m := range skipped {
+		skippedMappings = append(skippedMappings, m.EmojiGroupMapping)
+	}
+	archived, err := h.archivedUserGroups(ctx, skippedMappings, nil)
+	if err != nil {
+		return command.Result{}, err
+	}
+	refs := make([]string, 0, len(skipped))
+	for _, m := range nameEmojiGroupMappings(skippedMappings, nil, archived) {
+		refs = append(refs, fmt.Sprintf("`%s` :%s:", m.ShortName, m.EmojiName))
+	}
+	return command.Result{Content: fmt.Sprintf(
+		"Announcement updated. Left out enabled mapping(s) whose channel group was archived or is missing: %s. "+
+			"Remove them with `group remove <short_name>` or `group mapping disable <short_name>`.",
+		strings.Join(refs, ", "),
+	)}, nil
 }
 
 func (h *GroupHandler) handleAnnounceSetMessage(
@@ -1852,9 +1945,37 @@ func (h *GroupHandler) triggerAnnouncementUpdate(ctx context.Context) {
 		target = &announceTarget{channelID: channelID, topic: topic}
 	}
 
-	if err := h.ensureAnnouncement(ctx, target); err != nil {
+	if _, err := h.ensureAnnouncement(ctx, target); err != nil {
 		h.logger.WarnContext(ctx, "announcement update failed", "error", err)
 	}
+}
+
+// announcedMappings splits the enabled mappings into those to announce and
+// those whose channel group was archived or is missing.
+func (h *GroupHandler) announcedMappings(ctx context.Context) (
+	[]storagedb.EmojiGroupMapping,
+	[]AnnouncementMapping,
+	[]namedEmojiGroupMapping,
+	error,
+) {
+	enabled, err := h.queries.ListEnabledEmojiGroupMappings(ctx)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("list emoji group mappings: %w", err)
+	}
+	groups, err := h.channelGroupsForMappings(ctx, enabled)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("hydrate emoji group mapping names: %w", err)
+	}
+	var mappings []storagedb.EmojiGroupMapping
+	var skipped []namedEmojiGroupMapping
+	for _, m := range nameEmojiGroupMappings(enabled, groups, nil) {
+		if channelGroupAvailable(groups, m.ChannelGroupID) {
+			mappings = append(mappings, m.EmojiGroupMapping)
+		} else {
+			skipped = append(skipped, m)
+		}
+	}
+	return mappings, announcementMappings(nameEmojiGroupMappings(mappings, groups, nil)), skipped, nil
 }
 
 // ensureAnnouncement sends or edits the channel-group announcement message.
@@ -1864,33 +1985,32 @@ func (h *GroupHandler) triggerAnnouncementUpdate(ctx context.Context) {
 //   - If a message_id is stored: edit the message when the rendered content has
 //     changed; otherwise leave it alone.
 //
-// After a send or edit, the bot's reactions are reconciled with the enabled mappings.
-// Reaction errors are logged but never propagated.
+// Enabled mappings whose channel group was archived or is missing are left out
+// and returned. After a send or edit, the bot's reactions are reconciled with
+// the announced mappings. Reaction errors are logged but never propagated.
 //
-//nolint:gocognit,nestif // send-vs-edit branches share state and are clearer than extracting partial flows
-func (h *GroupHandler) ensureAnnouncement(ctx context.Context, target *announceTarget) error {
-	mappings, err := h.queries.ListEnabledEmojiGroupMappings(ctx)
+//nolint:nestif // send-vs-edit branches share state and are clearer than extracting partial flows
+func (h *GroupHandler) ensureAnnouncement(
+	ctx context.Context,
+	target *announceTarget,
+) ([]namedEmojiGroupMapping, error) {
+	mappings, announcement, skipped, err := h.announcedMappings(ctx)
 	if err != nil {
-		return fmt.Errorf("list emoji group mappings: %w", err)
+		return nil, err
 	}
-	namedMappings, err := h.namedEmojiGroupMappings(ctx, mappings)
-	if err != nil {
-		return fmt.Errorf("hydrate emoji group mapping names: %w", err)
-	}
-	announcement := announcementMappings(namedMappings)
 
 	content := RenderAnnouncement(announcement)
 	hash := AnnouncementContentHash(announcement)
 
 	state, ok, err := h.announcementState(ctx)
 	if err != nil {
-		return fmt.Errorf("get announcement state: %w", err)
+		return nil, fmt.Errorf("get announcement state: %w", err)
 	}
 
 	var messageID int64
 	if !ok || !state.MessageID.Valid {
 		if target == nil || target.channelID <= 0 || target.topic == "" {
-			return errors.New("no announcement message_id stored and no channel/topic provided: " +
+			return nil, errors.New("no announcement message_id stored and no channel/topic provided: " +
 				"run `group announce set-message <id>` to migrate from an existing message, " +
 				"or set announcement.channel_id and announcement.topic to create a new one",
 			)
@@ -1901,24 +2021,24 @@ func (h *GroupHandler) ensureAnnouncement(ctx context.Context, target *announceT
 			Content(content).
 			Execute()
 		if err != nil {
-			return fmt.Errorf("send announcement message: %w", err)
+			return nil, fmt.Errorf("send announcement message: %w", err)
 		}
 		if resp == nil {
-			return errors.New("send announcement message: empty response")
+			return nil, errors.New("send announcement message: empty response")
 		}
 		messageID = resp.ID
 		if err := h.saveAnnouncementState(ctx, sql.NullInt64{Int64: messageID, Valid: true}, hash); err != nil {
-			return fmt.Errorf("save announcement state: %w", err)
+			return nil, fmt.Errorf("save announcement state: %w", err)
 		}
 		h.logger.InfoContext(ctx, "sent new announcement message", "message_id", messageID)
 	} else {
 		messageID = state.MessageID.Int64
 		if state.ContentHash != hash {
 			if _, _, err := h.client.UpdateMessage(ctx, messageID).Content(content).Execute(); err != nil {
-				return fmt.Errorf("edit announcement message %d: %w", messageID, err)
+				return nil, fmt.Errorf("edit announcement message %d: %w", messageID, err)
 			}
 			if err := h.saveAnnouncementState(ctx, sql.NullInt64{Int64: messageID, Valid: true}, hash); err != nil {
-				return fmt.Errorf("save announcement state: %w", err)
+				return nil, fmt.Errorf("save announcement state: %w", err)
 			}
 			h.logger.InfoContext(ctx, "updated announcement message", "message_id", messageID)
 		} else {
@@ -1927,7 +2047,7 @@ func (h *GroupHandler) ensureAnnouncement(ctx context.Context, target *announceT
 	}
 
 	h.syncAnnouncementReactions(ctx, messageID, mappings)
-	return nil
+	return skipped, nil
 }
 
 //nolint:gocognit,funlen // reaction reconciliation is necessarily complex due to Zulip's reaction model and the need to minimize API calls

@@ -1200,7 +1200,7 @@ func TestGroupAnnounceNoConfig(t *testing.T) {
 	}
 }
 
-func TestGroupAnnounceRejectsInvalidEnabledMapping(t *testing.T) {
+func TestGroupAnnounceLeavesOutMissingChannelGroups(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	env := newGroupTestEnv(t)
@@ -1208,29 +1208,48 @@ func TestGroupAnnounceRejectsInvalidEnabledMapping(t *testing.T) {
 	wiID := seedChannelGroup(t, env.client, env.base, "WI")
 	seedGroupMapping(t, env.queries, "PGDP", "pgdp", 9999)
 	seedGroupMapping(t, env.queries, "WI", "wi", wiID)
-
-	msgID := int64(555)
-	if err := saveAnnouncementState(ctx, env.queries, &msgID); err != nil {
-		t.Fatalf("SaveAnnouncementState: %v", err)
-	}
-	setAnnouncementConfig(t, env.queries, 1, "t")
+	setAnnouncementConfig(t, env.queries, seedChannel(t, env.base, "announcements"), "groups")
 
 	h := env.handler(allowAll{})
-	_, err := h.Handle(ctx, makeGroupRequest(handlers.GroupAnnounceArgs{}))
-	var userErr command.UserError
-	if !errors.As(err, &userErr) {
-		t.Fatalf(
-			"expected UserError when an enabled mapping references a missing channel group, got %T: %v",
-			err,
-			err,
-		)
+	result, err := h.Handle(ctx, makeGroupRequest(handlers.GroupAnnounceArgs{}))
+	if err != nil {
+		t.Fatalf("Handle() failed: %v", err)
 	}
-	if !strings.Contains(userErr.Message, "missing channel group") ||
-		strings.Contains(userErr.Message, "9999") {
-		t.Errorf("error should list invalid mapping by name without raw IDs, got: %q", userErr.Message)
+	if !strings.Contains(result.Content, "`missing channel group` :pgdp:") ||
+		strings.Contains(result.Content, "9999") {
+		t.Errorf("reply should list the left-out mapping without raw IDs, got: %q", result.Content)
 	}
-	if got := announcementHash(t, env.queries); got != "" {
-		t.Errorf("expected no announcement update when validation fails, got hash %q", got)
+	assertAnnouncement(t, env, []string{"wi"}, []string{"pgdp"})
+}
+
+// assertAnnouncement checks that the announcement message lists and the bot
+// reacts with exactly the want emojis and none of the absent ones.
+func assertAnnouncement(t *testing.T, env *groupTestEnv, want, absent []string) {
+	t.Helper()
+	state, err := env.queries.GetAnnouncementState(context.Background())
+	if err != nil {
+		t.Fatalf("GetAnnouncementState: %v", err)
+	}
+	sent := env.base.LastSentMessage()
+	if sent == nil {
+		t.Fatal("no announcement message sent")
+	}
+	reactions := env.base.MessageReactions(state.MessageID.Int64)
+	for _, emoji := range want {
+		if !strings.Contains(sent.Content, ":"+emoji+":") {
+			t.Errorf("announcement does not list :%s:, got:\n%s", emoji, sent.Content)
+		}
+		if !hasReaction(reactions, emoji, 77) {
+			t.Errorf("bot did not react with :%s:, got %#v", emoji, reactions)
+		}
+	}
+	for _, emoji := range absent {
+		if strings.Contains(sent.Content, ":"+emoji+":") {
+			t.Errorf("announcement lists :%s:, got:\n%s", emoji, sent.Content)
+		}
+		if hasReaction(reactions, emoji, 77) {
+			t.Errorf("bot reacted with :%s:, got %#v", emoji, reactions)
+		}
 	}
 }
 
@@ -1362,7 +1381,7 @@ func TestGroupLsListsChannelCounts(t *testing.T) {
 	}
 }
 
-func TestGroupLsReportsGroupsMissingInZulip(t *testing.T) {
+func TestGroupLsHidesGroupsMissingInZulip(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	env, _ := newCourseTestEnv(t)
@@ -1374,10 +1393,8 @@ func TestGroupLsReportsGroupsMissingInZulip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Handle() failed: %v", err)
 	}
-	for _, want := range []string{"- `missing channel group` :pgdp:", "- `WI` :wi: (0 channel(s))"} {
-		if !strings.Contains(result.Content, want) {
-			t.Errorf("expected %q in output, got:\n%s", want, result.Content)
-		}
+	if !strings.Contains(result.Content, "- `WI` :wi: (0 channel(s))") || strings.Contains(result.Content, "pgdp") {
+		t.Errorf("expected only WI to be listed, got:\n%s", result.Content)
 	}
 }
 
@@ -1425,6 +1442,181 @@ func TestGroupCommandsDoNotFetchUserGroupsPerMapping(t *testing.T) {
 			}
 			if uncached != 0 {
 				t.Errorf("listed deactivated user groups %d time(s), want 0", uncached)
+			}
+		})
+	}
+}
+
+// newExternallyArchivedGroupEnv sets up the mapped channel groups WI and PGDP
+// and then archives PGDP's Zulip user group directly, the way an admin would
+// in the Zulip UI, without going through the bot. With reconciled, the bot is
+// restarted so that the channel-group client removes PGDP locally, as it
+// would on the deactivation event; otherwise the stale local channel group is
+// kept.
+func newExternallyArchivedGroupEnv(t *testing.T, reconciled bool) (*groupTestEnv, int64) {
+	t.Helper()
+	client, base, channelGroupDB := newChannelGroupClientWithDB(t)
+	db, queries := openGroupTestStorage(t)
+	env := &groupTestEnv{db: db, queries: queries, client: client, base: base}
+	wiID := seedChannelGroup(t, env.client, env.base, "WI")
+	seedGroupMapping(t, env.queries, "WI", "wi", wiID)
+	pgdpID := seedChannelGroup(t, env.client, env.base, "PGDP")
+	seedGroupMapping(t, env.queries, "PGDP", "pgdp", pgdpID)
+	setAnnouncementConfig(t, env.queries, seedChannel(t, env.base, "announcements"), "groups")
+
+	if _, _, err := env.base.DeactivateUserGroup(context.Background(), pgdpID).Execute(); err != nil {
+		t.Fatalf("DeactivateUserGroup(%d): %v", pgdpID, err)
+	}
+	if reconciled {
+		env.client = openChannelGroupClient(t, env.base, channelGroupDB)
+		if _, _, err := env.client.GetChannelGroup(context.Background(), pgdpID).Execute(); !errors.Is(
+			err,
+			channelgroup.ErrChannelGroupNotFound,
+		) {
+			t.Fatalf("GetChannelGroup(%d) after restart error = %v, want ErrChannelGroupNotFound", pgdpID, err)
+		}
+	}
+	return env, pgdpID
+}
+
+// externalArchiveStates names the states newExternallyArchivedGroupEnv can
+// set up, mapped to its reconciled argument.
+var externalArchiveStates = map[string]bool{
+	"before reconciliation": false,
+	"after reconciliation":  true,
+}
+
+func TestExternallyArchivedGroupIsHiddenFromUsers(t *testing.T) {
+	t.Parallel()
+	for name, reconciled := range externalArchiveStates {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			env, _ := newExternallyArchivedGroupEnv(t, reconciled)
+			ctx := context.Background()
+			h := env.handler(allowAll{})
+
+			result, err := h.Handle(ctx, makeGroupRequest(handlers.GroupLsArgs{}))
+			if err != nil {
+				t.Fatalf("Handle(ls) failed: %v", err)
+			}
+			if !strings.Contains(result.Content, "`WI`") || strings.Contains(result.Content, "PGDP") ||
+				strings.Contains(result.Content, "pgdp") {
+				t.Errorf("expected ls to list only WI, got:\n%s", result.Content)
+			}
+
+			for _, args := range []any{
+				handlers.GroupSubscribeArgs{ShortName: "PGDP"},
+				handlers.GroupShowArgs{ShortName: "PGDP"},
+			} {
+				_, err := h.Handle(ctx, makeGroupRequest(args))
+				var userErr command.UserError
+				if !errors.As(err, &userErr) || !strings.Contains(userErr.Message, "Unknown channel group") {
+					t.Errorf("Handle(%T) error = %v, want unknown channel group", args, err)
+				}
+			}
+		})
+	}
+}
+
+func TestExternallyArchivedGroupIsLeftOutOfAnnouncement(t *testing.T) {
+	t.Parallel()
+	for name, reconciled := range externalArchiveStates {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			env, _ := newExternallyArchivedGroupEnv(t, reconciled)
+			result, err := env.handler(allowAll{}).Handle(
+				context.Background(),
+				makeGroupRequest(handlers.GroupAnnounceArgs{}),
+			)
+			if err != nil {
+				t.Fatalf("Handle(announce) failed: %v", err)
+			}
+			if !strings.Contains(result.Content, "Left out") || !strings.Contains(result.Content, "`PGDP` :pgdp:") {
+				t.Errorf("expected announce to report PGDP as left out, got:\n%s", result.Content)
+			}
+			assertAnnouncement(t, env, []string{"wi"}, []string{"pgdp"})
+		})
+	}
+}
+
+func TestExternallyArchivedGroupIsFlaggedInMappingList(t *testing.T) {
+	t.Parallel()
+	for name, reconciled := range externalArchiveStates {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			env, _ := newExternallyArchivedGroupEnv(t, reconciled)
+			result, err := env.handler(allowAll{}).Handle(
+				context.Background(),
+				makeGroupRequest(handlers.GroupMappingListArgs{}),
+			)
+			if err != nil {
+				t.Fatalf("Handle(mapping list) failed: %v", err)
+			}
+			for _, want := range []string{
+				"- `PGDP`: :pgdp: → `PGDP` [enabled] [archived in Zulip]",
+				"- `WI`: :wi: → @_*WI* [enabled]\n",
+			} {
+				if !strings.Contains(result.Content+"\n", want) {
+					t.Errorf("expected %q in mapping list, got:\n%s", want, result.Content)
+				}
+			}
+		})
+	}
+}
+
+func TestExternallyArchivedGroupMappingCanBeDisabled(t *testing.T) {
+	t.Parallel()
+	for name, reconciled := range externalArchiveStates {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			env, pgdpID := newExternallyArchivedGroupEnv(t, reconciled)
+			ctx := context.Background()
+			if _, err := env.handler(allowAll{}).Handle(
+				ctx,
+				makeGroupRequest(handlers.GroupMappingDisableArgs{ShortName: "PGDP"}),
+			); err != nil {
+				t.Fatalf("Handle(mapping disable) failed: %v", err)
+			}
+			mappings, err := env.queries.ListAllEmojiGroupMappings(ctx)
+			if err != nil {
+				t.Fatalf("ListAllEmojiGroupMappings: %v", err)
+			}
+			for _, mapping := range mappings {
+				if mapping.ChannelGroupID == pgdpID && mapping.Enabled != 0 {
+					t.Error("expected the archived group's mapping to be disabled")
+				}
+			}
+			assertAnnouncement(t, env, []string{"wi"}, []string{"pgdp"})
+		})
+	}
+}
+
+func TestExternallyArchivedGroupMappingCanBeRemoved(t *testing.T) {
+	t.Parallel()
+	for name, reconciled := range externalArchiveStates {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			env, pgdpID := newExternallyArchivedGroupEnv(t, reconciled)
+			ctx := context.Background()
+			h := env.handler(allowAll{})
+			result, err := h.Handle(ctx, makeGroupRequest(handlers.GroupRemoveArgs{ShortName: "PGDP"}))
+			if err != nil {
+				t.Fatalf("Handle(remove) failed: %v", err)
+			}
+			if !strings.Contains(result.Content, "already archived") {
+				t.Errorf("expected remove to explain only the mapping was removed, got: %q", result.Content)
+			}
+			if _, err := env.queries.GetEmojiGroupMappingByChannelGroupID(ctx, pgdpID); !errors.Is(err, sql.ErrNoRows) {
+				t.Errorf("GetEmojiGroupMappingByChannelGroupID error = %v, want sql.ErrNoRows", err)
+			}
+			assertAnnouncement(t, env, []string{"wi"}, []string{"pgdp"})
+
+			result, err = h.Handle(ctx, makeGroupRequest(handlers.GroupAnnounceArgs{}))
+			if err != nil {
+				t.Fatalf("Handle(announce) failed: %v", err)
+			}
+			if result.Content != "Announcement updated." {
+				t.Errorf("expected nothing left out after removal, got: %q", result.Content)
 			}
 		})
 	}

@@ -243,7 +243,7 @@ func (s *channelGroups) initializeChannelGroups(ctx context.Context) error {
 		return nil
 	}
 
-	userGroups, err := s.userGroupsByID(ctx)
+	userGroups, err := s.userGroupsByID(ctx, false)
 	if err != nil {
 		return err
 	}
@@ -702,13 +702,9 @@ func (s *channelGroups) removeDeletedUserGroupChannelGroup(
 	// Bypass the user-groups cache: it consumes its own event queue and may
 	// not have applied this deactivation yet, which would make the group look
 	// active and the event stale.
-	resp, _, err := s.base.GetUserGroups(ctx).IncludeDeactivatedGroups(true).Execute()
+	userGroups, err := s.userGroupsByID(ctx, true)
 	if err != nil {
 		return fmt.Errorf("verify deleted user group %d is still missing: %w", userGroupID, err)
-	}
-	userGroups := make(map[int64]zulip.UserGroup, len(resp.UserGroups))
-	for _, group := range resp.UserGroups {
-		userGroups[group.ID] = group
 	}
 	if group, ok := userGroups[userGroupID]; ok && !group.Deactivated {
 		s.logger.WarnContext(
@@ -2030,8 +2026,11 @@ func (s *channelGroups) userGroupMembers(ctx context.Context, userGroupID int64)
 	return uniqueInt64s(resp.Members), nil
 }
 
-func (s *channelGroups) userGroupsByID(ctx context.Context) (map[int64]zulip.UserGroup, error) {
-	resp, _, err := s.base.GetUserGroups(ctx).IncludeDeactivatedGroups(false).Execute()
+func (s *channelGroups) userGroupsByID(
+	ctx context.Context,
+	includeDeactivated bool,
+) (map[int64]zulip.UserGroup, error) {
+	resp, _, err := s.base.GetUserGroups(ctx).IncludeDeactivatedGroups(includeDeactivated).Execute()
 	if err != nil {
 		return nil, err
 	}
@@ -2075,14 +2074,14 @@ func (s *channelGroups) withUserGroupNames(
 	// The active user-group list is served by the user-groups cache; listing
 	// deactivated groups is not, and returns every group the realm ever had.
 	// Only fall back to it when a channel group's user group is not active,
-	// e.g. while a deactivation event has not been processed yet.
-	names, err := s.userGroupNames(ctx, false)
+	// i.e. it was archived in Zulip and that has not been reconciled yet.
+	userGroups, err := s.userGroupsByID(ctx, false)
 	if err != nil {
 		return nil, err
 	}
 	for _, group := range groups {
-		if _, ok := names[group.ID]; !ok {
-			names, err = s.userGroupNames(ctx, true)
+		if _, ok := userGroups[group.ID]; !ok {
+			userGroups, err = s.userGroupsByID(ctx, true)
 			if err != nil {
 				return nil, err
 			}
@@ -2091,30 +2090,16 @@ func (s *channelGroups) withUserGroupNames(
 	}
 	hydrated := make([]ChannelGroup, 0, len(groups))
 	for _, group := range groups {
-		name, ok := names[group.ID]
+		userGroup, ok := userGroups[group.ID]
 		if !ok {
 			return nil, errChannelGroupNotFound(group.ID)
 		}
 		group = cloneChannelGroup(group)
-		group.Name = name
+		group.Name = userGroup.Name
+		group.Archived = userGroup.Deactivated
 		hydrated = append(hydrated, group)
 	}
 	return hydrated, nil
-}
-
-func (s *channelGroups) userGroupNames(
-	ctx context.Context,
-	includeDeactivated bool,
-) (map[int64]string, error) {
-	resp, _, err := s.base.GetUserGroups(ctx).IncludeDeactivatedGroups(includeDeactivated).Execute()
-	if err != nil {
-		return nil, err
-	}
-	names := make(map[int64]string, len(resp.UserGroups))
-	for _, userGroup := range resp.UserGroups {
-		names[userGroup.ID] = userGroup.Name
-	}
-	return names, nil
 }
 
 func channelGroupFromDB(dbGroup channelgroupdb.ChannelGroup, channelIDs []int64) ChannelGroup {
@@ -2394,6 +2379,10 @@ type ChannelGroup struct {
 	// ChannelFolderID is set when this channel group also manages a Zulip
 	// channel folder.
 	ChannelFolderID *int64 `json:"channel_folder_id,omitempty"`
+
+	// Archived is set when the backing Zulip user group was deactivated
+	// outside the bot and the channel group has not been removed yet.
+	Archived bool `json:"archived,omitempty"`
 }
 
 // =============================================================================
