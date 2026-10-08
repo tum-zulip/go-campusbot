@@ -76,6 +76,7 @@ type state struct {
 	channelFolders     map[int64]zulip.ChannelFolder
 	userGroups         map[int64]userGroupState
 	failures           map[Operation][]error
+	calls              map[Operation]int
 	serialization      *RequestSerialization
 }
 
@@ -287,6 +288,7 @@ func NewClient() Client {
 			}},
 		},
 		failures: map[Operation][]error{},
+		calls:    map[Operation]int{},
 	}}
 }
 func (Client) GetStatistics() statistics.Statistics { return statistics.Statistics{} }
@@ -337,6 +339,15 @@ func (c Client) FailNext(op Operation, err error) {
 		err = fmt.Errorf("%s failed", op)
 	}
 	state.failures[op] = append(state.failures[op], err)
+}
+
+// CallCount reports how many times op has been executed against the mock.
+func (c Client) CallCount(op Operation) int {
+	state := c.ensureState()
+	state.mu.Lock()
+	defer state.mu.Unlock()
+
+	return state.calls[op]
 }
 
 func (c Client) SetOwnUser(user zulip.User) {
@@ -424,6 +435,7 @@ func (c Client) DeleteUserGroupForTest(userGroupID int64) {
 }
 
 func (s *state) failLocked(op Operation) error {
+	s.calls[op]++
 	failures := s.failures[op]
 	if len(failures) == 0 {
 		return nil

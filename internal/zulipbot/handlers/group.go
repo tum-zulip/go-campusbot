@@ -158,11 +158,64 @@ func (h *GroupHandler) namedEmojiGroupMappings(
 	ctx context.Context,
 	mappings []storagedb.EmojiGroupMapping,
 ) ([]namedEmojiGroupMapping, error) {
+	groups, err := h.channelGroupsForMappings(ctx, mappings)
+	if err != nil {
+		return nil, err
+	}
+	return nameEmojiGroupMappings(mappings, groups), nil
+}
+
+// channelGroupsForMappings loads the channel groups referenced by mappings,
+// keyed by ID. Groups that do not exist are absent from the result.
+//
+// Every GetChannelGroup call re-fetches the full Zulip user-group list
+// (including deactivated groups, which the user-groups cache does not cover),
+// so a single GetChannelGroups call is used instead. That call fails as a
+// whole if any local channel group has lost its Zulip user group; fall back to
+// per-group lookups then so the remaining mappings still resolve.
+func (h *GroupHandler) channelGroupsForMappings(
+	ctx context.Context,
+	mappings []storagedb.EmojiGroupMapping,
+) (map[int64]channelgroup.ChannelGroup, error) {
+	groups := make(map[int64]channelgroup.ChannelGroup, len(mappings))
+	if len(mappings) == 0 {
+		return groups, nil
+	}
+	resp, _, err := h.client.GetChannelGroups(ctx).Execute()
+	if err == nil {
+		for _, group := range resp.ChannelGroups {
+			groups[group.ID] = group
+		}
+		return groups, nil
+	}
+	if !errors.Is(err, channelgroup.ErrChannelGroupNotFound) {
+		return nil, fmt.Errorf("list channel groups: %w", err)
+	}
+	for _, mapping := range mappings {
+		if _, ok := groups[mapping.ChannelGroupID]; ok {
+			continue
+		}
+		groupResp, _, err := h.client.GetChannelGroup(ctx, mapping.ChannelGroupID).Execute()
+		if errors.Is(err, channelgroup.ErrChannelGroupNotFound) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("get channel group %d: %w", mapping.ChannelGroupID, err)
+		}
+		groups[mapping.ChannelGroupID] = groupResp.ChannelGroup
+	}
+	return groups, nil
+}
+
+func nameEmojiGroupMappings(
+	mappings []storagedb.EmojiGroupMapping,
+	groups map[int64]channelgroup.ChannelGroup,
+) []namedEmojiGroupMapping {
 	named := make([]namedEmojiGroupMapping, 0, len(mappings))
 	for _, mapping := range mappings {
-		shortName, err := h.shortNameForChannelGroup(ctx, mapping.ChannelGroupID)
-		if err != nil {
-			return nil, err
+		shortName := "missing channel group"
+		if group, ok := groups[mapping.ChannelGroupID]; ok {
+			shortName = group.Name
 		}
 		named = append(named, namedEmojiGroupMapping{
 			EmojiGroupMapping: mapping,
@@ -170,7 +223,7 @@ func (h *GroupHandler) namedEmojiGroupMappings(
 		})
 	}
 	sort.Slice(named, func(i, j int) bool { return named[i].ShortName < named[j].ShortName })
-	return named, nil
+	return named
 }
 
 func announcementMappings(mappings []namedEmojiGroupMapping) []AnnouncementMapping {
@@ -933,21 +986,17 @@ func (h *GroupHandler) handleLs(ctx context.Context) (command.Result, error) {
 	if len(mappings) == 0 {
 		return command.Result{Content: "No channel groups available."}, nil
 	}
-	named, err := h.namedEmojiGroupMappings(ctx, mappings)
+	groups, err := h.channelGroupsForMappings(ctx, mappings)
 	if err != nil {
 		return command.Result{}, err
 	}
+	named := nameEmojiGroupMappings(mappings, groups)
 
 	var b strings.Builder
 	b.WriteString("Available channel groups:\n")
 	for _, m := range named {
-		channelCount := -1
-		groupResp, _, err := h.client.GetChannelGroup(ctx, m.ChannelGroupID).Execute()
-		if err == nil {
-			channelCount = len(groupResp.ChannelGroup.ChannelIDs)
-		}
-		if channelCount >= 0 {
-			fmt.Fprintf(&b, "- `%s` :%s: (%d channel(s))\n", m.ShortName, m.EmojiName, channelCount)
+		if group, ok := groups[m.ChannelGroupID]; ok {
+			fmt.Fprintf(&b, "- `%s` :%s: (%d channel(s))\n", m.ShortName, m.EmojiName, len(group.ChannelIDs))
 		} else {
 			fmt.Fprintf(&b, "- `%s` :%s:\n", m.ShortName, m.EmojiName)
 		}
@@ -1046,10 +1095,11 @@ func (h *GroupHandler) handleMappingList(
 	if len(mappings) == 0 {
 		return command.Result{Content: "No emoji→group mappings configured."}, nil
 	}
-	named, err := h.namedEmojiGroupMappings(ctx, mappings)
+	groups, err := h.channelGroupsForMappings(ctx, mappings)
 	if err != nil {
 		return command.Result{}, err
 	}
+	named := nameEmojiGroupMappings(mappings, groups)
 
 	var b strings.Builder
 	b.WriteString("Emoji→group mappings:\n")
@@ -1059,10 +1109,8 @@ func (h *GroupHandler) handleMappingList(
 			status = "disabled"
 		}
 		annotation := ""
-		exists, checkErr := h.channelGroupExists(ctx, m.ChannelGroupID)
-		if checkErr != nil {
-			annotation = " [check failed]"
-		} else if !exists {
+		_, exists := groups[m.ChannelGroupID]
+		if !exists {
 			annotation = " [missing channel group]"
 		}
 		groupRef := fmt.Sprintf("`%s`", m.ShortName)
@@ -1084,13 +1132,13 @@ func (h *GroupHandler) validateEnabledMappings(
 	if err != nil {
 		return nil, err
 	}
+	groups, err := h.channelGroupsForMappings(ctx, mappings)
+	if err != nil {
+		return nil, err
+	}
 	var invalid []storagedb.EmojiGroupMapping
 	for _, m := range mappings {
-		exists, err := h.channelGroupExists(ctx, m.ChannelGroupID)
-		if err != nil {
-			return nil, fmt.Errorf("verify channel group %d exists: %w", m.ChannelGroupID, err)
-		}
-		if !exists {
+		if _, ok := groups[m.ChannelGroupID]; !ok {
 			invalid = append(invalid, m)
 		}
 	}

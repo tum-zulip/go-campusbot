@@ -1326,6 +1326,90 @@ func TestGroupMappingListAnnotatesMissingChannelGroups(t *testing.T) {
 	}
 }
 
+func TestGroupLsListsChannelCounts(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env, wiID := newCourseTestEnv(t)
+	channelID := seedChannel(t, env.base, "wi-channel")
+	if _, _, err := env.client.UpdateChannelGroupChannels(ctx, wiID).Add([]int64{channelID}).Execute(); err != nil {
+		t.Fatalf("add channel %d to group %d: %v", channelID, wiID, err)
+	}
+	pgdpID := seedChannelGroup(t, env.client, env.base, "PGDP")
+	seedGroupMapping(t, env.queries, "PGDP", "pgdp", pgdpID)
+
+	result, err := env.handler(allowAll{}).Handle(ctx, makeGroupRequest(handlers.GroupLsArgs{}))
+	if err != nil {
+		t.Fatalf("Handle() failed: %v", err)
+	}
+	for _, want := range []string{"- `PGDP` :pgdp: (0 channel(s))", "- `WI` :wi: (1 channel(s))"} {
+		if !strings.Contains(result.Content, want) {
+			t.Errorf("expected %q in output, got:\n%s", want, result.Content)
+		}
+	}
+}
+
+func TestGroupLsReportsGroupsMissingInZulip(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env, _ := newCourseTestEnv(t)
+	pgdpID := seedChannelGroup(t, env.client, env.base, "PGDP")
+	seedGroupMapping(t, env.queries, "PGDP", "pgdp", pgdpID)
+	env.base.DeleteUserGroupForTest(pgdpID)
+
+	result, err := env.handler(allowAll{}).Handle(ctx, makeGroupRequest(handlers.GroupLsArgs{}))
+	if err != nil {
+		t.Fatalf("Handle() failed: %v", err)
+	}
+	for _, want := range []string{"- `missing channel group` :pgdp:", "- `WI` :wi: (0 channel(s))"} {
+		if !strings.Contains(result.Content, want) {
+			t.Errorf("expected %q in output, got:\n%s", want, result.Content)
+		}
+	}
+}
+
+// userGroupFetchesFor runs args against an environment with groupCount
+// mapped channel groups and returns how many times the Zulip user-group list
+// was fetched while handling it.
+func userGroupFetchesFor(t *testing.T, groupCount int, args any) int {
+	t.Helper()
+	ctx := context.Background()
+	env, _ := newCourseTestEnv(t)
+	for i := range groupCount - 1 {
+		name := fmt.Sprintf("G%d", i)
+		groupID := seedChannelGroup(t, env.client, env.base, name)
+		seedGroupMapping(t, env.queries, name, strings.ToLower(name), groupID)
+	}
+	setAnnouncementConfig(t, env.queries, seedChannel(t, env.base, "announcements"), "groups")
+
+	before := env.base.CallCount(zulipmock.OperationGetUserGroups)
+	if _, err := env.handler(allowAll{}).Handle(ctx, makeGroupRequest(args)); err != nil {
+		t.Fatalf("Handle(%T) failed: %v", args, err)
+	}
+	return env.base.CallCount(zulipmock.OperationGetUserGroups) - before
+}
+
+func TestGroupCommandsDoNotFetchUserGroupsPerMapping(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		args any
+	}{
+		{name: "ls", args: handlers.GroupLsArgs{}},
+		{name: "remove", args: handlers.GroupRemoveArgs{ShortName: "WI"}},
+		{name: "mapping list", args: handlers.GroupMappingListArgs{}},
+		{name: "announce", args: handlers.GroupAnnounceArgs{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			few := userGroupFetchesFor(t, 2, tc.args)
+			many := userGroupFetchesFor(t, 10, tc.args)
+			if few != many {
+				t.Errorf("user-group fetches grew with mapping count: %d for 2 groups, %d for 10", few, many)
+			}
+		})
+	}
+}
+
 func TestGroupInvalidSubcommand(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
