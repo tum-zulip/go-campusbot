@@ -2596,37 +2596,6 @@ func TestUnsubscribeFromChannelGroupKeepsSharedChannelWhenUserStillInOtherGroup(
 	}
 }
 
-func TestGetChannelGroupsResolvesActiveNamesWithoutListingDeactivatedGroups(t *testing.T) {
-	ctx := context.Background()
-	base := zulipmock.NewClient()
-	client := newTestClient(t, base)
-	for _, name := range []string{"first", "second"} {
-		if _, _, err := client.CreateChannelGroup(ctx).
-			Name(name).
-			InitialSubscribers(zulip.UserIDsAsPrincipals(101)).
-			Execute(); err != nil {
-			t.Fatalf("CreateChannelGroup(%q) error = %v", name, err)
-		}
-	}
-
-	before := base.DeactivatedUserGroupsFetchCount()
-	resp, _, err := client.GetChannelGroups(ctx).Execute()
-	if err != nil {
-		t.Fatalf("GetChannelGroups error = %v", err)
-	}
-	if len(resp.ChannelGroups) != 2 ||
-		resp.ChannelGroups[0].Name != "first" ||
-		resp.ChannelGroups[1].Name != "second" {
-		t.Fatalf("channel groups = %+v, want first and second", resp.ChannelGroups)
-	}
-	if _, _, err := client.GetChannelGroup(ctx, resp.ChannelGroups[0].ID).Execute(); err != nil {
-		t.Fatalf("GetChannelGroup error = %v", err)
-	}
-	if got := base.DeactivatedUserGroupsFetchCount() - before; got != 0 {
-		t.Fatalf("listed deactivated user groups %d time(s), want 0", got)
-	}
-}
-
 func TestExternallyDeactivatedUserGroupResolvesUntilChannelGroupIsRemoved(t *testing.T) {
 	ctx := context.Background()
 	base := zulipmock.NewClient()

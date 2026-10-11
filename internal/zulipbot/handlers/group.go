@@ -182,11 +182,10 @@ func (h *GroupHandler) namedEmojiGroupMappings(
 // channelGroupsForMappings loads the channel groups referenced by mappings,
 // keyed by ID. Groups that do not exist are absent from the result.
 //
-// Every GetChannelGroup call re-fetches the full Zulip user-group list
-// (including deactivated groups, which the user-groups cache does not cover),
-// so a single GetChannelGroups call is used instead. That call fails as a
-// whole if any local channel group has lost its Zulip user group; fall back to
-// per-group lookups then so the remaining mappings still resolve.
+// A single GetChannelGroups call is used instead of one GetChannelGroup call
+// per mapping. It fails as a whole if any local channel group has lost its
+// Zulip user group; fall back to per-group lookups then so the remaining
+// mappings still resolve.
 func (h *GroupHandler) channelGroupsForMappings(
 	ctx context.Context,
 	mappings []storagedb.EmojiGroupMapping,
@@ -249,8 +248,7 @@ func nameEmojiGroupMappings(
 // archivedUserGroups returns the archived Zulip user groups backing mappings
 // whose channel group no longer exists. A channel group shares its ID with its
 // user group, and archived user groups keep their name, so admin views can
-// still name such mappings. This lists deactivated user groups, which is not
-// cached, so it only runs when such mappings exist.
+// still name such mappings.
 func (h *GroupHandler) archivedUserGroups(
 	ctx context.Context,
 	mappings []storagedb.EmojiGroupMapping,

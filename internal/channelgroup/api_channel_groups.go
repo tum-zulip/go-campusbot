@@ -22,6 +22,7 @@ import (
 
 	"github.com/tum-zulip/go-campusbot/internal/callorigin"
 	channelgroupdb "github.com/tum-zulip/go-campusbot/internal/channelgroup/db"
+	"github.com/tum-zulip/go-campusbot/internal/zulipcache"
 	"github.com/tum-zulip/go-zulip/zulip"
 	"github.com/tum-zulip/go-zulip/zulip/api/channels"
 	realtimeevents "github.com/tum-zulip/go-zulip/zulip/api/real_time_events"
@@ -702,7 +703,7 @@ func (s *channelGroups) removeDeletedUserGroupChannelGroup(
 	// Bypass the user-groups cache: it consumes its own event queue and may
 	// not have applied this deactivation yet, which would make the group look
 	// active and the event stale.
-	userGroups, err := s.userGroupsByID(ctx, true)
+	userGroups, err := s.userGroupsByID(zulipcache.WithoutCache(ctx), true)
 	if err != nil {
 		return fmt.Errorf("verify deleted user group %d is still missing: %w", userGroupID, err)
 	}
@@ -2071,22 +2072,12 @@ func (s *channelGroups) withUserGroupNames(
 	if len(groups) == 0 {
 		return groups, nil
 	}
-	// The active user-group list is served by the user-groups cache; listing
-	// deactivated groups is not, and returns every group the realm ever had.
-	// Only fall back to it when a channel group's user group is not active,
-	// i.e. it was archived in Zulip and that has not been reconciled yet.
-	userGroups, err := s.userGroupsByID(ctx, false)
+	// Include deactivated groups: a channel group whose user group was
+	// archived in Zulip stays until that is reconciled, and is reported as
+	// archived meanwhile.
+	userGroups, err := s.userGroupsByID(ctx, true)
 	if err != nil {
 		return nil, err
-	}
-	for _, group := range groups {
-		if _, ok := userGroups[group.ID]; !ok {
-			userGroups, err = s.userGroupsByID(ctx, true)
-			if err != nil {
-				return nil, err
-			}
-			break
-		}
 	}
 	hydrated := make([]ChannelGroup, 0, len(groups))
 	for _, group := range groups {

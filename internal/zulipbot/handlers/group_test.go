@@ -1400,9 +1400,8 @@ func TestGroupLsHidesGroupsMissingInZulip(t *testing.T) {
 
 // userGroupFetchesFor runs args against an environment with groupCount
 // mapped channel groups and returns how many times the Zulip user-group list
-// was fetched while handling it, and how many of those fetches included
-// deactivated groups (which the user-groups cache cannot serve).
-func userGroupFetchesFor(t *testing.T, groupCount int, args any) (int, int) {
+// was fetched while handling it.
+func userGroupFetchesFor(t *testing.T, groupCount int, args any) int {
 	t.Helper()
 	ctx := context.Background()
 	env, _ := newCourseTestEnv(t)
@@ -1414,12 +1413,10 @@ func userGroupFetchesFor(t *testing.T, groupCount int, args any) (int, int) {
 	setAnnouncementConfig(t, env.queries, seedChannel(t, env.base, "announcements"), "groups")
 
 	before := env.base.CallCount(zulipmock.OperationGetUserGroups)
-	beforeDeactivated := env.base.DeactivatedUserGroupsFetchCount()
 	if _, err := env.handler(allowAll{}).Handle(ctx, makeGroupRequest(args)); err != nil {
 		t.Fatalf("Handle(%T) failed: %v", args, err)
 	}
-	return env.base.CallCount(zulipmock.OperationGetUserGroups) - before,
-		env.base.DeactivatedUserGroupsFetchCount() - beforeDeactivated
+	return env.base.CallCount(zulipmock.OperationGetUserGroups) - before
 }
 
 func TestGroupCommandsDoNotFetchUserGroupsPerMapping(t *testing.T) {
@@ -1435,13 +1432,10 @@ func TestGroupCommandsDoNotFetchUserGroupsPerMapping(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			few, _ := userGroupFetchesFor(t, 2, tc.args)
-			many, uncached := userGroupFetchesFor(t, 10, tc.args)
+			few := userGroupFetchesFor(t, 2, tc.args)
+			many := userGroupFetchesFor(t, 10, tc.args)
 			if few != many {
 				t.Errorf("user-group fetches grew with mapping count: %d for 2 groups, %d for 10", few, many)
-			}
-			if uncached != 0 {
-				t.Errorf("listed deactivated user groups %d time(s), want 0", uncached)
 			}
 		})
 	}
