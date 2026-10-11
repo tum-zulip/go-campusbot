@@ -3,6 +3,7 @@ package channelgroup
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"log/slog"
 	"os"
 	"testing"
@@ -123,5 +124,37 @@ func TestChannelArchiveEventsRemoveChannelFromChannelGroups(t *testing.T) {
 				t.Fatalf("channel IDs = %v, want archived channel removed", group.ChannelIDs)
 			}
 		})
+	}
+}
+
+func TestUserGroupDeactivationEventRemovesChannelGroup(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	base := zulipmock.NewClient()
+	service := newInternalTestService(t, base)
+
+	created, _, err := base.CreateUserGroup(ctx).Name("SIX").Description("").Members([]int64{1}).Execute()
+	if err != nil {
+		t.Fatalf("CreateUserGroup: %v", err)
+	}
+	if err := service.ImportZulipUserGroup(ctx, created.GroupID); err != nil {
+		t.Fatalf("ImportZulipUserGroup: %v", err)
+	}
+	if _, _, err := base.DeactivateUserGroup(ctx, created.GroupID).Execute(); err != nil {
+		t.Fatalf("DeactivateUserGroup: %v", err)
+	}
+
+	deactivated := true
+	event := events.UserGroupUpdateEvent{
+		GroupID: created.GroupID,
+		Data:    events.UserGroupUpdateData{Deactivated: &deactivated},
+	}
+	if err := service.handleChannelGroupEvent(ctx, event); err != nil {
+		t.Fatalf("handleChannelGroupEvent: %v", err)
+	}
+
+	if _, err := service.getGroup(ctx, created.GroupID); !errors.Is(err, ErrChannelGroupNotFound) {
+		t.Fatalf("getGroup error = %v, want ErrChannelGroupNotFound", err)
 	}
 }

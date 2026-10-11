@@ -356,7 +356,7 @@ type streamsTransport struct {
 }
 
 func (t streamsTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	if !isCacheableStreamsRequest(req) {
+	if !isCacheableStreamsRequest(req) || bypassed(req) {
 		return t.base.RoundTrip(req)
 	}
 	if body := t.cache.cachedBody(); body != nil {
@@ -381,7 +381,6 @@ func (c *Streams) cachedBody() []byte {
 	return append([]byte(nil), current.body...)
 }
 
-//nolint:dupl // Response caching intentionally mirrors the user-groups cache.
 func (c *Streams) storeResponse(resp *http.Response) (*http.Response, error) {
 	if resp == nil || resp.Body == nil || resp.StatusCode != http.StatusOK {
 		statusCode := 0

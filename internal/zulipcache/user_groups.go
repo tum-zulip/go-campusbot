@@ -26,6 +26,10 @@ const (
 	deleteQueueTimeout   = 5 * time.Second
 )
 
+// errResponseNotCacheable reports a user-groups response that was passed
+// through without being cached, such as an API error.
+var errResponseNotCacheable = errors.New("user-groups response not cacheable")
+
 type UserGroups struct {
 	ttl   time.Duration
 	state atomic.Pointer[userGroupsState]
@@ -36,10 +40,43 @@ type UserGroups struct {
 	logger *slog.Logger
 }
 
+// userGroupsState holds every user group of the realm, including deactivated
+// ones, so both variants of the listing can be served from one snapshot.
 type userGroupsState struct {
-	expiresAt time.Time
-	groups    []zulip.UserGroup
-	body      []byte
+	expiresAt  time.Time
+	groups     []zulip.UserGroup
+	activeBody []byte
+	allBody    []byte
+}
+
+func newUserGroupsState(expiresAt time.Time, groups []zulip.UserGroup) (*userGroupsState, error) {
+	active := make([]zulip.UserGroup, 0, len(groups))
+	for _, group := range groups {
+		if !group.Deactivated {
+			active = append(active, group)
+		}
+	}
+	activeBody, err := marshalUserGroups(active)
+	if err != nil {
+		return nil, err
+	}
+	allBody, err := marshalUserGroups(groups)
+	if err != nil {
+		return nil, err
+	}
+	return &userGroupsState{
+		expiresAt:  expiresAt,
+		groups:     append([]zulip.UserGroup(nil), groups...),
+		activeBody: activeBody,
+		allBody:    allBody,
+	}, nil
+}
+
+func (s *userGroupsState) body(includeDeactivated bool) []byte {
+	if includeDeactivated {
+		return s.allBody
+	}
+	return s.activeBody
 }
 
 type userGroupsResponse struct {
@@ -176,7 +213,7 @@ func (c *UserGroups) consumeQueue(ctx context.Context, base client.Client) error
 		EventTypes([]events.EventType{events.EventTypeUserGroup}).
 		ClientCapabilities(map[string]interface{}{
 			"notification_settings_null": true,
-			"include_deactivated_groups": false,
+			"include_deactivated_groups": true,
 		}).
 		Execute()
 	if err != nil {
@@ -243,8 +280,7 @@ func waitRetry(ctx context.Context) bool {
 }
 
 func (c *UserGroups) upsert(group zulip.UserGroup) {
-	if group.ID == 0 || group.Deactivated {
-		c.remove(group.ID)
+	if group.ID == 0 {
 		return
 	}
 	c.mutate(func(groups []zulip.UserGroup) []zulip.UserGroup {
@@ -280,10 +316,7 @@ func (c *UserGroups) update(event events.UserGroupUpdateEvent) {
 				continue
 			}
 			if event.Data.Deactivated != nil {
-				if *event.Data.Deactivated {
-					return append(groups[:i], groups[i+1:]...)
-				}
-				groups[i].Deactivated = false
+				groups[i].Deactivated = *event.Data.Deactivated
 			}
 			if event.Data.Name != nil {
 				groups[i].Name = *event.Data.Name
@@ -389,16 +422,10 @@ func (c *UserGroups) mutate(fn func([]zulip.UserGroup) []zulip.UserGroup) {
 			return
 		}
 		groups := append([]zulip.UserGroup(nil), current.groups...)
-		nextGroups := fn(groups)
-		nextBody, err := marshalUserGroups(nextGroups)
+		next, err := newUserGroupsState(current.expiresAt, fn(groups))
 		if err != nil {
 			c.invalidate("marshal_failed", "error", err)
 			return
-		}
-		next := &userGroupsState{
-			expiresAt: current.expiresAt,
-			groups:    append([]zulip.UserGroup(nil), nextGroups...),
-			body:      nextBody,
 		}
 		if c.state.CompareAndSwap(current, next) {
 			return
@@ -412,20 +439,38 @@ type userGroupsTransport struct {
 }
 
 func (t userGroupsTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	if !isCacheableUserGroupsRequest(req) {
+	includeDeactivated, ok := cacheableUserGroupsRequest(req)
+	if !ok || bypassed(req) {
 		return t.base.RoundTrip(req)
 	}
-	if body := t.cache.cachedBody(); body != nil {
+	if body := t.cache.cachedBody(includeDeactivated); body != nil {
 		return cachedResponse(req, body), nil
 	}
-	resp, err := t.base.RoundTrip(req)
+	// Always fetch every group, deactivated ones included, so the snapshot
+	// can answer both variants of the request.
+	resp, err := t.base.RoundTrip(withAllUserGroups(req))
 	if err != nil {
 		return resp, err
 	}
-	return t.cache.storeResponse(resp)
+	stored, err := t.cache.storeResponse(resp)
+	if errors.Is(err, errResponseNotCacheable) {
+		return resp, nil
+	}
+	if err != nil {
+		return resp, err
+	}
+	return cachedResponse(req, stored.body(includeDeactivated)), nil
 }
 
-func (c *UserGroups) cachedBody() []byte {
+func withAllUserGroups(req *http.Request) *http.Request {
+	clone := req.Clone(req.Context())
+	query := clone.URL.Query()
+	query.Set("include_deactivated_groups", "true")
+	clone.URL.RawQuery = query.Encode()
+	return clone
+}
+
+func (c *UserGroups) cachedBody(includeDeactivated bool) []byte {
 	current := c.state.Load()
 	if current == nil {
 		return nil
@@ -434,18 +479,20 @@ func (c *UserGroups) cachedBody() []byte {
 		c.invalidate("cached_body_expired")
 		return nil
 	}
-	return append([]byte(nil), current.body...)
+	return append([]byte(nil), current.body(includeDeactivated)...)
 }
 
-//nolint:dupl // Response caching intentionally mirrors the streams cache.
-func (c *UserGroups) storeResponse(resp *http.Response) (*http.Response, error) {
+// storeResponse caches a successful listing of every user group. It returns
+// errResponseNotCacheable when resp is not cacheable; resp's body stays
+// readable either way.
+func (c *UserGroups) storeResponse(resp *http.Response) (*userGroupsState, error) {
 	if resp == nil || resp.Body == nil || resp.StatusCode != http.StatusOK {
 		statusCode := 0
 		if resp != nil {
 			statusCode = resp.StatusCode
 		}
 		c.invalidate("store_response_not_cacheable", "status_code", statusCode)
-		return resp, nil
+		return nil, errResponseNotCacheable
 	}
 	body, err := io.ReadAll(resp.Body)
 	if closeErr := resp.Body.Close(); err == nil {
@@ -453,7 +500,7 @@ func (c *UserGroups) storeResponse(resp *http.Response) (*http.Response, error) 
 	}
 	if err != nil {
 		c.invalidate("store_response_read_failed", "error", err)
-		return resp, err
+		return nil, err
 	}
 	resp.Body = io.NopCloser(bytes.NewReader(body))
 	resp.ContentLength = int64(len(body))
@@ -461,29 +508,41 @@ func (c *UserGroups) storeResponse(resp *http.Response) (*http.Response, error) 
 	var decoded userGroupsResponse
 	if err := json.Unmarshal(body, &decoded); err != nil || decoded.Result != "success" {
 		c.invalidate("store_response_decode_failed", "result", decoded.Result, "error", err)
-		return resp, nil
+		return nil, errResponseNotCacheable
 	}
-	c.state.Store(&userGroupsState{
-		expiresAt: time.Now().Add(c.ttl),
-		groups:    append([]zulip.UserGroup(nil), decoded.UserGroups...),
-		body:      append([]byte(nil), body...),
-	})
-	return resp, nil
+	state, err := newUserGroupsState(time.Now().Add(c.ttl), decoded.UserGroups)
+	if err != nil {
+		c.invalidate("marshal_failed", "error", err)
+		return nil, errResponseNotCacheable
+	}
+	c.state.Store(state)
+	return state, nil
 }
 
-func isCacheableUserGroupsRequest(req *http.Request) bool {
+// cacheableUserGroupsRequest reports whether req asks for deactivated user
+// groups too, and whether it is a user-groups listing the cache can serve.
+func cacheableUserGroupsRequest(req *http.Request) (bool, bool) {
 	if req == nil || req.Method != http.MethodGet || req.URL == nil {
-		return false
+		return false, false
 	}
 	if req.URL.Path != "/api/v1/user_groups" {
-		return false
+		return false, false
 	}
-	query := req.URL.Query()
-	values, ok := query["include_deactivated_groups"]
+	values, ok := req.URL.Query()["include_deactivated_groups"]
 	if !ok {
-		return true
+		return false, true
 	}
-	return len(values) == 1 && values[0] == "false"
+	if len(values) != 1 {
+		return false, false
+	}
+	switch values[0] {
+	case "true":
+		return true, true
+	case "false":
+		return false, true
+	default:
+		return false, false
+	}
 }
 
 func cachedResponse(req *http.Request, body []byte) *http.Response {

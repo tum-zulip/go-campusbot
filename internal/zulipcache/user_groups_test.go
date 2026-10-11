@@ -2,6 +2,7 @@
 package zulipcache
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"strings"
@@ -112,6 +113,110 @@ func TestUserGroupsHandleEventUpdatesCachedBody(t *testing.T) {
 	if !strings.Contains(string(body), `"name":"two"`) {
 		t.Fatalf("added group missing: %s", body)
 	}
+}
+
+func TestUserGroupsTransportServesBothVariantsFromOneFetch(t *testing.T) {
+	var calls atomic.Int64
+	cache := NewUserGroups(time.Minute)
+	client := &http.Client{Transport: cache.RoundTripper(roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		calls.Add(1)
+		if got := req.URL.Query().Get("include_deactivated_groups"); got != "true" {
+			t.Errorf("upstream include_deactivated_groups = %q, want true", got)
+		}
+		return jsonResponse(`{"result":"success","msg":"","user_groups":[` +
+			`{"id":1,"name":"active"},{"id":2,"name":"archived","deactivated":true}]}`), nil
+	}))}
+
+	for _, query := range []string{"", "?include_deactivated_groups=false"} {
+		body := getBody(t, client, "https://zulip.example/api/v1/user_groups"+query)
+		if !strings.Contains(body, `"name":"active"`) || strings.Contains(body, `"name":"archived"`) {
+			t.Errorf("active listing %q = %s, want only the active group", query, body)
+		}
+	}
+	body := getBody(t, client, "https://zulip.example/api/v1/user_groups?include_deactivated_groups=true")
+	if !strings.Contains(body, `"name":"active"`) || !strings.Contains(body, `"name":"archived"`) {
+		t.Errorf("full listing = %s, want both groups", body)
+	}
+
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("base calls = %d, want 1", got)
+	}
+}
+
+func TestUserGroupsHandleEventTracksDeactivation(t *testing.T) {
+	cache := NewUserGroups(time.Minute)
+	client := &http.Client{Transport: cache.RoundTripper(roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return jsonResponse(`{"result":"success","msg":"","user_groups":[{"id":1,"name":"one"}]}`), nil
+	}))}
+	const (
+		activeURL = "https://zulip.example/api/v1/user_groups"
+		allURL    = "https://zulip.example/api/v1/user_groups?include_deactivated_groups=true"
+	)
+	getBody(t, client, activeURL)
+
+	deactivated := true
+	cache.HandleEvent(events.UserGroupUpdateEvent{
+		GroupID: 1,
+		Data:    events.UserGroupUpdateData{Deactivated: &deactivated},
+	})
+	if body := getBody(t, client, activeURL); strings.Contains(body, `"id":1`) {
+		t.Errorf("active listing after deactivation = %s, want group 1 left out", body)
+	}
+	if body := getBody(t, client, allURL); !strings.Contains(body, `"deactivated":true`) {
+		t.Errorf("full listing after deactivation = %s, want group 1 marked deactivated", body)
+	}
+
+	deactivated = false
+	cache.HandleEvent(events.UserGroupUpdateEvent{
+		GroupID: 1,
+		Data:    events.UserGroupUpdateData{Deactivated: &deactivated},
+	})
+	if body := getBody(t, client, activeURL); !strings.Contains(body, `"id":1`) {
+		t.Errorf("active listing after reactivation = %s, want group 1", body)
+	}
+}
+
+func TestUserGroupsTransportWithoutCacheReachesZulip(t *testing.T) {
+	var calls atomic.Int64
+	cache := NewUserGroups(time.Minute)
+	client := &http.Client{Transport: cache.RoundTripper(roundTripFunc(func(*http.Request) (*http.Response, error) {
+		calls.Add(1)
+		return jsonResponse(`{"result":"success","msg":"","user_groups":[]}`), nil
+	}))}
+	const url = "https://zulip.example/api/v1/user_groups?include_deactivated_groups=true"
+	getBody(t, client, url)
+
+	req, err := http.NewRequestWithContext(WithoutCache(context.Background()), http.MethodGet, url, nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("GET user groups without cache: %v", err)
+	}
+	if err := resp.Body.Close(); err != nil {
+		t.Fatalf("close response: %v", err)
+	}
+
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("base calls = %d, want 2", got)
+	}
+}
+
+func getBody(t *testing.T, client *http.Client, url string) string {
+	t.Helper()
+	resp, err := client.Get(url)
+	if err != nil {
+		t.Fatalf("GET %s: %v", url, err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if closeErr := resp.Body.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	return string(body)
 }
 
 type roundTripFunc func(*http.Request) (*http.Response, error)

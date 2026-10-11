@@ -369,7 +369,7 @@ func TestCreateChannelGroupRollsBackUserGroupOnError(t *testing.T) {
 		t.Fatalf("CreateChannelGroup error = nil, want failure")
 	}
 
-	groups, _, err := base.GetUserGroups(ctx).Execute()
+	groups, _, err := base.GetUserGroups(ctx).IncludeDeactivatedGroups(true).Execute()
 	if err != nil {
 		t.Fatalf("GetUserGroups error = %v", err)
 	}
@@ -2593,5 +2593,49 @@ func TestUnsubscribeFromChannelGroupKeepsSharedChannelWhenUserStillInOtherGroup(
 		want,
 	) {
 		t.Errorf("exclusive channel B subscribers after full unsubscribe = %v, want %v", got, want)
+	}
+}
+
+func TestExternallyDeactivatedUserGroupResolvesUntilChannelGroupIsRemoved(t *testing.T) {
+	ctx := context.Background()
+	base := zulipmock.NewClient()
+	database := newTestDatabase(t)
+	client, err := channelgroup.NewClient(ctx, base, database,
+		channelgroup.WithLogger(slog.New(slog.DiscardHandler)),
+	)
+	if err != nil {
+		t.Fatalf("NewClient error = %v", err)
+	}
+	created, _, err := client.CreateChannelGroup(ctx).
+		Name("archived outside the bot").
+		InitialSubscribers(zulip.UserIDsAsPrincipals(101)).
+		Execute()
+	if err != nil {
+		t.Fatalf("CreateChannelGroup error = %v", err)
+	}
+
+	if _, _, err = base.DeactivateUserGroup(ctx, created.ChannelGroupID).Execute(); err != nil {
+		t.Fatalf("DeactivateUserGroup error = %v", err)
+	}
+
+	// Until the deactivation event is processed the channel group still exists
+	// locally; its name must resolve from the deactivated user group.
+	resp, _, err := client.GetChannelGroups(ctx).Execute()
+	if err != nil {
+		t.Fatalf("GetChannelGroups error = %v", err)
+	}
+	if len(resp.ChannelGroups) != 1 || resp.ChannelGroups[0].Name != "archived outside the bot" {
+		t.Fatalf("channel groups = %+v, want the deactivated group by name", resp.ChannelGroups)
+	}
+
+	client, err = channelgroup.NewClient(ctx, base, database,
+		channelgroup.WithLogger(slog.New(slog.DiscardHandler)),
+	)
+	if err != nil {
+		t.Fatalf("NewClient (re-init) error = %v", err)
+	}
+	_, _, err = client.GetChannelGroup(ctx, created.ChannelGroupID).Execute()
+	if !errors.Is(err, channelgroup.ErrChannelGroupNotFound) {
+		t.Fatalf("GetChannelGroup error = %v, want ErrChannelGroupNotFound", err)
 	}
 }
